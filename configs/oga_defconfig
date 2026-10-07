@@ -1,0 +1,57 @@
+# Firmware: ODROID-GO Advance (rev 1.0 / 1.1 Black Edition) and ODROID-GO Super.
+# The board revision is detected by U-Boot at runtime (SARADC ch0) and the
+# matching dtb is picked from the boot partition via extlinux "fdtdir".
+#
+# Paths are relative to the SDK root. *_DEFCONFIG is either an in-tree
+# defconfig name or a path to a defconfig file (anything containing '/').
+
+BOARD_DIR := board/oga
+
+# --- Trusted Firmware-A (BL31) ---
+TFA_SRC  := src/tf-a
+TFA_PLAT := px30
+
+# --- U-Boot ---
+UBOOT_SRC       := src/u-boot
+UBOOT_DEFCONFIG := odroid-go2_defconfig
+UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/oga.config
+# "tf-a" builds BL31 from TFA_SRC; otherwise a path to a bl31 ELF,
+# e.g. $(BOARD_DIR)/rkbin/bin/rk3326_bl31_v1.34.elf (Rockchip rkbin blob)
+UBOOT_BL31      := tf-a
+UBOOT_IMAGE     := u-boot-rockchip.bin
+
+# Rockchip legacy boot path. The factory SPI flash of the OGA Black Edition
+# holds Rockchip's DDR blob + miniloader, which BootROM runs before the SD
+# card; the miniloader then loads uboot.img (sector 16384) and trust.img
+# (sector 24576) from SD. With RK_LEGACY=y both are packed from the same
+# mainline U-Boot. With an empty SPI flash BootROM runs the mainline
+# idbloader at sector 64 instead, so the image boots either way.
+RK_LEGACY     := y
+RKBIN_DIR     := $(BOARD_DIR)/rkbin
+# BL31 for trust.img (the miniloader hands over in Rockchip's own format)
+RK_TRUST_BL31 := $(BOARD_DIR)/rkbin/bin/rk3326_bl31_v1.34.elf
+
+# --- Linux ---
+LINUX_SRC       := src/linux
+LINUX_DEFCONFIG := defconfig
+LINUX_FRAGMENTS := $(BOARD_DIR)/linux/oga.config
+LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
+                   rockchip/rk3326-odroid-go2-v11.dtb \
+                   rockchip/rk3326-odroid-go3.dtb
+LINUX_CMDLINE   := rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0
+
+# --- Root filesystem (Buildroot) ---
+BUILDROOT_SRC       := src/buildroot
+BUILDROOT_EXTERNAL  := $(BOARD_DIR)/buildroot
+BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/configs/oga_defconfig
+
+# --- SD card image ---
+# Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
+#         [uboot.img @8M][trust.img @12M][p1 FAT32 BOOT @16M][p2 ext4 rootfs]
+IMAGE_NAME          := oga
+IMAGE_UBOOT_SECTOR  := 64
+IMAGE_BOOT_SIZE_MB  := 128
+# Free space added on top of the rootfs contents
+IMAGE_ROOTFS_FREE_MB := 256
+# MBR disk identifier; root= is passed as PARTUUID=<id>-02
+IMAGE_DISK_ID       := 0x4f474131

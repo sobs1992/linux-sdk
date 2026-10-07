@@ -1,0 +1,12 @@
+[submodule "src/tf-a"]
+	path = src/tf-a
+	url = https://github.com/ARM-software/arm-trusted-firmware.git
+[submodule "src/u-boot"]
+	path = src/u-boot
+	url = https://source.denx.de/u-boot/u-boot.git
+[submodule "src/linux"]
+	path = src/linux
+	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+[submodule "src/buildroot"]
+	path = src/buildroot
+	url = https://gitlab.com/buildroot.org/buildroot.git
