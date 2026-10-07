@@ -4,8 +4,10 @@
 #
 # Paths are relative to the SDK root. *_DEFCONFIG is either an in-tree
 # defconfig name or a path to a defconfig file (anything containing '/').
+# $(IMAGES_DIR) and $(LINUX_INSTALL) point to this firmware's build outputs.
 
-BOARD_DIR := board/oga
+BOARD_DIR     := board/oga
+CROSS_COMPILE := aarch64-linux-gnu-
 
 # --- Trusted Firmware-A (BL31) ---
 TFA_SRC  := src/tf-a
@@ -18,7 +20,8 @@ UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/oga.config
 # "tf-a" builds BL31 from TFA_SRC; otherwise a path to a bl31 ELF,
 # e.g. $(BOARD_DIR)/rkbin/bin/rk3326_bl31_v1.34.elf (Rockchip rkbin blob)
 UBOOT_BL31      := tf-a
-UBOOT_IMAGE     := u-boot-rockchip.bin
+# Files copied from the U-Boot build dir to images/
+UBOOT_IMAGES    := u-boot-rockchip.bin
 
 # Rockchip legacy boot path. The factory SPI flash of the OGA Black Edition
 # holds Rockchip's DDR blob + miniloader, which BootROM runs before the SD
@@ -33,6 +36,8 @@ RK_TRUST_BL31 := $(BOARD_DIR)/rkbin/bin/rk3326_bl31_v1.34.elf
 
 # --- Linux ---
 LINUX_SRC       := src/linux
+LINUX_ARCH      := arm64
+LINUX_IMAGE     := Image
 LINUX_DEFCONFIG := defconfig
 LINUX_FRAGMENTS := $(BOARD_DIR)/linux/oga.config
 LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
@@ -42,16 +47,22 @@ LINUX_CMDLINE   := rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:
 
 # --- Root filesystem (Buildroot) ---
 BUILDROOT_SRC       := src/buildroot
-BUILDROOT_EXTERNAL  := $(BOARD_DIR)/buildroot
-BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/configs/oga_defconfig
+BUILDROOT_EXTERNAL  := board/common/buildroot
+BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
 #         [uboot.img @8M][trust.img @12M][p1 FAT32 BOOT @16M][p2 ext4 rootfs]
-IMAGE_NAME          := oga
-IMAGE_UBOOT_SECTOR  := 64
+IMAGE_NAME := oga
+# Raw blobs below 16M: file@sector
+IMAGE_RAW  := $(IMAGES_DIR)/u-boot-rockchip.bin@64
+ifeq ($(RK_LEGACY),y)
+IMAGE_RAW  += $(IMAGES_DIR)/uboot.img@16384 $(IMAGES_DIR)/trust.img@24576
+endif
+# U-Boot builds fdtfile as rockchip/<name>.dtb
+IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB  := 128
 # Free space added on top of the rootfs contents
 IMAGE_ROOTFS_FREE_MB := 256
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
-IMAGE_DISK_ID       := 0x4f474131
+IMAGE_DISK_ID := 0x4f474131

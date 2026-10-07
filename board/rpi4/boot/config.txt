@@ -1,0 +1,5 @@
+# Raspberry Pi firmware: load mainline U-Boot (64-bit), which boots extlinux.conf
+arm_64bit=1
+kernel=u-boot.bin
+# Fixed core clock for the mini UART on GPIO14/15 (console ttyS1)
+enable_uart=1

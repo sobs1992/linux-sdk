@@ -1,0 +1,55 @@
+# Firmware: Raspberry Pi 1 (A, A+, B, B+), Zero, Zero W, CM1 (BCM2835, ARM1176).
+# The GPU firmware (bootcode.bin, start.elf) reads config.txt and starts
+# mainline U-Boot as the "kernel"; U-Boot picks the dtb by board revision
+# (fdtfile=bcm2835-rpi-*.dtb, without a vendor dir) and boots extlinux.conf.
+# The firmware must hand U-Boot a device tree, but looks for the downstream
+# names (bcm2708-rpi-*.dtb), so the mainline dtbs are copied under them too.
+#
+# See configs/oga_defconfig for the meaning of the variables.
+
+BOARD_DIR     := board/rpi1
+CROSS_COMPILE := arm-linux-gnueabihf-
+
+# --- U-Boot ---
+UBOOT_SRC       := src/u-boot
+UBOOT_DEFCONFIG := rpi_defconfig
+UBOOT_IMAGES    := u-boot.bin
+
+# --- Raspberry Pi GPU firmware ---
+BOOTFW_NAME  := rpi-firmware-1.20260915
+BOOTFW_URL   := https://github.com/raspberrypi/firmware/raw/1.20260915/boot
+BOOTFW_FILES := bootcode.bin start.elf fixup.dat LICENCE.broadcom
+BOOTFW_HASH  := board/common/rpi-firmware.sha256
+
+# --- Linux ---
+LINUX_SRC       := src/linux
+LINUX_ARCH      := arm
+LINUX_IMAGE     := zImage
+LINUX_DEFCONFIG := bcm2835_defconfig
+LINUX_FRAGMENTS := $(BOARD_DIR)/linux/rpi1.config
+LINUX_DTBS      := $(addprefix broadcom/bcm2835-rpi-,a.dtb a-plus.dtb b.dtb b-rev2.dtb \
+                   b-plus.dtb zero.dtb zero-w.dtb cm1-io1.dtb)
+LINUX_CMDLINE   := rootwait rw console=tty1 console=ttyAMA0,115200n8
+
+# --- Root filesystem (Buildroot) ---
+BUILDROOT_SRC       := src/buildroot
+BUILDROOT_EXTERNAL  := board/common/buildroot
+BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+
+# --- SD card image ---
+# Layout: [MBR][p1 FAT32 BOOT @16M: firmware, config.txt, u-boot.bin,
+#          zImage, dtbs][p2 ext4 rootfs]
+IMAGE_NAME := rpi1
+RPI1_DTBS  := $(LINUX_INSTALL)/dtbs/broadcom/bcm2835-rpi
+IMAGE_BOOT_FILES := $(addprefix $(IMAGES_DIR)/,$(BOOTFW_FILES) u-boot.bin) \
+                    $(BOARD_DIR)/boot/config.txt \
+                    $(RPI1_DTBS)-b-rev2.dtb:bcm2708-rpi-b.dtb \
+                    $(RPI1_DTBS)-b.dtb:bcm2708-rpi-b-rev1.dtb \
+                    $(RPI1_DTBS)-b-plus.dtb:bcm2708-rpi-b-plus.dtb \
+                    $(RPI1_DTBS)-zero.dtb:bcm2708-rpi-zero.dtb \
+                    $(RPI1_DTBS)-zero-w.dtb:bcm2708-rpi-zero-w.dtb \
+                    $(RPI1_DTBS)-cm1-io1.dtb:bcm2708-rpi-cm.dtb
+IMAGE_DTB_LAYOUT := flat
+IMAGE_BOOT_SIZE_MB   := 64
+IMAGE_ROOTFS_FREE_MB := 256
+IMAGE_DISK_ID        := 0x52504931

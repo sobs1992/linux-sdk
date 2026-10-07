@@ -25,6 +25,11 @@ MAKEOVERRIDES :=
 
 FW ?= $(shell cat $(OUTPUT_DIR)/.fw 2>/dev/null)
 
+# Output locations, usable in firmware configs
+OUT           := $(OUTPUT_DIR)/$(FW)
+IMAGES_DIR    := $(OUT)/images
+LINUX_INSTALL := $(OUT)/linux-install
+
 ifeq ($(filter $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig)),$(MAKECMDGOALS)),)
 ifneq ($(FW),)
 FW_CONFIG := $(SDK_DIR)/configs/$(FW)_defconfig
@@ -46,9 +51,11 @@ $(FW_DEFCONFIGS): %_defconfig:
 sdkpath = $(if $(filter /%,$(1)),$(1),$(SDK_DIR)/$(1))
 # In-tree defconfig names stay as they are, paths become absolute
 cfgpath = $(if $(findstring /,$(1)),$(call sdkpath,$(1)),$(1))
+# "path<sep>suffix" -> "/abs/path<sep>suffix" ($(1)=list $(2)=separator)
+sdkpath-pairs = $(foreach e,$(1),$(call sdkpath,$(firstword $(subst $(2), ,$(e))))$(if $(findstring $(2),$(e)),$(2)$(lastword $(subst $(2), ,$(e)))))
 
-OUT := $(OUTPUT_DIR)/$(FW)
-IMAGES_DIR := $(OUT)/images
+LINUX_ARCH  ?= arm64
+LINUX_IMAGE ?= Image
 
 TFA_SRC   := $(call sdkpath,$(TFA_SRC))
 UBOOT_SRC := $(call sdkpath,$(UBOOT_SRC))
@@ -90,8 +97,18 @@ define kconfig-savedefconfig
 		echo "move the changes to a fragment, or point the *_DEFCONFIG at a file."; fi
 endef
 
+.PHONY: check-fw check-cc
+check-fw:
+	@test -n "$(FW)" || { echo "No firmware config selected: run 'make <name>_defconfig'."; \
+		echo "Available:"; ls $(SDK_DIR)/configs | sed -n 's/_defconfig$$//p' | sed 's/^/  /'; exit 1; }
+
+# Cross compiler for TF-A, U-Boot and Linux (Buildroot builds its own)
+check-cc: check-fw
+	@command -v $(CROSS_COMPILE)gcc >/dev/null || { echo "$(CROSS_COMPILE)gcc not found."; \
+		echo "Install it (e.g. 'sudo apt install gcc-$(patsubst %-,%,$(CROSS_COMPILE))') or pass CROSS_COMPILE=..."; exit 1; }
+
 # ----------------------------------------------------------------------------
-# Trusted Firmware-A
+# Trusted Firmware-A (only for boards with TFA_PLAT)
 
 TFA_OUT  := $(OUT)/tf-a
 TFA_BL31 := $(TFA_OUT)/$(TFA_PLAT)/release/bl31/bl31.elf
@@ -99,7 +116,8 @@ TFA_MAKE  = $(MAKE) -C $(TFA_SRC) BUILD_BASE=$(TFA_OUT) PLAT=$(TFA_PLAT) \
             CROSS_COMPILE=$(CROSS_COMPILE) $(TFA_MAKE_ARGS)
 
 .PHONY: tfa tfa-clean
-tfa: check-fw
+tfa: check-cc
+	@test -n "$(TFA_PLAT)" || { echo "$(FW) does not use TF-A (TFA_PLAT is not set)"; exit 1; }
 	$(TFA_MAKE) -j$(JOBS) bl31
 
 tfa-clean: check-fw
@@ -114,7 +132,7 @@ UBOOT_MAKE = $(MAKE) -C $(UBOOT_SRC) O=$(UBOOT_OUT) CROSS_COMPILE=$(CROSS_COMPIL
 ifeq ($(UBOOT_BL31),tf-a)
 UBOOT_BL31_FILE := $(TFA_BL31)
 UBOOT_DEPS := tfa
-else
+else ifneq ($(UBOOT_BL31),)
 UBOOT_BL31_FILE := $(call sdkpath,$(UBOOT_BL31))
 endif
 
@@ -133,31 +151,47 @@ $(UBOOT_OUT)/.config: $(UBOOT_OUT)/.sdk-inputs $(filter /%,$(UBOOT_DEFCONFIG)) $
 	$(call kconfig-configure,$(UBOOT_MAKE),$(UBOOT_OUT),$(UBOOT_DEFCONFIG),$(UBOOT_FRAGMENTS),$(UBOOT_SRC))
 
 .PHONY: uboot uboot-configure uboot-menuconfig uboot-savedefconfig uboot-clean
-uboot: check-fw $(UBOOT_DEPS) $(UBOOT_OUT)/.config
-	$(UBOOT_MAKE) -j$(JOBS) BL31=$(UBOOT_BL31_FILE)
+uboot: check-cc $(UBOOT_DEPS) $(UBOOT_OUT)/.config
+	$(UBOOT_MAKE) -j$(JOBS) $(if $(UBOOT_BL31_FILE),BL31=$(UBOOT_BL31_FILE))
 	@mkdir -p $(IMAGES_DIR)
-	cp $(UBOOT_OUT)/$(UBOOT_IMAGE) $(IMAGES_DIR)/
+	cp $(addprefix $(UBOOT_OUT)/,$(UBOOT_IMAGES)) $(IMAGES_DIR)/
 ifeq ($(RK_LEGACY),y)
 	$(SDK_DIR)/scripts/rk-legacy-pack.sh $(RKBIN_DIR) $(UBOOT_OUT) $(RK_TRUST_BL31) $(IMAGES_DIR)
 endif
 
-uboot-configure: check-fw $(UBOOT_OUT)/.config
+uboot-configure: check-cc $(UBOOT_OUT)/.config
 
-uboot-menuconfig: check-fw $(UBOOT_OUT)/.config
+uboot-menuconfig: check-cc $(UBOOT_OUT)/.config
 	$(UBOOT_MAKE) menuconfig
 
-uboot-savedefconfig: check-fw $(UBOOT_OUT)/.config
+uboot-savedefconfig: check-cc $(UBOOT_OUT)/.config
 	$(call kconfig-savedefconfig,$(UBOOT_MAKE),$(UBOOT_OUT),$(UBOOT_DEFCONFIG))
 
 uboot-clean: check-fw
-	rm -rf $(UBOOT_OUT) $(IMAGES_DIR)/$(UBOOT_IMAGE) $(RK_LEGACY_IMAGES)
+	rm -rf $(UBOOT_OUT) $(addprefix $(IMAGES_DIR)/,$(notdir $(UBOOT_IMAGES))) $(RK_LEGACY_IMAGES)
+
+# ----------------------------------------------------------------------------
+# Boot firmware blobs (e.g. Raspberry Pi GPU firmware), fetched by URL and
+# checked against BOOTFW_HASH, then copied to images/
+
+ifneq ($(strip $(BOOTFW_FILES)),)
+BOOTFW_DEPS := bootfw
+endif
+
+.PHONY: bootfw bootfw-clean
+bootfw: check-fw
+	@test -n "$(strip $(BOOTFW_FILES))" || { echo "$(FW) has no boot firmware (BOOTFW_FILES is not set)"; exit 1; }
+	$(SDK_DIR)/scripts/fetch-files.sh $(BOOTFW_URL) $(DL_DIR)/$(BOOTFW_NAME) \
+		$(call sdkpath,$(BOOTFW_HASH)) $(IMAGES_DIR) $(BOOTFW_FILES)
+
+bootfw-clean: check-fw
+	rm -f $(addprefix $(IMAGES_DIR)/,$(BOOTFW_FILES))
 
 # ----------------------------------------------------------------------------
 # Linux
 
-LINUX_OUT     := $(OUT)/linux
-LINUX_INSTALL := $(OUT)/linux-install
-LINUX_MAKE     = $(MAKE) -C $(LINUX_SRC) O=$(LINUX_OUT) ARCH=arm64 CROSS_COMPILE=$(CROSS_COMPILE) $(LINUX_MAKE_ARGS)
+LINUX_OUT := $(OUT)/linux
+LINUX_MAKE = $(MAKE) -C $(LINUX_SRC) O=$(LINUX_OUT) ARCH=$(LINUX_ARCH) CROSS_COMPILE=$(CROSS_COMPILE) $(LINUX_MAKE_ARGS)
 
 ifneq ($(FW),)
 $(call inputs-stamp,$(LINUX_OUT),$(LINUX_DEFCONFIG) $(LINUX_FRAGMENTS))
@@ -167,20 +201,20 @@ $(LINUX_OUT)/.config: $(LINUX_OUT)/.sdk-inputs $(filter /%,$(LINUX_DEFCONFIG)) $
 	$(call kconfig-configure,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG),$(LINUX_FRAGMENTS),$(LINUX_SRC))
 
 .PHONY: linux linux-configure linux-menuconfig linux-savedefconfig linux-clean
-linux: check-fw $(LINUX_OUT)/.config
-	$(LINUX_MAKE) -j$(JOBS) Image modules $(LINUX_DTBS)
+linux: check-cc $(LINUX_OUT)/.config
+	$(LINUX_MAKE) -j$(JOBS) $(LINUX_IMAGE) modules $(LINUX_DTBS)
 	rm -rf $(LINUX_INSTALL)
 	mkdir -p $(LINUX_INSTALL)/modules
-	cp $(LINUX_OUT)/arch/arm64/boot/Image $(LINUX_OUT)/System.map $(LINUX_OUT)/.config $(LINUX_INSTALL)/
-	$(foreach d,$(LINUX_DTBS),install -D -m 644 $(LINUX_OUT)/arch/arm64/boot/dts/$(d) $(LINUX_INSTALL)/dtbs/$(d) &&) true
+	cp $(LINUX_OUT)/arch/$(LINUX_ARCH)/boot/$(LINUX_IMAGE) $(LINUX_OUT)/System.map $(LINUX_OUT)/.config $(LINUX_INSTALL)/
+	$(foreach d,$(LINUX_DTBS),install -D -m 644 $(LINUX_OUT)/arch/$(LINUX_ARCH)/boot/dts/$(d) $(LINUX_INSTALL)/dtbs/$(d) &&) true
 	$(LINUX_MAKE) INSTALL_MOD_PATH=$(LINUX_INSTALL)/modules INSTALL_MOD_STRIP=1 modules_install
 
-linux-configure: check-fw $(LINUX_OUT)/.config
+linux-configure: check-cc $(LINUX_OUT)/.config
 
-linux-menuconfig: check-fw $(LINUX_OUT)/.config
+linux-menuconfig: check-cc $(LINUX_OUT)/.config
 	$(LINUX_MAKE) menuconfig
 
-linux-savedefconfig: check-fw $(LINUX_OUT)/.config
+linux-savedefconfig: check-cc $(LINUX_OUT)/.config
 	$(call kconfig-savedefconfig,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG))
 
 linux-clean: check-fw
@@ -201,7 +235,7 @@ $(ROOTFS_OUT)/.config: $(ROOTFS_OUT)/.sdk-inputs $(filter /%,$(BUILDROOT_DEFCONF
 	@echo ">>> Configuring $(ROOTFS_OUT)"
 	$(if $(findstring /,$(BUILDROOT_DEFCONFIG)),$(ROOTFS_MAKE) defconfig BR2_DEFCONFIG=$(BUILDROOT_DEFCONFIG),$(ROOTFS_MAKE) $(BUILDROOT_DEFCONFIG))
 
-.PHONY: rootfs rootfs-configure rootfs-menuconfig rootfs-savedefconfig rootfs-sdk rootfs-clean
+.PHONY: rootfs rootfs-configure rootfs-menuconfig rootfs-savedefconfig rootfs-sdk rootfs-make rootfs-clean
 rootfs: check-fw $(ROOTFS_OUT)/.config
 	$(ROOTFS_MAKE)
 	@mkdir -p $(IMAGES_DIR)
@@ -232,50 +266,53 @@ rootfs-clean: check-fw
 # SD card image
 
 IMAGE_FILE := $(IMAGES_DIR)/$(IMAGE_NAME).img
+IMAGE_DTB_LAYOUT ?= tree
 
-.PHONY: image all flash flash-uboot clean info help check-fw
+.PHONY: image all flash flash-boot clean info help
 image: check-fw
-	UBOOT_BIN=$(IMAGES_DIR)/$(UBOOT_IMAGE) \
-	UBOOT_SECTOR=$(IMAGE_UBOOT_SECTOR) \
+	KERNEL=$(LINUX_INSTALL)/$(LINUX_IMAGE) \
 	LINUX_DIR=$(LINUX_INSTALL) \
+	DTB_LAYOUT=$(IMAGE_DTB_LAYOUT) \
+	RAW="$(call sdkpath-pairs,$(IMAGE_RAW),@)" \
+	BOOT_FILES="$(call sdkpath-pairs,$(IMAGE_BOOT_FILES),:)" \
 	ROOTFS_TAR=$(IMAGES_DIR)/rootfs.tar \
 	CMDLINE="$(LINUX_CMDLINE)" \
 	BOOT_SIZE_MB=$(IMAGE_BOOT_SIZE_MB) \
 	ROOTFS_FREE_MB=$(IMAGE_ROOTFS_FREE_MB) \
 	DISK_ID=$(IMAGE_DISK_ID) \
 	WORK_DIR=$(OUT)/image-work \
-	RK_UBOOT_IMG=$(filter %/uboot.img,$(RK_LEGACY_IMAGES)) \
-	RK_TRUST_IMG=$(filter %/trust.img,$(RK_LEGACY_IMAGES)) \
 	HOST_TOOLS=$(ROOTFS_OUT)/host/bin \
 	$(SDK_DIR)/scripts/mkimage.sh $(IMAGE_FILE)
 
-all: uboot linux rootfs
+all: uboot linux rootfs $(BOOTFW_DEPS)
 	$(MAKE) FW=$(FW) image
 
 # make flash DEV=/dev/sdX
 flash: check-fw
 	$(SDK_DIR)/scripts/flash.sh $(IMAGE_FILE) $(DEV) 0
 
-# Write only the bootloader area (sector 64 up to the first partition),
-# keeping the partitions: make flash-uboot DEV=/dev/sdX. Run "make image" first.
-flash-uboot: check-fw
-	$(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/bootloader.bin $(DEV) $(IMAGE_UBOOT_SECTOR)
+# Rewrite the bootloader and the BOOT partition (kernel, dtbs, extlinux),
+# keeping the MBR and the rootfs: make flash-boot DEV=/dev/sdX.
+# The card must hold an image of the same firmware config.
+flash-boot: check-fw
+	@test -f $(IMAGES_DIR)/boot-area.sector || { echo "Run 'make image' first"; exit 1; }
+	$(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/boot-area.bin $(DEV) $$(cat $(IMAGES_DIR)/boot-area.sector)
 
 clean: check-fw
 	rm -rf $(OUT)
 
-check-fw:
-	@test -n "$(FW)" || { echo "No firmware config selected: run 'make <name>_defconfig'."; \
-		echo "Available:"; ls $(SDK_DIR)/configs | sed -n 's/_defconfig$$//p' | sed 's/^/  /'; exit 1; }
+gitdesc = [$$(git -C $(1) describe --always --dirty 2>/dev/null)]
 
 info: check-fw
 	@echo "Firmware:  $(FW) ($(FW_CONFIG))"
 	@echo "Output:    $(OUT)"
-	@echo "TF-A:      $(TFA_SRC) [$$(git -C $(TFA_SRC) describe --always --dirty 2>/dev/null)] PLAT=$(TFA_PLAT)"
-	@echo "U-Boot:    $(UBOOT_SRC) [$$(git -C $(UBOOT_SRC) describe --always --dirty 2>/dev/null)] $(UBOOT_DEFCONFIG) $(notdir $(UBOOT_FRAGMENTS))"
-	@echo "BL31:      $(UBOOT_BL31_FILE)"
-	@echo "Linux:     $(LINUX_SRC) [$$(git -C $(LINUX_SRC) describe --always --dirty 2>/dev/null)] $(LINUX_DEFCONFIG) $(notdir $(LINUX_FRAGMENTS))"
-	@echo "Buildroot: $(BUILDROOT_SRC) [$$(git -C $(BUILDROOT_SRC) describe --always --dirty 2>/dev/null)] $(BUILDROOT_DEFCONFIG)"
+	@echo "Compiler:  $(CROSS_COMPILE)gcc"
+	@$(if $(TFA_PLAT),echo "TF-A:      $(TFA_SRC) $(call gitdesc,$(TFA_SRC)) PLAT=$(TFA_PLAT)",true)
+	@echo "U-Boot:    $(UBOOT_SRC) $(call gitdesc,$(UBOOT_SRC)) $(UBOOT_DEFCONFIG) $(notdir $(UBOOT_FRAGMENTS))"
+	@$(if $(UBOOT_BL31_FILE),echo "BL31:      $(UBOOT_BL31_FILE)",true)
+	@$(if $(strip $(BOOTFW_FILES)),echo "Boot FW:   $(BOOTFW_NAME): $(BOOTFW_FILES)",true)
+	@echo "Linux:     $(LINUX_SRC) $(call gitdesc,$(LINUX_SRC)) ARCH=$(LINUX_ARCH) $(LINUX_DEFCONFIG) $(notdir $(LINUX_FRAGMENTS))"
+	@echo "Buildroot: $(BUILDROOT_SRC) $(call gitdesc,$(BUILDROOT_SRC)) $(BUILDROOT_DEFCONFIG)"
 	@echo "Image:     $(IMAGE_FILE)"
 
 help:
@@ -284,9 +321,10 @@ help:
 	@echo "  info                   show selected config and component versions"
 	@echo
 	@echo "Components (each is built separately, out-of-tree):"
-	@echo "  tfa                    BL31 from src/tf-a"
+	@echo "  tfa                    BL31 from src/tf-a (boards with TFA_PLAT)"
 	@echo "  uboot                  U-Boot (+ tfa if UBOOT_BL31=tf-a)"
-	@echo "  linux                  kernel Image, dtbs, modules"
+	@echo "  bootfw                 fetch boot firmware blobs (boards with BOOTFW_FILES)"
+	@echo "  linux                  kernel image, dtbs, modules"
 	@echo "  rootfs                 Buildroot rootfs.tar"
 	@echo "  rootfs-sdk             Buildroot cross toolchain + sysroot tarball"
 	@echo "  rootfs-make BR=<tgt>   run a Buildroot target (e.g. BR=busybox-menuconfig)"
@@ -294,7 +332,7 @@ help:
 	@echo
 	@echo "Image:"
 	@echo "  image                  glue built components into images/<name>.img"
-	@echo "  all (default)          uboot linux rootfs image"
+	@echo "  all (default)          all components + image"
 	@echo "  flash DEV=/dev/sdX     write the image to an SD card"
-	@echo "  flash-uboot DEV=...    write only the bootloader"
+	@echo "  flash-boot DEV=...     rewrite bootloader + BOOT partition, keep rootfs"
 	@echo "  clean                  remove output/<fw>"

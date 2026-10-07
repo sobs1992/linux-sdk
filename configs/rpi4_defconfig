@@ -1,0 +1,48 @@
+# Firmware: Raspberry Pi 4 Model B, Raspberry Pi 400, CM4 (BCM2711, Cortex-A72).
+# The EEPROM bootloader starts the GPU firmware (start4.elf), which reads
+# config.txt, loads <model>.dtb from the BOOT root and starts mainline U-Boot
+# (64-bit). U-Boot picks broadcom/<model>.dtb and boots extlinux.conf.
+#
+# See configs/oga_defconfig for the meaning of the variables.
+
+BOARD_DIR     := board/rpi4
+CROSS_COMPILE := aarch64-linux-gnu-
+
+# --- U-Boot ---
+UBOOT_SRC       := src/u-boot
+UBOOT_DEFCONFIG := rpi_4_defconfig
+UBOOT_IMAGES    := u-boot.bin
+
+# --- Raspberry Pi GPU firmware ---
+BOOTFW_NAME  := rpi-firmware-1.20260915
+BOOTFW_URL   := https://github.com/raspberrypi/firmware/raw/1.20260915/boot
+BOOTFW_FILES := start4.elf fixup4.dat LICENCE.broadcom
+BOOTFW_HASH  := board/common/rpi-firmware.sha256
+
+# --- Linux ---
+LINUX_SRC       := src/linux
+LINUX_ARCH      := arm64
+LINUX_IMAGE     := Image
+LINUX_DEFCONFIG := defconfig
+LINUX_FRAGMENTS := $(BOARD_DIR)/linux/rpi4.config
+LINUX_DTBS      := broadcom/bcm2711-rpi-4-b.dtb \
+                   broadcom/bcm2711-rpi-400.dtb \
+                   broadcom/bcm2711-rpi-cm4-io.dtb
+LINUX_CMDLINE   := rootwait rw console=tty1 console=ttyS1,115200n8
+
+# --- Root filesystem (Buildroot) ---
+BUILDROOT_SRC       := src/buildroot
+BUILDROOT_EXTERNAL  := board/common/buildroot
+BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+
+# --- SD card image ---
+# Layout: [MBR][p1 FAT32 BOOT @16M: firmware, config.txt, u-boot.bin,
+#          Image, dtbs][p2 ext4 rootfs]
+IMAGE_NAME := rpi4
+IMAGE_BOOT_FILES := $(addprefix $(IMAGES_DIR)/,$(BOOTFW_FILES) u-boot.bin) \
+                    $(BOARD_DIR)/boot/config.txt
+# U-Boot wants broadcom/<model>.dtb, the firmware wants <model>.dtb in the root
+IMAGE_DTB_LAYOUT := both
+IMAGE_BOOT_SIZE_MB   := 128
+IMAGE_ROOTFS_FREE_MB := 256
+IMAGE_DISK_ID        := 0x52504934

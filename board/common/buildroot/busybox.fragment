@@ -1,0 +1,2 @@
+# fstab mounts the BOOT partition by label (the mmcblk number differs per board)
+CONFIG_FEATURE_MOUNT_LABEL=y

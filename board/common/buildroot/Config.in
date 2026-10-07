@@ -1,0 +1,1 @@
+# Custom packages: add "source "$BR2_EXTERNAL_SDK_PATH/package/<name>/Config.in"" lines here.
