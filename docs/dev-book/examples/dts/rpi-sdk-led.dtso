@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Raspberry Pi 1 / 4 / 400: LED + resistor on GPIO17 (header pin 11),
+ * driven by sdk-gpio-led. The BCM283x/2711 pin controller switches the pin
+ * to GPIO mode when the driver requests it, so no pinctrl node is needed.
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+&{/} {
+	sdk-led {
+		compatible = "sdk,gpio-led";
+		led-gpios = <&gpio 17 GPIO_ACTIVE_HIGH>;
+	};
+};

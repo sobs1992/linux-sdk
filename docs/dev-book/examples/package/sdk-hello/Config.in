@@ -1,0 +1,6 @@
+config BR2_PACKAGE_SDK_HELLO
+	bool "sdk-hello"
+	help
+	  OdroidLinux SDK example: a small C program built from a
+	  local source directory (apps/hello in the SDK), plus an init
+	  script that runs it at boot.

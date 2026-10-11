@@ -52,6 +52,30 @@ make help             # все цели
 (`uboot-`, `linux-`, `rootfs-`). `make rootfs-make BR=busybox-menuconfig` вызывает
 любую цель Buildroot, `make rootfs-sdk` собирает кросс-тулчейн с sysroot для приложений.
 
+## Выбор прошивки
+
+`make <fw>_defconfig` записывает имя прошивки в файл `output/.fw`. Все последующие
+команды без `FW=` берут прошивку оттуда: подключают `configs/<fw>_defconfig` и работают
+с каталогом `output/<fw>/`. Поэтому `make flash` пишет образ **выбранной** прошивки.
+
+`FW=<fw>` в командной строке действует только на эту команду и выбор в `output/.fw`
+не меняет. У каждой прошивки свой каталог, образы разных плат лежат рядом:
+
+```text
+output/oga/images/oga.img
+output/bbb/images/bbb.img
+output/rpi1/images/rpi1.img
+output/rpi4/images/rpi4.img
+```
+
+```sh
+make info                                       # какая прошивка выбрана (строка Firmware:)
+make FW=rpi4 flash DEV=/dev/sdX                 # записать rpi4 разово, выбор не меняется
+make rpi4_defconfig && make flash DEV=/dev/sdX  # переключиться на rpi4 насовсем
+```
+
+Перед `make flash` проверяйте `make info`, чтобы не записать на карту образ другой платы.
+
 ## Структура
 
 ```

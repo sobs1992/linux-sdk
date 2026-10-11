@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * ODROID-GO Advance: 24C32 EEPROM on the expansion header P2
+ * (pin 7 SCL, pin 8 SDA = i2c1, 3.3 V). Appears as
+ * /sys/bus/i2c/devices/1-0050/eeprom.
+ *
+ * The OGA dtbs are built without __symbols__: build the kernel with
+ * LINUX_MAKE_ARGS := DTC_FLAGS=-@ before applying overlays to them.
+ */
+/dts-v1/;
+/plugin/;
+
+&i2c1 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	eeprom@50 {
+		compatible = "atmel,24c32";
+		reg = <0x50>;
+		pagesize = <32>;
+	};
+};

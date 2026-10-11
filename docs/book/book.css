@@ -1,0 +1,100 @@
+@page {
+  size: A4;
+  margin: 22mm 20mm 22mm 22mm;
+  @top-center {
+    content: string(chapter);
+    font: 8.5pt "Noto Sans", sans-serif;
+    color: #777;
+  }
+  @bottom-center {
+    content: counter(page);
+    font: 9pt "Noto Sans", sans-serif;
+    color: #555;
+  }
+}
+@page :first { @top-center { content: none; } @bottom-center { content: none; } }
+@page front { @top-center { content: none; } }
+
+html { font: 10.5pt/1.5 "C059", "Liberation Serif", serif; color: #1d1d1f; }
+body { counter-reset: chapter appendix; hyphens: auto; }
+
+h1, h2, h3, h4 { font-family: "Noto Sans", "DejaVu Sans", sans-serif; line-height: 1.25; color: #14213d; }
+h1 { font-size: 22pt; margin: 0 0 14pt; break-before: page; string-set: chapter content(); }
+h2 { font-size: 14pt; margin: 20pt 0 6pt; break-after: avoid; }
+h3 { font-size: 11.5pt; margin: 14pt 0 4pt; break-after: avoid; }
+h4 { font-size: 10.5pt; margin: 10pt 0 2pt; break-after: avoid; }
+
+section.chapter > h1:first-child { counter-increment: chapter; }
+section.chapter > h1:first-child::before {
+  content: "Глава " counter(chapter);
+  display: block; font-size: 11pt; font-weight: normal; color: #b5651d;
+  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6pt;
+}
+section.chapter > h1:first-child { string-set: chapter "Глава " counter(chapter) ". " content(); }
+section.appendix > h1:first-child { counter-increment: appendix; }
+section.appendix > h1:first-child::before {
+  content: "Приложение " counter(appendix, upper-alpha);
+  display: block; font-size: 11pt; font-weight: normal; color: #b5651d;
+  letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6pt;
+}
+section.appendix > h1:first-child { string-set: chapter "Приложение " counter(appendix, upper-alpha) ". " content(); }
+section.front { page: front; }
+
+p { margin: 0 0 7pt; text-align: justify; orphans: 2; widows: 2; }
+ul, ol { margin: 0 0 7pt; padding-left: 18pt; }
+li { margin-bottom: 2pt; }
+strong { color: #000; }
+a { color: inherit; text-decoration: none; }
+
+code { font-family: "DejaVu Sans Mono", monospace; font-size: 8.6pt; background: #f2f2f4; padding: 0 2pt; border-radius: 2pt; }
+pre { font-family: "DejaVu Sans Mono", monospace; font-size: 7.9pt; line-height: 1.38;
+      white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.hl { background: #f7f7f9; border: 0.6pt solid #dcdce3; border-left: 2.5pt solid #8da9c4;
+      padding: 6pt 8pt; margin: 4pt 0 10pt; border-radius: 2pt; }
+.hl pre { background: none; }
+pre code { background: none; padding: 0; font-size: inherit; }
+.listing-title { font: 7.8pt "Noto Sans", sans-serif; color: #5b6b80; margin: 8pt 0 0;
+                 break-after: avoid; }
+.listing-title + .hl { margin-top: 2pt; }
+
+table { border-collapse: collapse; width: 100%; margin: 4pt 0 10pt; font-size: 9pt; break-inside: avoid; }
+th, td { border: 0.6pt solid #c9ced6; padding: 3pt 5pt; vertical-align: top; text-align: left; }
+th { background: #eef1f5; font-family: "Noto Sans", sans-serif; font-size: 8.5pt; }
+td code { font-size: 8pt; }
+
+.admonition { border-radius: 3pt; padding: 6pt 10pt 4pt; margin: 8pt 0 10pt; break-inside: avoid;
+              border-left: 3.5pt solid; font-size: 9.8pt; }
+.admonition-title { font: bold 9pt "Noto Sans", sans-serif; margin-bottom: 3pt; text-transform: uppercase;
+                    letter-spacing: 0.05em; }
+.admonition.note { background: #eef4fb; border-color: #4a7ab5; }
+.admonition.note .admonition-title { color: #2f5b8f; }
+.admonition.warning { background: #fdf3e7; border-color: #d98a2b; }
+.admonition.warning .admonition-title { color: #a4621a; }
+.admonition.danger { background: #fbecec; border-color: #c0392b; }
+.admonition.danger .admonition-title { color: #962d22; }
+.admonition.tip { background: #edf7ef; border-color: #3f9b5a; }
+.admonition.tip .admonition-title { color: #2c7343; }
+.admonition.example { background: #f3effa; border-color: #7d5ab5; }
+.admonition.example .admonition-title { color: #5c3f8f; }
+.admonition p:last-child { margin-bottom: 2pt; }
+
+figure { margin: 8pt 0 12pt; text-align: center; break-inside: avoid; }
+figure svg { max-width: 100%; }
+figcaption { font: 8.5pt "Noto Sans", sans-serif; color: #555; margin-top: 4pt; }
+
+/* Title page */
+.titlepage { page: front; height: 240mm; display: flex; flex-direction: column; justify-content: center; }
+.titlepage .kicker { font: 11pt "Noto Sans", sans-serif; color: #b5651d; letter-spacing: 0.12em;
+                     text-transform: uppercase; margin-bottom: 14pt; }
+.titlepage .title { font: bold 32pt/1.15 "Noto Sans", sans-serif; color: #14213d; margin-bottom: 14pt; }
+.titlepage .subtitle { font: 14pt/1.4 "C059", serif; color: #333; margin-bottom: 40pt; }
+.titlepage .meta { font: 10pt/1.6 "Noto Sans", sans-serif; color: #555; }
+
+/* Table of contents */
+#toc { page: front; }
+#toc h1 { string-set: none; }
+#toc ul { list-style: none; padding: 0; margin: 0; }
+#toc li { margin: 0; }
+#toc li.toc1 { font: bold 10pt "Noto Sans", sans-serif; margin-top: 7pt; }
+#toc li.toc2 { font-size: 9.6pt; padding-left: 14pt; }
+#toc a::after { content: leader(".") target-counter(attr(href), page); }

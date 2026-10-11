@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * BeagleBone Black: LED + resistor on P9_12 (GPIO1_28), driven by sdk-gpio-led.
+ * P9_12 is pad gpmc_be1n; mode 7 makes it a GPIO.
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/am33xx.h>
+
+&am33xx_pinmux {
+	sdk_led_pins: sdk-led-pins {
+		pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_GPMC_BEN1, PIN_OUTPUT, MUX_MODE7)
+		>;
+	};
+};
+
+&{/} {
+	sdk-led {
+		compatible = "sdk,gpio-led";
+		pinctrl-names = "default";
+		pinctrl-0 = <&sdk_led_pins>;
+		led-gpios = <&gpio1 28 GPIO_ACTIVE_HIGH>;
+	};
+};

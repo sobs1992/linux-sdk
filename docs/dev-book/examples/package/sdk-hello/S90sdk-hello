@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs /usr/bin/hello once at boot and logs the result (sdk-hello package).
+
+case "$1" in
+start)
+	printf "Starting sdk-hello: "
+	/usr/bin/hello | logger -t sdk-hello && echo "OK" || echo "FAIL"
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac
