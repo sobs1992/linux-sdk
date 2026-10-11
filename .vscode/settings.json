@@ -1,0 +1,44 @@
+{
+    // output/ (~50 GB), dl/, logs/ and src/ hold >1.3M C/H and ~26k Python files.
+    // Keep file watchers, search, Pylance and the cpptools tag parser away from them.
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "output/**": true,
+        "dl/**": true,
+        "logs/**": true,
+        "src/**": true
+    },
+    "search.exclude": {
+        "output/**": true,
+        "dl/**": true,
+        "logs/**": true
+    },
+    "search.followSymlinks": false,
+    "git.autoRepositoryDetection": "openEditors",
+
+    "python.analysis.exclude": [
+        "output/**",
+        "dl/**",
+        "logs/**",
+        "src/**"
+    ],
+
+    // C/C++ (ms-vscode.cpptools)
+    "C_Cpp.files.exclude": {
+        "**/.vscode": true,
+        "**/.vs": true,
+        "output/**": true,
+        "dl/**": true,
+        "logs/**": true,
+        "src/**": true
+    },
+    "C_Cpp.default.browse.limitSymbolsToIncludedHeaders": true,
+    "C_Cpp.workspaceParsingPriority": "low",
+    "C_Cpp.intelliSenseMemoryLimit": 2048,
+    "C_Cpp.maxMemory": 3072,
+    "C_Cpp.maxCachedProcesses": 2,
+    "C_Cpp.maxConcurrentThreads": 4,
+    "C_Cpp.references.maxCachedProcesses": 0,
+    "C_Cpp.intelliSenseCacheSize": 1024,
+    "C_Cpp.codeAnalysis.runAutomatically": false
+}

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_OGA_PAD
+	bool "oga-pad"
+	help
+	  Demo for the ODROID-GO Advance: move a square across the
+	  screen with the D-pad (evdev + framebuffer). Source: apps/oga-pad.

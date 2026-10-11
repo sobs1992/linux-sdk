@@ -1,0 +1,48 @@
+{
+    "configurations": [
+        {
+            "name": "OGA apps (aarch64)",
+            "compilerPath": "${workspaceFolder}/output/oga/buildroot/host/bin/aarch64-buildroot-linux-gnu-gcc",
+            "intelliSenseMode": "linux-gcc-arm64",
+            "cStandard": "gnu11",
+            "includePath": ["${workspaceFolder}/apps/**"],
+            "browse": {
+                "path": ["${workspaceFolder}/apps"],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        },
+        {
+            "name": "RPi4 apps (aarch64)",
+            "compilerPath": "${workspaceFolder}/output/rpi4/buildroot/host/bin/aarch64-buildroot-linux-gnu-gcc",
+            "intelliSenseMode": "linux-gcc-arm64",
+            "cStandard": "gnu11",
+            "includePath": ["${workspaceFolder}/apps/**"],
+            "browse": {
+                "path": ["${workspaceFolder}/apps"],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        },
+        {
+            "name": "BBB / RPi1 apps (armhf)",
+            "compilerPath": "${workspaceFolder}/output/bbb/buildroot/host/bin/arm-buildroot-linux-gnueabihf-gcc",
+            "intelliSenseMode": "linux-gcc-arm",
+            "cStandard": "gnu11",
+            "includePath": ["${workspaceFolder}/apps/**"],
+            "browse": {
+                "path": ["${workspaceFolder}/apps"],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        },
+        {
+            // Generate first: make -C src/linux O=$PWD/output/oga/linux ARCH=arm64 compile_commands.json
+            "name": "OGA Linux kernel",
+            "compileCommands": "${workspaceFolder}/output/oga/linux/compile_commands.json",
+            "intelliSenseMode": "linux-gcc-arm64",
+            "browse": {
+                "path": [],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}
