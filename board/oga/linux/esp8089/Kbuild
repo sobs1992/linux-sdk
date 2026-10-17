@@ -1,0 +1,8 @@
+obj-m := esp8089.o
+
+esp8089-y := esp_debug.o sdio_sif_esp.o esp_io.o esp_file.o esp_main.o \
+	     esp_sip.o esp_ext.o esp_ctrl.o esp_mac80211.o esp_utils.o
+
+# In the kernel tree this comes from Kconfig (ROCKNIX builds with it on);
+# the stubs for the "off" case do not compile.
+ccflags-y += -DCONFIG_ESP8089_DEBUG_FS

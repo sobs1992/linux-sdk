@@ -1,0 +1,8 @@
+config BR2_PACKAGE_ESP8089_FIRMWARE
+	bool "esp8089-firmware"
+	help
+	  Firmware for the Espressif ESP8089 SDIO Wi-Fi chip (ODROID-GO
+	  Advance Black Edition), loaded by the esp8089 driver from
+	  /lib/firmware.
+
+	  https://github.com/armbian/firmware

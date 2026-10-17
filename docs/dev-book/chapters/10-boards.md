@@ -30,9 +30,11 @@
 - **Звук** — кодек PMIC RK817, модулем; **зарядка** — `CHARGER_RK817`, модулем
   (`/sys/class/power_supply/`).
 - **Светодиоды** — `blue:status` (PWM) и `red:charging`.
-- **Сети нет**: Wi-Fi ESP8089 Black Edition в mainline не поддерживается. Для
-  разработки — USB-Ethernet адаптер (драйверы RTL8152, AX88179, CDC модулями), UART
-  (`lrzsz`) или картридер.
+- **Wi-Fi** (только Black Edition): ESP8089 на SDIO. Драйвера в mainline нет, он
+  собирается внешним модулем из `board/oga/linux/esp8089` (`LINUX_EXT_MODULES`),
+  прошивка — пакет `esp8089-firmware`. Настройка и запуск — глава 2. У rev 1.0 сети
+  нет: USB-Ethernet адаптер (драйверы RTL8152, AX88179, CDC модулями), UART (`lrzsz`)
+  или картридер.
 - **Overlay**: в dtb SDK нет `__symbols__`, нужен `LINUX_MAKE_ARGS := DTC_FLAGS=-@`.
 - **USB OTG**: контроллер DWC2 включён в двухрежимной конфигурации, configfs-гаджеты
   (ECM, NCM, ACM) собраны модулями. Работает ли гаджет через разъём OGA, не проверено.

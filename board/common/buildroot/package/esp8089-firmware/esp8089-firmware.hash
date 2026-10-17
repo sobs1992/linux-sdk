@@ -1,0 +1,4 @@
+# Locally computed
+sha256  8f2f3f1fe623e1fe0d4aa1376b4bb6a129479cea9bce6374855b4cec19ac1687  eagle_fw_ate_config_v19.bin
+sha256  1b8b7f93f40d3c2dd7ab7f3e2d29cd118604249a5926a320163bf358254e4162  eagle_fw_first_init_v19.bin
+sha256  3ac55633c7c9aa2a0025072a597a19550450bf954d63befe789aeef2b25cfd24  eagle_fw_second_init_v19.bin

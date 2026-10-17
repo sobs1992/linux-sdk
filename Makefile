@@ -68,6 +68,7 @@ LINUX_DEFCONFIG     := $(call cfgpath,$(LINUX_DEFCONFIG))
 BUILDROOT_DEFCONFIG := $(call cfgpath,$(BUILDROOT_DEFCONFIG))
 UBOOT_FRAGMENTS     := $(foreach f,$(UBOOT_FRAGMENTS),$(call sdkpath,$(f)))
 LINUX_FRAGMENTS     := $(foreach f,$(LINUX_FRAGMENTS),$(call sdkpath,$(f)))
+LINUX_EXT_MODULES   := $(foreach m,$(LINUX_EXT_MODULES),$(call sdkpath,$(m)))
 
 # ----------------------------------------------------------------------------
 # Kconfig helpers (U-Boot and Linux)
@@ -208,6 +209,10 @@ linux: check-cc $(LINUX_OUT)/.config
 	cp $(LINUX_OUT)/arch/$(LINUX_ARCH)/boot/$(LINUX_IMAGE) $(LINUX_OUT)/System.map $(LINUX_OUT)/.config $(LINUX_INSTALL)/
 	$(foreach d,$(LINUX_DTBS),install -D -m 644 $(LINUX_OUT)/arch/$(LINUX_ARCH)/boot/dts/$(d) $(LINUX_INSTALL)/dtbs/$(d) &&) true
 	$(LINUX_MAKE) INSTALL_MOD_PATH=$(LINUX_INSTALL)/modules INSTALL_MOD_STRIP=1 modules_install
+	$(foreach m,$(LINUX_EXT_MODULES),\
+		$(LINUX_MAKE) M=$(m) MO=$(LINUX_OUT)/extmod/$(notdir $(m)) -j$(JOBS) modules && \
+		$(LINUX_MAKE) M=$(m) MO=$(LINUX_OUT)/extmod/$(notdir $(m)) \
+			INSTALL_MOD_PATH=$(LINUX_INSTALL)/modules INSTALL_MOD_STRIP=1 modules_install &&) true
 
 linux-configure: check-cc $(LINUX_OUT)/.config
 

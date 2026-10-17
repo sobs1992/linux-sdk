@@ -57,6 +57,7 @@
 | `LINUX_DEFCONFIG` | да | имя in-tree defconfig или путь |
 | `LINUX_FRAGMENTS` | нет | список фрагментов |
 | `LINUX_DTBS` | да | dtb относительно `arch/<arch>/boot/dts/` |
+| `LINUX_EXT_MODULES` | нет | каталоги внешних модулей (с `Kbuild`); собираются и ставятся в `updates/` вместе с ядром |
 | `LINUX_CMDLINE` | да | командная строка; `root=PARTUUID=…` добавляется автоматически |
 | `LINUX_MAKE_ARGS` | нет | доп. аргументы make ядра |
 

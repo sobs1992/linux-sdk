@@ -43,7 +43,9 @@ LINUX_FRAGMENTS := $(BOARD_DIR)/linux/oga.config
 LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
                    rockchip/rk3326-odroid-go2-v11.dtb \
                    rockchip/rk3326-odroid-go3.dtb
-LINUX_CMDLINE   := rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0
+# External modules (directories with a Kbuild), built and installed with the kernel
+LINUX_EXT_MODULES := $(BOARD_DIR)/linux/esp8089
+LINUX_CMDLINE   :=rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0
 
 # --- Root filesystem (Buildroot) ---
 BUILDROOT_SRC       := src/buildroot

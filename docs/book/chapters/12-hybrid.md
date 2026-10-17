@@ -205,4 +205,3 @@ odroid-go login:
 | `Loading Boot0000 'mmc 0' failed` | U-Boot сначала пробует EFI-загрузку, не находит и идёт к extlinux |
 | `mmc0: error -110 whilst initialising SD card` | первая попытка инициализации SD, вторая успешна |
 | `FAT-fs (mmcblk0p1): Volume was not properly unmounted` | раздел был смонтирован на ПК при записи |
-| `deferred probe pending: ... wifi-pwrseq` | Wi-Fi ESP8089 Black Edition не поддерживается в mainline |

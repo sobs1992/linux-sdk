@@ -46,16 +46,44 @@ OTG-переходник) или UART.
 
 ### ODROID-GO Advance
 
-Встроенной сети в mainline нет (Wi-Fi ESP8089 Black Edition не поддерживается).
-Варианты:
+**Wi-Fi (Black Edition).** Чип ESP8089 на SDIO; драйвер собирается вместе с ядром
+внешним модулем, в rootfs есть прошивка, `wpa_supplicant`, `iw` и dropbear. Скрипт
+`/etc/init.d/S41wifi` при загрузке ждёт `wlan0` и запускает `wpa_supplicant` и
+DHCP-клиент в фоне. Сеть добавляется так:
+
+```text
+# wpa_passphrase "MySSID" "password" >> /etc/wpa_supplicant.conf
+# /etc/init.d/S41wifi restart
+# ip -4 addr show wlan0                       (через 5–10 с)
+```
+
+Настройка хранится в rootfs и пропадёт после перепрошивки. Чтобы сети были в каждом
+образе, запишите их в `board/oga/buildroot/wifi.conf` на ПК:
+
+```bash
+wpa_passphrase "MySSID" "password" | grep -v '#psk' >> board/oga/buildroot/wifi.conf
+make rootfs image
+```
+
+Файл в `.gitignore` (в нём пароли), при сборке `board/oga/buildroot/post-build.sh`
+дописывает его в `/etc/wpa_supplicant.conf` образа. Блоков `network={…}` может быть
+несколько: подключится та сеть, что доступна. `grep -v '#psk'` убирает строку с
+паролем открытым текстом; в `psk=` остаётся производный ключ — он тоже даёт доступ
+к сети, так что файл не публикуйте.
+
+!!! note "Если сетей не видно"
+    Драйвер берёт частоту кварца из `/etc/modprobe.d/esp8089.conf` (`crystal=1`,
+    26 МГц, как у ROCKNIX). Если `wlan0` есть, а `wpa_cli scan_results` пуст,
+    попробуйте `crystal=0` или `crystal=2` и перезагрузку.
+
+**Без Wi-Fi (rev 1.0 или BE без настроенной сети)** — варианты:
 
 1. **USB-Ethernet адаптер** в USB-разъём. Драйверы популярных чипов уже есть в ядре
    модулями (`CONFIG_USB_RTL8152`, `USB_NET_AX88179_178A`, `USB_NET_AX8817X`,
    `USB_NET_CDCETHER`), mdev подгрузит модуль при подключении. Интерфейс появится как
    `eth0`. DHCP у OGA по умолчанию не настроен — поднимите вручную командой
    `udhcpc -i eth0` или добавьте в `board/oga/buildroot/defconfig` строку
-   `BR2_SYSTEM_DHCP="eth0"` (тогда без адаптера загрузка будет ждать сеть ~15 секунд)
-   и пакет dropbear.
+   `BR2_SYSTEM_DHCP="eth0"` (тогда без адаптера загрузка будет ждать сеть ~15 секунд).
 
 2. **Передача файлов по UART** (раздел ниже).
 3. **Картридер**: вынуть карту и скопировать файлы прямо в rootfs.
@@ -65,18 +93,21 @@ OTG-переходник) или UART.
 С пустым паролем dropbear не пустит. Два варианта:
 
 - задать пароль на плате: `passwd` (хранится в rootfs и пропадёт после перепрошивки);
-- положить свой **публичный** ключ в overlay — тогда доступ будет в каждом образе:
+- положить свой **публичный** ключ в `board/common/buildroot/authorized_keys` — тогда
+  доступ будет в каждом образе любой платы:
 
 ```bash
-mkdir -p board/common/buildroot/rootfs-overlay/root/.ssh
-cp ~/.ssh/id_ed25519.pub board/common/buildroot/rootfs-overlay/root/.ssh/authorized_keys
+cp ~/.ssh/id_ed25519.pub board/common/buildroot/authorized_keys
 make rootfs image
 ```
 
-!!! note "Права"
-    Dropbear требует, чтобы `/root/.ssh` и `authorized_keys` не были доступны на запись
-    группе и всем. Overlay копирует права из SDK, поэтому сделайте
-    `chmod 700 .../root/.ssh` и `chmod 600 .../authorized_keys`.
+Файл в `.gitignore` (ключ личный), общий `post-build.sh` кладёт его в
+`/root/.ssh/authorized_keys` с нужными dropbear правами (700 на каталог, 600 на файл).
+
+!!! note "Ключ хоста"
+    Dropbear создаёт ключ хоста при первом запуске и хранит его в rootfs. После
+    перепрошивки ключ новый, и `ssh` выдаст `REMOTE HOST IDENTIFICATION HAS CHANGED`.
+    Уберите старую запись: `ssh-keygen -R <адрес>`.
 
 После этого:
 

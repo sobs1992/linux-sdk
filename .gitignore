@@ -1,3 +1,7 @@
 /output/
 /dl/
 /logs/
+# Local Wi-Fi networks with passwords (see docs/dev-book, chapter 2)
+/board/*/buildroot/wifi.conf
+# Local SSH public keys for root on the boards (see docs/dev-book, chapter 2)
+/board/common/buildroot/authorized_keys
