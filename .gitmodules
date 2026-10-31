@@ -10,3 +10,7 @@
 [submodule "src/buildroot"]
 	path = src/buildroot
 	url = https://gitlab.com/buildroot.org/buildroot.git
+[submodule "apps/bare_app"]
+	path = apps/bare_app
+	url = ../bare_app.git
+	branch = master
