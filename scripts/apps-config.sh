@@ -29,7 +29,9 @@ symbol() { echo "BR2_PACKAGE_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
 
 apps() {
 	for mk in "$1"/package/*/*.mk; do
-		grep -qE '_SITE[[:space:]]*=.*/apps/' "$mk" && basename "$(dirname "$mk")"
+		if grep -qE '_SITE[[:space:]]*=.*/apps/' "$mk"; then
+			basename "$(dirname "$mk")"
+		fi
 	done
 }
 
