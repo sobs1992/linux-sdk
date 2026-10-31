@@ -92,6 +92,7 @@ scripts/fetch-files.sh         загрузка блобов с проверко
 scripts/rk-legacy-pack.sh      упаковка uboot.img/trust.img для SPI miniloader (OGA)
 scripts/flash.sh               запись на SD с проверками
 scripts/apps-config.sh         приложения из конфига прошивки (APPS) -> настройки Buildroot
+scripts/homm3-install.sh       данные Героев III и моды VCMI (HotA, русский) на плату по SSH (/data/vcmi)
 src/                           сабмодули компонентов
 dl/                            кэш загрузок (общий для всех прошивок)
 ```
@@ -120,8 +121,8 @@ dl/                            кэш загрузок (общий для все
 | `IMAGE_BOOT_FILES` | файлы в корень BOOT: `путь[:имя] ...` |
 | `IMAGE_DTB_LAYOUT` | dtb в BOOT: `tree` (`vendor/x.dtb`), `flat` (`x.dtb`) или `both` — как U-Boot строит `fdtfile` |
 | `IMAGE_BOOT_SIZE_MB`, `IMAGE_ROOTFS_FREE_MB`, `IMAGE_DISK_ID` | размеры, идентификатор MBR |
-
 | `IMAGE_DATA_START_MB` | начало раздела данных `/data` (необязательно, см. ниже) |
+
 Приложения из `apps/` включаются только через `APPS`. SDK накладывает их на defconfig
 Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedefconfig`
 обратно в defconfig платы их не пишет. Если приложение убрали или поменяли его
@@ -139,10 +140,9 @@ Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedef
 до 16M          raw-блобы загрузчика (IMAGE_RAW), если плате они нужны
 16M             p1 FAT32 BOOT (активный): ядро, dtb, extlinux/extlinux.conf, IMAGE_BOOT_FILES
 дальше          p2 ext4 rootfs: rootfs.tar + модули ядра; /boot монтируется по LABEL=BOOT
-```
 IMAGE_DATA_START_MB  p3 ext4 data до конца карты, на /data (если задан)
+```
 
-`make flash-boot` пишет `images/boot-area.bin`: от первого raw-блоба (или от 16M)
 Раздела данных в образе нет. Его создаёт при загрузке `/etc/init.d/S05data`: добавляет
 p3 от `IMAGE_DATA_START_MB` до конца карты, форматирует в ext4 с меткой `data` и
 монтирует в `/data`. После `make flash` в таблице разделов снова только p1 и p2;
@@ -152,6 +152,7 @@ p3 от `IMAGE_DATA_START_MB` до конца карты, форматирует
 раздела, это проверяет `mkimage.sh`. Нужны `sfdisk`, `partx` (util-linux) и `mke2fs`,
 `e2label` (e2fsprogs) в rootfs.
 
+`make flash-boot` пишет `images/boot-area.bin`: от первого raw-блоба (или от 16M)
 до конца раздела BOOT. MBR и rootfs не трогаются, поэтому на карте должен быть
 образ той же прошивки.
 
@@ -244,6 +245,31 @@ APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
 
 Свой `doom.wad` или `doom2.wad` можно положить в `/usr/share/games/doom/` и указать
 в `GAME_DOOM_WAD`.
+
+### Герои III (VCMI)
+
+`APPS_CONFIG += bare-app.HOMM3=y` (включено в `oga_defconfig`) собирает пакет `vcmi`:
+клиент [VCMI](https://vcmi.eu/) 1.7.5 с патчем связи с bare_app, без лаунчера,
+редактора и видео. В меню bare_app появляется пункт «Герои III». Данные игры в образ
+не входят. Их копирует на плату по SSH скрипт, вместе с модами VCMI, которые он
+один раз скачивает в `dl/hota/`:
+
+```sh
+scripts/homm3-install.sh ~/games/HoMM3 192.168.50.61    # каталог с Data, Maps, MP3
+```
+
+Подойдёт установка Shadow of Death или Complete (в том числе с HotA). Копируются
+только файлы, которые читает VCMI (около 330 МБ), всё в `/data/vcmi`. Моды:
+
+- `hota` — Horn of the Abyss для VCMI (около 520 МБ, `--no-hota` без него);
+- `russian-translation` — русский перевод оригинальной игры с русскими шрифтами
+  (около 70 МБ, `--no-rus` без него). Работает, только когда язык VCMI русский, то
+  есть когда русский выбран в bare_app; с HotA заодно включает русские кнопки её
+  главного меню.
+
+Повторный запуск сохраняет настройки модов VCMI и добавляет недостающие моды.
+Сборка VCMI тяжёлая: компилируется в 4 потока (`VCMI_JOBS`), примерно по 1 ГБ памяти
+на поток.
 
 ## BeagleBone Black (`bbb`)
 

@@ -59,8 +59,10 @@ APPS           := bare-app oga-pad
 # to the console, Quit in its menu turns the device off.
 APPS_AUTOSTART := bare-app
 # Package options, package.OPTION=value: bare_app's own Kconfig defconfig
-# (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad
-APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
+# (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad;
+# HOMM3 adds the Heroes III engine VCMI (game data goes to /data/vcmi)
+APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y \
+                  bare-app.HOMM3=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
@@ -76,10 +78,10 @@ IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB  := 128
 # Free space added on top of the rootfs contents
 IMAGE_ROOTFS_FREE_MB := 256
-# MBR disk identifier; root= is passed as PARTUUID=<id>-02
-IMAGE_DISK_ID := 0x4f474131
 # Data partition p3 from here to the end of the card, ext4 "data" on /data.
 # Not in the image: the board creates it on the first boot and finds it
 # again after "make flash", so its contents survive reflashing. The rootfs
 # must end before it.
 IMAGE_DATA_START_MB := 4096
+# MBR disk identifier; root= is passed as PARTUUID=<id>-02
+IMAGE_DISK_ID := 0x4f474131

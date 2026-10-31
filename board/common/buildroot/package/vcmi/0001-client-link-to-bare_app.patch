@@ -1,0 +1,707 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: link to bare_app
+
+bare_app (the SDK's LVGL launcher for the ODROID-GO Advance) starts the
+client as a game in its own process, with a socket and shared memory
+(bare_app's src/games/game_ipc.h). With SDL's dummy video driver the
+window, twice the size of bare_app's video layer, stays in memory: after
+each SDL_RenderPresent its content goes to bare_app scaled down 2:1, or a
+1:1 part around the cursor (L1 switches). Gamepad messages become SDL game
+controller events, so VCMI's own controller support drives the game.
+
+The link also sets what a handheld needs: quiet logging (the default
+traces into a file on the SD card), bare_app's language, no second stick
+dead zone. And it removes per-frame and per-step work that a Cortex-A35
+cannot afford, found by profiling on the device:
+- the screen texture has the window's format and is not cleared first,
+  so presenting is a copy instead of a per-pixel blend plus a fill;
+- while a hero walks, the info bar is rebuilt once per walk, not per
+  tile, and changed tiles redraw only the minimap, not the whole
+  adventure map (both ran under the interface lock and stopped the walk
+  at every tile).
+
+Built only with -DVCMI_BARE_APP_IPC=<bare_app's src directory>; the
+client finds out at run time whether bare_app started it, and behaves
+as upstream otherwise.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+ client/CMakeLists.txt              |   8 +
+ client/HeroMovementController.cpp  |  20 +-
+ client/HeroMovementController.h    |   3 +
+ client/adventureMap/CMinimap.cpp   |  19 ++
+ client/eventsSDL/InputHandler.cpp  |   9 +
+ client/renderSDL/BareAppLink.cpp   | 368 +++++++++++++++++++++++++++++++++++++
+ client/renderSDL/BareAppLink.h     |  62 +++++++
+ client/renderSDL/ScreenHandler.cpp |  23 ++-
+ clientapp/EntryPoint.cpp           |   8 +
+ 9 files changed, 516 insertions(+), 4 deletions(-)
+
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index 232538e..df3bfe6 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -570,6 +570,14 @@ if(VCMI_PORTMASTER)
+ 	target_compile_definitions(vcmiclientcommon PRIVATE VCMI_PORTMASTER)
+ endif()
+ 
++# Link to bare_app (renderSDL/BareAppLink.h): VCMI_BARE_APP_IPC is bare_app's
++# src directory, for games/game_ipc.h and core/input.h
++if(VCMI_BARE_APP_IPC)
++	target_sources(vcmiclientcommon PRIVATE renderSDL/BareAppLink.cpp renderSDL/BareAppLink.h)
++	target_include_directories(vcmiclientcommon PRIVATE ${VCMI_BARE_APP_IPC})
++	target_compile_definitions(vcmiclientcommon PUBLIC VCMI_BARE_APP)	# for clientapp too
++endif()
++
+ if (ENABLE_DISCORD)
+ 	if(USING_CONAN)
+ 		# don't search for libs in system locations
+diff --git a/client/HeroMovementController.cpp b/client/HeroMovementController.cpp
+index b2029e2..b7df151 100644
+--- a/client/HeroMovementController.cpp
++++ b/client/HeroMovementController.cpp
+@@ -31,6 +31,10 @@
+ #include "../lib/RoadHandler.h"
+ #include "../lib/TerrainHandler.h"
+ 
++#ifdef VCMI_BARE_APP
++#include "renderSDL/BareAppLink.h"
++#endif
++
+ bool HeroMovementController::isHeroMovingThroughGarrison(const CGHeroInstance * hero, const CArmedInstance * garrison) const
+ {
+ 	if(!duringMovement)
+@@ -172,7 +176,12 @@ void HeroMovementController::onTryMoveHero(const CGHeroInstance * hero, const Tr
+ 		hero->convertToVisitablePos(details.end)
+ 	};
+ 	adventureInt->onMapTilesChanged(changedTiles);
+-	adventureInt->onHeroMovementStarted(hero);
++#ifdef VCMI_BARE_APP
++	// Like onHeroChanged() below: the info bar once per walk, not per tile
++	if(!BareAppLink::get() || !duringMovement || !infoBarShownForMovement)
++#endif
++		adventureInt->onHeroMovementStarted(hero);
++	infoBarShownForMovement = duringMovement;
+ 
+ 	updatePath(hero, details);
+ 
+@@ -188,7 +197,13 @@ void HeroMovementController::onTryMoveHero(const CGHeroInstance * hero, const Tr
+ 	GAME->map().waitForOngoingAnimations();
+ 
+ 	//move finished
+-	adventureInt->onHeroChanged(hero);
++#ifdef VCMI_BARE_APP
++	// Rebuilding the hero's info bar takes tens of milliseconds on a handheld,
++	// under the interface lock: the walk stops at every tile. endMove()
++	// refreshes it when the hero stops.
++	if(!BareAppLink::get() || !duringMovement)
++#endif
++		adventureInt->onHeroChanged(hero);
+ 
+ 	// Hero attacked creature, set direction to face it.
+ 	if(directlyAttackingCreature)
+@@ -342,6 +357,7 @@ void HeroMovementController::requestMovementStart(const CGHeroInstance * h, cons
+ 	assert(duringMovement == false);
+ 
+ 	duringMovement = true;
++	infoBarShownForMovement = false;
+ 	currentlyMovingHero = h;
+ 
+ 	ENGINE->cursor().hide();
+diff --git a/client/HeroMovementController.h b/client/HeroMovementController.h
+index badd1d1..850f629 100644
+--- a/client/HeroMovementController.h
++++ b/client/HeroMovementController.h
+@@ -34,6 +34,9 @@ class HeroMovementController
+ 
+ 	bool waitingForQueryApplyReply = false;
+ 
++	/// the info bar already shows the moving hero (bare_app link: rebuilt once per walk)
++	bool infoBarShownForMovement = false;
++
+ 	const CGHeroInstance * currentlyMovingHero = nullptr;
+ 	AudioPath currentMovementSoundName;
+ 	int currentMovementSoundChannel = -1;
+diff --git a/client/adventureMap/CMinimap.cpp b/client/adventureMap/CMinimap.cpp
+index 15ef56c..c5df6a0 100644
+--- a/client/adventureMap/CMinimap.cpp
++++ b/client/adventureMap/CMinimap.cpp
+@@ -31,6 +31,11 @@
+ #include "../../lib/callback/CCallback.h"
+ #include "../../lib/mapObjects/CGHeroInstance.h"
+ #include "../../lib/mapping/TerrainTile.h"
++
++#ifdef VCMI_BARE_APP
++#include "../render/IScreenHandler.h"
++#include "../renderSDL/BareAppLink.h"
++#endif
+ #include "../../lib/texts/CGeneralTextHandler.h"
+ 
+ ColorRGBA CMinimapInstance::getTileColor(const int3 & pos) const
+@@ -294,5 +299,19 @@ void CMinimap::updateTiles(const FowTilesType & positions)
+ 			minimap->refreshTile(tile);
+ 	}
+ 
++#ifdef VCMI_BARE_APP
++	// Once the view has moved, redraw() repaints the parent, the whole
++	// adventure map: twice per step of a walking hero, under the interface
++	// lock. Changed tiles need only the minimap itself.
++	if(BareAppLink::get())
++	{
++		if(isActive())
++		{
++			Canvas buffer = ENGINE->screenHandler().getScreenCanvas();
++			showAll(buffer);
++		}
++		return;
++	}
++#endif
+ 	redraw();
+ }
+diff --git a/client/eventsSDL/InputHandler.cpp b/client/eventsSDL/InputHandler.cpp
+index da1f40c..4e7f045 100644
+--- a/client/eventsSDL/InputHandler.cpp
++++ b/client/eventsSDL/InputHandler.cpp
+@@ -11,6 +11,10 @@
+ #include "StdInc.h"
+ #include "InputHandler.h"
+ 
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
++
+ #include "NotificationHandler.h"
+ #include "InputSourceMouse.h"
+ #include "InputSourceKeyboard.h"
+@@ -387,6 +391,11 @@ void InputHandler::fetchEvents()
+ {
+ 	SDL_Event ev;
+ 
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		link->poll();
++#endif
++
+ 	while(1 == SDL_PollEvent(&ev))
+ 	{
+ 		preprocessEvent(ev);
+diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
+new file mode 100644
+index 0000000..fb4e74e
+--- /dev/null
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -0,0 +1,368 @@
++/*
++ * BareAppLink.cpp, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++#include "StdInc.h"
++#include "BareAppLink.h"
++
++#include "../GameEngine.h"
++#include "../../lib/CConfigHandler.h"
++#include "../../lib/texts/Languages.h"
++
++#include <SDL.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++// bare_app's headers: the exchange and its gamepad button names
++#include "games/game_ipc.h"
++#include "core/input.h"
++
++namespace
++{
++/// The magnifier moves when the cursor comes this close to its edge
++constexpr int magnifierMargin = 48;
++/// Cursor images are smaller than this, hot spot included
++constexpr int cursorReach = 64;
++constexpr uint32_t statsPeriodMs = 10000;
++
++constexpr uint32_t dpadBits = GP_BIT(GP_UP) | GP_BIT(GP_DOWN) | GP_BIT(GP_LEFT) | GP_BIT(GP_RIGHT);
++
++/// Average of two XRGB pixels, per channel
++inline uint32_t average(uint32_t a, uint32_t b)
++{
++	return (a & b) + (((a ^ b) & 0xfefefefe) >> 1);
++}
++
++[[noreturn]] void leave()
++{
++	// bare_app is gone: nobody sees or controls the game any more
++	logGlobal->info("bare_app has closed the link, leaving");
++	_exit(0);
++}
++}
++
++BareAppLink * BareAppLink::get()
++{
++	static BareAppLink * link = []() -> BareAppLink *
++	{
++		struct stat st;
++
++		if(fstat(GAME_IPC_SOCK, &st) < 0 || !S_ISSOCK(st.st_mode))
++			return nullptr;
++		if(fstat(GAME_IPC_SHM, &st) < 0 || st.st_size < GAME_SHM_HEADER)
++			return nullptr;
++		void * mem = mmap(nullptr, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, GAME_IPC_SHM, 0);
++		if(mem == MAP_FAILED)
++			return nullptr;
++		auto * shm = static_cast<game_shm *>(mem);
++		if(shm->magic != GAME_SHM_MAGIC || game_shm_size(shm) > static_cast<size_t>(st.st_size))
++		{
++			munmap(mem, st.st_size);
++			return nullptr;
++		}
++		logGlobal->info("Started by bare_app, frames of %dx%d", shm->width, shm->height);
++		return new BareAppLink(shm);
++	}();
++	return link;
++}
++
++BareAppLink::BareAppLink(game_shm * shm)
++	: shm(shm)
++	, last(static_cast<size_t>(shm->width) * shm->height)
++{
++}
++
++void BareAppLink::configure()
++{
++	// The default traces everything into a file: on a handheld's SD card
++	// that costs more than the game itself. Other loggers stay as they are.
++	{
++		Settings loggers = settings.write["logging"]["loggers"];
++		for(auto & logger : loggers->Vector())
++		{
++			const std::string & level = logger["level"].String();
++			if(logger["domain"].String() == "global" && (level == "trace" || level == "debug"))
++				logger["level"].String() = "info";
++		}
++	}
++
++	// bare_app's language ("ru"): VCMI's and its mods' texts
++	if(const char * lang = std::getenv("BARE_APP_LANG"))
++	{
++		for(const auto & language : Languages::getLanguageList())
++		{
++			if(language.tagIETF == lang && language.selectable)
++			{
++				Settings general = settings.write["general"];
++				general["language"].String() = language.identifier;
++			}
++		}
++	}
++
++	Settings resolution = settings.write["video"]["resolution"];
++	resolution["width"].Float() = 2 * shm->width;
++	resolution["height"].Float() = 2 * shm->height;
++	resolution["scaling"].Float() = 100;
++
++	// bare_app already cuts the stick's dead zone and rescales the rest:
++	// a second one would swallow small deflections
++	Settings input = settings.write["input"];
++	input["controllerAxisDeadZone"].Float() = 0;
++
++	Settings video = settings.write["video"];
++	video["fullscreen"].Bool() = false;
++	video["driver"].String() = "software";	// the only one with the dummy driver
++	video["cursor"].String() = "software";	// drawn into the frame
++}
++
++void BareAppLink::compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst)
++{
++	const int w = shm->width;
++	const int h = shm->height;
++	const int dstPitch = shm->stride / 4;
++
++	if(magnifier)
++	{
++		// Keep the cursor inside, a margin from the edges
++		const Point & cursor = ENGINE->getCursorPosition();
++		if(cursor.x < viewport.x + magnifierMargin)
++			viewport.x = cursor.x - magnifierMargin;
++		if(cursor.x > viewport.x + w - magnifierMargin)
++			viewport.x = cursor.x - w + magnifierMargin;
++		if(cursor.y < viewport.y + magnifierMargin)
++			viewport.y = cursor.y - magnifierMargin;
++		if(cursor.y > viewport.y + h - magnifierMargin)
++			viewport.y = cursor.y - h + magnifierMargin;
++		viewport.x = std::clamp(viewport.x, 0, std::max(srcW - w, 0));
++		viewport.y = std::clamp(viewport.y, 0, std::max(srcH - h, 0));
++
++		const int cw = std::min(w, srcW);
++		for(int y = 0; y < std::min(h, srcH); y++)
++			std::memcpy(dst + y * dstPitch, src + (viewport.y + y) * srcPitch + viewport.x, cw * 4);
++		return;
++	}
++
++	if(srcW == 2 * w && srcH == 2 * h)
++	{
++		// 2:1, each pixel the average of four
++		for(int y = 0; y < h; y++)
++		{
++			const uint32_t * a = src + 2 * y * srcPitch;
++			const uint32_t * b = a + srcPitch;
++			uint32_t * out = dst + y * dstPitch;
++			for(int x = 0; x < w; x++)
++				out[x] = average(average(a[2 * x], a[2 * x + 1]), average(b[2 * x], b[2 * x + 1]));
++		}
++		return;
++	}
++
++	// Any other size (the window did not get the size asked for): nearest
++	for(int y = 0; y < h; y++)
++	{
++		const uint32_t * in = src + (y * srcH / h) * srcPitch;
++		uint32_t * out = dst + y * dstPitch;
++		for(int x = 0; x < w; x++)
++			out[x] = in[x * srcW / w];
++	}
++}
++
++/// The overview halves the cursor too, and on a 3.5" screen it gets lost.
++/// The window holds the screen with the cursor drawn over it: the pixels
++/// that differ around the cursor are the cursor, put back at full size.
++void BareAppLink::drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst)
++{
++	if(!screen || screen->w != window->w || screen->h != window->h || screen->format->BytesPerPixel != 4)
++		return;
++
++	const Point & cursor = ENGINE->getCursorPosition();
++	const int dstPitch = shm->stride / 4;
++	const int x0 = std::max(cursor.x - cursorReach, 0);
++	const int y0 = std::max(cursor.y - cursorReach, 0);
++	const int x1 = std::min(cursor.x + cursorReach, window->w);
++	const int y1 = std::min(cursor.y + cursorReach, window->h);
++
++	for(int y = y0; y < y1; y++)
++	{
++		const int outY = cursor.y / 2 + y - cursor.y;
++		if(outY < 0 || outY >= static_cast<int>(shm->height))
++			continue;
++		const auto * win = static_cast<const uint32_t *>(window->pixels) + y * window->pitch / 4;
++		const auto * scr = static_cast<const uint32_t *>(screen->pixels) + y * screen->pitch / 4;
++		for(int x = x0; x < x1; x++)
++		{
++			const int outX = cursor.x / 2 + x - cursor.x;
++			if(outX >= 0 && outX < static_cast<int>(shm->width) && ((win[x] ^ scr[x]) & 0xffffff))
++				dst[outY * dstPitch + outX] = win[x];
++		}
++	}
++}
++
++void BareAppLink::present(SDL_Window * window, SDL_Surface * screen)
++{
++	SDL_Surface * surface = SDL_GetWindowSurface(window);
++	if(!surface || surface->format->BytesPerPixel != 4)
++	{
++		static bool reported = false;
++		if(!reported)
++			logGlobal->error("bare_app link: no 32-bit window surface: %s", SDL_GetError());
++		reported = true;
++		return;
++	}
++
++	const uint64_t start = SDL_GetPerformanceCounter();
++	auto * frame = static_cast<uint32_t *>(game_shm_frame(shm, back));
++	SDL_LockSurface(surface);
++	compose(static_cast<const uint32_t *>(surface->pixels), surface->w, surface->h, surface->pitch / 4, frame);
++	if(!magnifier && surface->w == static_cast<int>(2 * shm->width))
++		drawCursor(surface, screen, frame);
++	SDL_UnlockSurface(surface);
++
++	framesDrawn++;
++	composeTime += SDL_GetPerformanceCounter() - start;
++	const uint32_t now = SDL_GetTicks();
++	if(now - statsSince >= statsPeriodMs)
++	{
++		// Only while something moves: an idle menu says nothing
++		if(statsSince && framesSent)
++			logGlobal->info("bare_app link: %.1f frames/s drawn, %.1f sent, %.1f ms each to compose",
++				framesDrawn * 1000.0 / (now - statsSince), framesSent * 1000.0 / (now - statsSince),
++				composeTime * 1000.0 / SDL_GetPerformanceFrequency() / framesDrawn);
++		statsSince = now;
++		framesDrawn = framesSent = 0;
++		composeTime = 0;
++	}
++
++	// VCMI redraws at its frame rate whether anything changed or not
++	const size_t rowBytes = static_cast<size_t>(shm->width) * 4;
++	bool same = true;
++	for(uint32_t y = 0; y < shm->height && same; y++)
++		same = !std::memcmp(&last[y * shm->width], reinterpret_cast<uint8_t *>(frame) + y * shm->stride, rowBytes);
++	if(same)
++		return;
++	for(uint32_t y = 0; y < shm->height; y++)
++		std::memcpy(&last[y * shm->width], reinterpret_cast<uint8_t *>(frame) + y * shm->stride, rowBytes);
++
++	framesSent++;
++	back = shm->middle.exchange(back | GAME_SHM_FRESH) & ~GAME_SHM_FRESH;
++	game_msg msg = {};
++	msg.type = GAME_MSG_FRAME;
++	// a full socket already holds a "frame" message: nothing to add
++	if(send(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 && errno == EPIPE)
++		leave();
++}
++
++void BareAppLink::pushButton(int sdlButton, bool pressed)
++{
++	SDL_Event event = {};
++	event.type = pressed ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
++	event.cbutton.timestamp = SDL_GetTicks();
++	event.cbutton.button = sdlButton;
++	event.cbutton.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++	SDL_PushEvent(&event);
++}
++
++void BareAppLink::pushAxis(int sdlAxis, int value)
++{
++	SDL_Event event = {};
++	event.type = SDL_CONTROLLERAXISMOTION;
++	event.caxis.timestamp = SDL_GetTicks();
++	event.caxis.axis = sdlAxis;
++	event.caxis.value = std::clamp(value, -SDL_JOYSTICK_AXIS_MAX, SDL_JOYSTICK_AXIS_MAX);
++	SDL_PushEvent(&event);
++}
++
++/// The D-pad scrolls the map: VCMI does that with the right stick, which
++/// the OGA does not have
++void BareAppLink::updateDpad()
++{
++	const int x = !!(dpad & GP_BIT(GP_RIGHT)) - !!(dpad & GP_BIT(GP_LEFT));
++	const int y = !!(dpad & GP_BIT(GP_DOWN)) - !!(dpad & GP_BIT(GP_UP));
++	pushAxis(SDL_CONTROLLER_AXIS_RIGHTX, x * SDL_JOYSTICK_AXIS_MAX);
++	pushAxis(SDL_CONTROLLER_AXIS_RIGHTY, y * SDL_JOYSTICK_AXIS_MAX);
++}
++
++void BareAppLink::onButton(int button, bool pressed, bool fromStick)
++{
++	if(GP_BIT(button) & dpadBits)
++	{
++		if(fromStick)
++			return;	// the stick moves the cursor through its axes
++		if(pressed)
++			dpad |= GP_BIT(button);
++		else
++			dpad &= ~GP_BIT(button);
++		updateDpad();
++		return;
++	}
++
++	// As in VCMI's controller bindings (config/keyBindingsConfig.json):
++	// x, y: mouse left and right; a: accept, open the selected hero;
++	// b: cancel; back: end turn; start: options; shoulders and triggers.
++	// The OGA has F1..F6 instead of Start and Select (F5, F6 are bare_app's).
++	switch(button)
++	{
++		case GP_A:      pushButton(SDL_CONTROLLER_BUTTON_X, pressed); break;
++		case GP_B:      pushButton(SDL_CONTROLLER_BUTTON_Y, pressed); break;
++		case GP_Y:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
++		case GP_SELECT:
++		case GP_F2:     pushButton(SDL_CONTROLLER_BUTTON_B, pressed); break;
++		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
++		case GP_START:
++		case GP_F1:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
++		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
++		case GP_L2:     pushAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT, pressed ? SDL_JOYSTICK_AXIS_MAX : 0); break;
++		case GP_R2:     pushAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, pressed ? SDL_JOYSTICK_AXIS_MAX : 0); break;
++		case GP_L1:
++			if(pressed)
++			{
++				magnifier = !magnifier;
++				// the cursor is redrawn every frame, so the new view comes with the next one
++				logGlobal->debug("bare_app link: %s", magnifier ? "magnifier" : "overview");
++			}
++			break;
++		default:
++			break;
++	}
++}
++
++void BareAppLink::onAxis(int axis, int value)
++{
++	// The left stick moves the cursor
++	if(axis == GP_AXIS_LX)
++		pushAxis(SDL_CONTROLLER_AXIS_LEFTX, value);
++	else if(axis == GP_AXIS_LY)
++		pushAxis(SDL_CONTROLLER_AXIS_LEFTY, value);
++}
++
++void BareAppLink::poll()
++{
++	for(;;)
++	{
++		game_msg msg;
++		ssize_t n = recv(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT);
++
++		if(n == 0)
++			leave();
++		if(n < 0)
++		{
++			if(errno == EINTR)
++				continue;
++			if(errno == EAGAIN || errno == EWOULDBLOCK)
++				return;
++			leave();
++		}
++		if(n != sizeof(msg))
++			continue;
++		if(msg.type == GAME_MSG_BUTTON)
++			onButton(msg.code, msg.pressed, msg.flags & GAME_BTN_STICK);
++		else if(msg.type == GAME_MSG_AXIS)
++			onAxis(msg.code, msg.value);
++	}
++}
+diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
+new file mode 100644
+index 0000000..8416617
+--- /dev/null
++++ b/client/renderSDL/BareAppLink.h
+@@ -0,0 +1,62 @@
++/*
++ * BareAppLink.h, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++#pragma once
++
++#include "../../lib/Point.h"
++
++struct SDL_Surface;
++struct SDL_Window;
++struct game_shm;
++
++/// The client as a game of bare_app, an LVGL launcher for handheld consoles
++/// (ODROID-GO Advance). bare_app starts it with a socket and shared memory
++/// (bare_app's src/games/game_ipc.h) and runs SDL's dummy video driver: the
++/// window, twice the size of bare_app's video layer, stays in memory. Its
++/// frames go to bare_app scaled down 2:1 (overview) or as a 1:1 part around
++/// the cursor (magnifier); L1 switches. Gamepad events come back and become
++/// SDL game controller events, so VCMI's own controller support drives the
++/// game.
++class BareAppLink
++{
++public:
++	/// nullptr unless started by bare_app
++	static BareAppLink * get();
++
++	/// Settings the link needs (window size, software rendering and cursor,
++	/// quiet logging, bare_app's language); before logging is configured
++	void configure();
++	/// Publish the window's content (after SDL_RenderPresent); screen is
++	/// the same picture before the cursor was drawn over it
++	void present(SDL_Window * window, SDL_Surface * screen);
++	/// Gamepad messages into SDL events (main thread, before SDL_PollEvent)
++	void poll();
++
++private:
++	BareAppLink(game_shm * shm);
++
++	void onButton(int button, bool pressed, bool fromStick);
++	void onAxis(int axis, int value);
++	void pushButton(int sdlButton, bool pressed);
++	void pushAxis(int sdlAxis, int value);
++	void updateDpad();
++	void compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst);
++	void drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst);
++
++	game_shm * shm;
++	unsigned back = 0;	///< buffer being drawn
++	bool magnifier = false;
++	Point viewport;		///< top left of the magnified part, in window pixels
++	uint32_t dpad = 0;	///< D-pad directions held, gp_button bits
++	std::vector<uint32_t> last;	///< the frame published last
++	uint32_t framesDrawn = 0;
++	uint32_t framesSent = 0;
++	uint32_t statsSince = 0;	///< SDL_GetTicks()
++	uint64_t composeTime = 0;	///< SDL_GetPerformanceCounter() ticks
++};
+diff --git a/client/renderSDL/ScreenHandler.cpp b/client/renderSDL/ScreenHandler.cpp
+index 09819e1..b411738 100644
+--- a/client/renderSDL/ScreenHandler.cpp
++++ b/client/renderSDL/ScreenHandler.cpp
+@@ -29,6 +29,10 @@
+ #include "../../lib/VCMIDirs.h"
+ #include "../../lib/texts/MetaString.h"
+ 
++#ifdef VCMI_BARE_APP
++#include "BareAppLink.h"
++#endif
++
+ #include <vstd/DateUtils.h>
+ 
+ #ifdef VCMI_ANDROID
+@@ -431,7 +435,14 @@ void ScreenHandler::initializeScreenBuffers()
+ 	//No blending for screen itself. Required for proper cursor rendering.
+ 	SDL_SetSurfaceBlendMode(screen, SDL_BLENDMODE_NONE);
+ 
+-	screenTexture = SDL_CreateTexture(mainRenderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, logicalSize.x, logicalSize.y);
++	Uint32 textureFormat = SDL_PIXELFORMAT_ARGB8888;
++#ifdef VCMI_BARE_APP
++	// The software renderer would blend the opaque screen into the window
++	// pixel by pixel; with the window's own format and no alpha it copies
++	if(BareAppLink::get())
++		textureFormat = SDL_PIXELFORMAT_RGB888;
++#endif
++	screenTexture = SDL_CreateTexture(mainRenderer, textureFormat, SDL_TEXTUREACCESS_STREAMING, logicalSize.x, logicalSize.y);
+ 
+ 	if(nullptr == screenTexture)
+ 	{
+@@ -678,10 +689,18 @@ void ScreenHandler::updateScreenTexture()
+ 
+ void ScreenHandler::presentScreenTexture()
+ {
+-	SDL_RenderClear(mainRenderer);
++#ifdef VCMI_BARE_APP
++	// the screen covers the whole window: clearing it first is wasted work
++	if(!BareAppLink::get())
++#endif
++		SDL_RenderClear(mainRenderer);
+ 	SDL_RenderCopy(mainRenderer, screenTexture, nullptr, nullptr);
+ 	ENGINE->cursor().render();
+ 	SDL_RenderPresent(mainRenderer);
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		link->present(mainWindow, screen);
++#endif
+ }
+ 
+ std::vector<Point> ScreenHandler::getSupportedResolutions() const
+diff --git a/clientapp/EntryPoint.cpp b/clientapp/EntryPoint.cpp
+index 6adc6de..bb57196 100644
+--- a/clientapp/EntryPoint.cpp
++++ b/clientapp/EntryPoint.cpp
+@@ -26,6 +26,9 @@
+ #include "../client/render/IRenderHandler.h"
+ #include "../client/windows/CMessage.h"
+ #include "../client/windows/InfoWindows.h"
++#ifdef VCMI_BARE_APP
++#include "../client/renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../lib/AsyncRunner.h"
+ #include "../lib/CConsoleHandler.h"
+@@ -276,6 +279,11 @@ int main(int argc, char * argv[])
+ 	setSettingInteger("session/serverport", "serverport", 0);
+ 	setSettingInteger("general/saveFrequency", "savefrequency", 1);
+ 
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		link->configure();
++#endif
++
+ 	// Initialize logging based on settings
+ 	logConfigurator.configure();
+ 	logGlobal->debug("settings = %s", settings.toJsonNode().toString());
