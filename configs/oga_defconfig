@@ -55,8 +55,9 @@ BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
 # --- Applications (apps/, see "make apps-list") ---
 # Built into the rootfs; the board's Buildroot defconfig does not list them
 APPS           := bare-app oga-pad
-# Started at boot (from APPS). bare-app takes over the screen; F6 quits it.
-APPS_AUTOSTART :=
+# Started at boot (from APPS). bare-app takes over the screen; F6 quits it
+# to the console, Quit in its menu turns the device off.
+APPS_AUTOSTART := bare-app
 # Package options, package.OPTION=value: bare_app's own Kconfig defconfig
 # (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
