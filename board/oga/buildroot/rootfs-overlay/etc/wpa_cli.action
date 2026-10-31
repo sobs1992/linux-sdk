@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# Run by "wpa_cli -a" (started by /etc/init.d/S41wifi) as: wpa_cli.action
+# IFACE CONNECTED|DISCONNECTED, with WPA_ID = id of the network. The DHCP
+# client follows the joined network: a renewal when it is the same network
+# again, a fresh client (new lease) when it is another one, e.g. picked in
+# bare_app, or when it is not known which one the lease is for (wpa_cli
+# came up after the first connection). Disconnects keep the address: they
+# are often short.
+
+IFACE=$1
+PID=/var/run/udhcpc.$IFACE.pid
+LAST=/var/run/wifi.$IFACE.network
+
+[ "$2" = CONNECTED ] || exit 0
+
+pid=$(cat $PID 2>/dev/null)
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	if [ "$(cat $LAST 2>/dev/null)" = "$WPA_ID" ]; then
+		kill -USR1 "$pid"
+	else
+		kill "$pid"
+		udhcpc -b -S -i "$IFACE" -p $PID
+	fi
+else
+	udhcpc -b -S -i "$IFACE" -p $PID
+fi
+echo "$WPA_ID" > $LAST

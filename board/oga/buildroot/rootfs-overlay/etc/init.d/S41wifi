@@ -3,12 +3,15 @@
 # Wi-Fi on the ODROID-GO Advance Black Edition: wpa_supplicant + DHCP on wlan0.
 # mdev loads the esp8089 module at boot and the chip needs a few seconds for
 # its firmware, so wlan0 is waited for in the background. Boards without the
-# chip (rev 1.0) never get wlan0 and nothing is started.
+# chip (rev 1.0) never get wlan0 and nothing is started. wpa_cli runs
+# /etc/wpa_cli.action on every connection, so DHCP follows network changes
+# (bare_app's Wi-Fi screen, wpa_cli select_network).
 
 IFACE=wlan0
 CONF=/etc/wpa_supplicant.conf
 WPA_PID=/var/run/wpa_supplicant.$IFACE.pid
 DHCP_PID=/var/run/udhcpc.$IFACE.pid
+CLI_PID=/var/run/wpa_cli.$IFACE.pid
 
 start() {
 	printf "Starting wifi: "
@@ -20,17 +23,20 @@ start() {
 			sleep 1
 		done
 		wpa_supplicant -B -i $IFACE -c $CONF -P $WPA_PID
+		# the client first: the action script only restarts or renews it
 		udhcpc -b -S -i $IFACE -p $DHCP_PID
+		wpa_cli -B -i $IFACE -a /etc/wpa_cli.action -P $CLI_PID
 	) </dev/null >/dev/null 2>&1 &
 	echo "OK"
 }
 
 stop() {
 	printf "Stopping wifi: "
-	for pid in $DHCP_PID $WPA_PID; do
+	for pid in $CLI_PID $DHCP_PID $WPA_PID; do
 		[ -f $pid ] && kill "$(cat $pid)" 2>/dev/null
 		rm -f $pid
 	done
+	rm -f /var/run/wifi.$IFACE.network
 	echo "OK"
 }
 
