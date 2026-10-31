@@ -78,3 +78,8 @@ IMAGE_BOOT_SIZE_MB  := 128
 IMAGE_ROOTFS_FREE_MB := 256
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f474131
+# Data partition p3 from here to the end of the card, ext4 "data" on /data.
+# Not in the image: the board creates it on the first boot and finds it
+# again after "make flash", so its contents survive reflashing. The rootfs
+# must end before it.
+IMAGE_DATA_START_MB := 4096

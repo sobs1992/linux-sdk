@@ -1,0 +1,91 @@
+#!/bin/sh
+#
+# Data partition: partition 3 of the boot disk, from a fixed start sector
+# to the end of the disk, ext4 labelled "data", mounted on /data. For game
+# data and anything else that must survive "make flash".
+#
+# The image has only BOOT and rootfs; scripts/mkimage.sh writes the start
+# sector to /etc/data-partition when the firmware config sets
+# IMAGE_DATA_START_MB. The first boot adds the partition and formats it.
+# Flashing the image again rewrites the partition table without it: the
+# next boot adds it at the same start, finds the "data" file system there
+# and keeps it. A partition 3 that is not ext4 "data" is never touched.
+# Needs sfdisk and partx (util-linux), mke2fs and e2label (e2fsprogs).
+
+CONF=/etc/data-partition
+LABEL=data
+MOUNT=/data
+MIN_SECTORS=131072	# 64 MiB
+
+log() { echo "data: $*"; logger -t data "$*" 2>/dev/null; }
+
+# disk holding / and the name of its partition N (mmcblk0p3, sda3)
+root_disk() {
+	p=$(readlink -f "/sys/dev/block/$(mountpoint -d /)") || return 1
+	basename "$(dirname "$p")"
+}
+part_name() {
+	case $1 in *[0-9]) echo "$1p$2" ;; *) echo "$1$2" ;; esac
+}
+
+wait_node() {
+	i=0
+	while [ ! -b "/dev/$1" ] && [ $i -lt 30 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	[ -b "/dev/$1" ] || mknod "/dev/$1" b $(tr ':' ' ' < "/sys/class/block/$1/dev")
+}
+
+start() {
+	[ -f "$CONF" ] || return 0
+	start=$(cat "$CONF")
+	disk=$(root_disk) || { log "cannot find the root disk"; return 1; }
+	p2=$(part_name "$disk" 2)
+	p3=$(part_name "$disk" 3)
+	created=
+
+	if [ ! -e "/sys/class/block/$p3" ]; then
+		size=$(cat "/sys/block/$disk/size")
+		p2_end=$(( $(cat "/sys/class/block/$p2/start") + $(cat "/sys/class/block/$p2/size") ))
+		if [ "$p2_end" -gt "$start" ]; then
+			log "rootfs ends at sector $p2_end, past the data start $start"
+			return 1
+		fi
+		if [ $((size - start)) -lt $MIN_SECTORS ]; then
+			log "no room for a data partition on $disk"
+			return 0
+		fi
+		log "adding $p3 at sector $start"
+		echo "start=$start, type=83" | sfdisk -q --append --no-reread --no-tell-kernel "/dev/$disk" &&
+			partx -a -n 3 "/dev/$disk" || { log "cannot add $p3"; return 1; }
+		wait_node "$p3"
+		created=1
+	fi
+
+	if [ "$(e2label "/dev/$p3" 2>/dev/null)" != "$LABEL" ]; then
+		if [ -z "$created" ]; then
+			log "$p3 is not an ext4 \"$LABEL\" file system, leaving it alone"
+			return 1
+		fi
+		log "formatting $p3"
+		mke2fs -q -t ext4 -L "$LABEL" "/dev/$p3" || return 1
+	fi
+
+	mkdir -p "$MOUNT"
+	mount -t ext4 -o noatime "/dev/$p3" "$MOUNT" && log "$p3 on $MOUNT"
+}
+
+case "$1" in
+start)
+	start
+	;;
+stop)
+	mountpoint -q "$MOUNT" && umount "$MOUNT"
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+	;;
+esac
+exit 0

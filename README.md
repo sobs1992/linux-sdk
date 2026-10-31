@@ -121,6 +121,7 @@ dl/                            кэш загрузок (общий для все
 | `IMAGE_DTB_LAYOUT` | dtb в BOOT: `tree` (`vendor/x.dtb`), `flat` (`x.dtb`) или `both` — как U-Boot строит `fdtfile` |
 | `IMAGE_BOOT_SIZE_MB`, `IMAGE_ROOTFS_FREE_MB`, `IMAGE_DISK_ID` | размеры, идентификатор MBR |
 
+| `IMAGE_DATA_START_MB` | начало раздела данных `/data` (необязательно, см. ниже) |
 Приложения из `apps/` включаются только через `APPS`. SDK накладывает их на defconfig
 Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedefconfig`
 обратно в defconfig платы их не пишет. Если приложение убрали или поменяли его
@@ -139,8 +140,18 @@ Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedef
 16M             p1 FAT32 BOOT (активный): ядро, dtb, extlinux/extlinux.conf, IMAGE_BOOT_FILES
 дальше          p2 ext4 rootfs: rootfs.tar + модули ядра; /boot монтируется по LABEL=BOOT
 ```
+IMAGE_DATA_START_MB  p3 ext4 data до конца карты, на /data (если задан)
 
 `make flash-boot` пишет `images/boot-area.bin`: от первого raw-блоба (или от 16M)
+Раздела данных в образе нет. Его создаёт при загрузке `/etc/init.d/S05data`: добавляет
+p3 от `IMAGE_DATA_START_MB` до конца карты, форматирует в ext4 с меткой `data` и
+монтирует в `/data`. После `make flash` в таблице разделов снова только p1 и p2;
+скрипт находит на прежнем месте файловую систему `data` и подключает её без
+форматирования, поэтому содержимое `/data` переживает перепрошивку. Раздел 3, который
+не является ext4 `data`, скрипт не трогает. rootfs должен кончаться раньше начала
+раздела, это проверяет `mkimage.sh`. Нужны `sfdisk`, `partx` (util-linux) и `mke2fs`,
+`e2label` (e2fsprogs) в rootfs.
+
 до конца раздела BOOT. MBR и rootfs не трогаются, поэтому на карте должен быть
 образ той же прошивки.
 
