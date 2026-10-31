@@ -8,13 +8,18 @@ BARE_APP_VERSION = 1.0
 # Source lives in the SDK: <sdk>/apps/bare_app (git submodule with LVGL inside)
 BARE_APP_SITE = $(BR2_EXTERNAL_SDK_PATH)/../../../apps/bare_app
 BARE_APP_SITE_METHOD = local
-# Host build trees and the parts of LVGL that are never compiled (~140 MB)
+# bare_app_doom (ports/doom, built with GAME_DOOM) is doomgeneric: GPLv2
+BARE_APP_LICENSE = GPL-2.0+ (bare_app_doom)
+BARE_APP_LICENSE_FILES = ports/doom/LICENSE
+# Host build trees and the parts of LVGL and doomgeneric that are never
+# compiled (~140 MB)
 BARE_APP_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude /build-* \
 	--exclude /third_party/lvgl/tests \
 	--exclude /third_party/lvgl/docs \
 	--exclude /third_party/lvgl/demos \
-	--exclude /third_party/lvgl/examples
+	--exclude /third_party/lvgl/examples \
+	--exclude /ports/doom/doomgeneric/screenshots
 
 # Composition of the binary: bare_app's Kconfig, see configs/ in the app.
 # Kconfiglib comes with the app; it needs the host's python3.

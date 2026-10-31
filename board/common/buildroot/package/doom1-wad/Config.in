@@ -1,0 +1,9 @@
+config BR2_PACKAGE_DOOM1_WAD
+	bool
+	help
+	  Shareware Doom WAD (doom1.wad, version 1.9) in
+	  /usr/share/games/doom/. Buildroot's doom-wad installs the same
+	  file but only for its own Doom ports; this one is selected by
+	  BR2_PACKAGE_BARE_APP_DOOM_WAD.
+
+	  https://doomwiki.org/wiki/DOOM1.WAD

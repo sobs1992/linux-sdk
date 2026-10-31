@@ -46,9 +46,20 @@ contains() {
 	return 1
 }
 
-# lines of one application in a fragment
+# lines of one application in a fragment, without those of an application
+# whose symbol extends this one (bare-app vs bare-app-games)
 app_lines() {
-	grep -E "^(# )?$(symbol "$1")(_[A-Z0-9_]+)?( is not set|=)" "$2" 2>/dev/null || true
+	others=
+	for o in $known; do
+		case $(symbol "$o") in "$(symbol "$1")"_*) others="$others|$(symbol "$o")" ;; esac
+	done
+	grep -E "^(# )?$(symbol "$1")(_[A-Z0-9_]+)?( is not set|=)" "$2" 2>/dev/null | {
+		if [ -n "$others" ]; then
+			grep -vE "^(# )?(${others#|})(_[A-Z0-9_]+)?( is not set|=)"
+		else
+			cat
+		fi
+	} || true
 }
 
 cmd=$1

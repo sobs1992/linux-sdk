@@ -219,6 +219,21 @@ make FW=oga rootfs-make BR=bare-app-rebuild   # после правок в ис�
 apps/bare_app/tools/oga.sh run                # собрать и запустить на плате через UART
 ```
 
+#### Doom
+
+В меню bare_app есть пункт «Doom», его включает символ `GAME_DOOM` в Kconfig приложения
+(в `oga_defconfig` он включён). Сама игра — отдельная программа `/usr/bin/bare_app_doom`
+из `apps/bare_app/ports/doom` (doomgeneric, GPLv2). В `bare_app` она не линкуется,
+поэтому GPL на него не распространяется. Игра рисует в видеослой DRM, звука нет.
+Shareware `doom1.wad` ставит опция пакета (пакет `doom1-wad`):
+
+```make
+APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
+```
+
+Свой `doom.wad` или `doom2.wad` можно положить в `/usr/share/games/doom/` и указать
+в `GAME_DOOM_WAD`.
+
 ## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`

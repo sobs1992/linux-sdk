@@ -2,7 +2,10 @@ config BR2_PACKAGE_BARE_APP
 	bool "bare_app"
 	help
 	  LVGL GUI application for the SDK (display, gamepad, battery,
-	  backlight). Source: apps/bare_app (git submodule).
+	  backlight, Doom with GAME_DOOM). Source: apps/bare_app (git
+	  submodule). Doom is a separate program, /usr/bin/bare_app_doom,
+	  under GPLv2 (apps/bare_app/ports/doom); bare_app itself has no
+	  GPL code.
 
 if BR2_PACKAGE_BARE_APP
 
@@ -21,5 +24,15 @@ config BR2_PACKAGE_BARE_APP_AUTOSTART
 	  Start bare_app from /etc/init.d/S90bare-app. It takes over the
 	  screen (the text console on tty1 comes back when it quits).
 	  Log: /var/log/bare_app.log. In the SDK: APPS_AUTOSTART.
+
+config BR2_PACKAGE_BARE_APP_DOOM_WAD
+	bool "install the shareware Doom WAD"
+	select BR2_PACKAGE_DOOM1_WAD
+	help
+	  doom1.wad (Doom 1.9 shareware, episode 1) in
+	  /usr/share/games/doom/, where GAME_DOOM looks by default. Other
+	  IWADs (doom.wad, doom2.wad) can be copied there by hand and
+	  chosen with GAME_DOOM_WAD. In the SDK:
+	  APPS_CONFIG += bare-app.DOOM_WAD=y
 
 endif

@@ -58,7 +58,8 @@ APPS           := bare-app oga-pad
 # Started at boot (from APPS). bare-app takes over the screen; F6 quits it.
 APPS_AUTOSTART :=
 # Package options, package.OPTION=value: bare_app's own Kconfig defconfig
-APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig
+# (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad
+APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
