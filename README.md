@@ -162,6 +162,33 @@ U-Boot определяет ревизию платы по SARADC (`rockchip/rk3
 (DDR-блоб и miniloader из SPI печатают на 1500000, CP2102 это не читает).
 Таблица разделов — MBR: GPT (сектора 2–33) пересекается с окружением U-Boot на 16K.
 
+### Приложения через UART
+
+`scripts/oga-serial.py` работает с платой через консоль (по умолчанию `/dev/ttyUSB0`,
+115200; `-p` или `OGA_PORT`): сеть и дополнительные пакеты на плате не нужны.
+Файлы идут по консоли как gzip + base64, примерно 7–10 КБ/с, md5 проверяется.
+Нужен только pyserial (`apt install python3-serial`). Если консоль на приглашении
+логина, скрипт сам входит как root. Порт открывается эксклюзивно, поэтому сначала
+закройте на нём `screen`/`picocom`.
+
+```sh
+CC=output/oga/buildroot/host/bin/aarch64-buildroot-linux-gnu-gcc
+make -C apps/oga-pad CC=$PWD/$CC
+
+scripts/oga-serial.py sh 'uname -a'                 # команда, её вывод и код возврата
+scripts/oga-serial.py push app /usr/bin/app         # файл на плату
+scripts/oga-serial.py pull /var/log/messages log    # файл с платы
+scripts/oga-serial.py run apps/oga-pad/oga-pad      # в /tmp и запустить (-t секунд, по умолчанию 60)
+scripts/oga-serial.py run --bg apps/oga-pad/oga-pad # в фоне, вывод в /tmp/oga-pad.log
+scripts/oga-serial.py shot screen.png               # снимок /dev/fb0, повёрнут как видит пользователь
+scripts/oga-serial.py key right right a f6          # «нажать» кнопки
+```
+
+`key` пишет события в evdev-узел `gpio-keys` (`uinput` в ядре нет), программа видит
+их как настоящие нажатия. Кнопки: `up down left right a b x y l r f1`…`f6`
+(A = `BTN_EAST`, B = `BTN_SOUTH`). Аналоговый стик (`adc-joystick`) не поддерживается.
+`/tmp` на плате — tmpfs: после перезагрузки загруженное пропадает.
+
 ## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`

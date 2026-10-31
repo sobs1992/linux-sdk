@@ -5,3 +5,5 @@
 /board/*/buildroot/wifi.conf
 # Local SSH public keys for root on the boards (see docs/dev-book, chapter 2)
 /board/common/buildroot/authorized_keys
+# Built example apps
+/apps/oga-pad/oga-pad
