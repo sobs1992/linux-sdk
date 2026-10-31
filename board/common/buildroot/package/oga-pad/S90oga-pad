@@ -1,0 +1,28 @@
+#!/bin/sh
+# Starts the oga-pad demo in the background (oga-pad package).
+
+DAEMON=/usr/bin/oga-pad
+PIDFILE=/var/run/oga-pad.pid
+LOG=/var/log/oga-pad.log
+
+case "$1" in
+start)
+	printf "Starting oga-pad: "
+	start-stop-daemon -S -q -b -m -p $PIDFILE -x /bin/sh -- \
+		-c "exec $DAEMON >> $LOG 2>&1" && echo "OK" || echo "FAIL"
+	;;
+stop)
+	printf "Stopping oga-pad: "
+	start-stop-daemon -K -q -p $PIDFILE && echo "OK" || echo "FAIL"
+	rm -f $PIDFILE
+	;;
+restart|reload)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

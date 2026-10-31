@@ -91,6 +91,7 @@ scripts/mkimage.sh             склейка образа (без root: fakeroo
 scripts/fetch-files.sh         загрузка блобов с проверкой sha256
 scripts/rk-legacy-pack.sh      упаковка uboot.img/trust.img для SPI miniloader (OGA)
 scripts/flash.sh               запись на SD с проверками
+scripts/apps-config.sh         приложения из конфига прошивки (APPS) -> настройки Buildroot
 src/                           сабмодули компонентов
 dl/                            кэш загрузок (общий для всех прошивок)
 ```
@@ -112,10 +113,19 @@ dl/                            кэш загрузок (общий для все
 | `LINUX_SRC`, `LINUX_ARCH`, `LINUX_IMAGE` | ядро: `arm`/`arm64`, `zImage`/`Image` |
 | `LINUX_DEFCONFIG`, `LINUX_FRAGMENTS`, `LINUX_DTBS`, `LINUX_CMDLINE` | конфиг, dtb, командная строка |
 | `BUILDROOT_SRC`, `BUILDROOT_EXTERNAL`, `BUILDROOT_DEFCONFIG` | rootfs |
+| `APPS` | приложения (пакеты из `apps/`) в rootfs; список — `make apps-list` |
+| `APPS_AUTOSTART` | какие из `APPS` запускать при загрузке (init-скрипт `S90<пакет>`) |
+| `APPS_CONFIG` | опции приложений: `пакет.ОПЦИЯ=значение`, например `bare-app.DEFCONFIG=oga_defconfig` |
 | `IMAGE_RAW` | raw-блобы до 16M: `файл@сектор ...` |
 | `IMAGE_BOOT_FILES` | файлы в корень BOOT: `путь[:имя] ...` |
 | `IMAGE_DTB_LAYOUT` | dtb в BOOT: `tree` (`vendor/x.dtb`), `flat` (`x.dtb`) или `both` — как U-Boot строит `fdtfile` |
 | `IMAGE_BOOT_SIZE_MB`, `IMAGE_ROOTFS_FREE_MB`, `IMAGE_DISK_ID` | размеры, идентификатор MBR |
+
+Приложения из `apps/` включаются только через `APPS`. SDK накладывает их на defconfig
+Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedefconfig`
+обратно в defconfig платы их не пишет. Если приложение убрали или поменяли его
+автозапуск или опции, SDK удаляет его файлы из `target/` и пересобирает пакет.
+Сам Buildroot этого не делает, и выключенный автозапуск остался бы в образе.
 
 `.config` компонента пересоздаётся, когда меняется defconfig-файл или фрагмент;
 правки из `menuconfig` живут до этого момента, сохраняйте их через `*-savedefconfig`
@@ -193,14 +203,19 @@ scripts/oga-serial.py key right right a f6          # «нажать» кноп�
 
 `apps/bare_app` — отдельный репозиторий (сабмодуль): приложение на LVGL с DRM-слоями,
 кнопками, стиком, батареей и подсветкой. Устройство и сборка описаны в его
-`README.md` и `docs/ARCHITECTURE.md`. В образ OGA оно попадает пакетом `bare-app`
-(`BR2_PACKAGE_BARE_APP=y`, исходники копируются из `apps/bare_app`). Автозапуск при
-загрузке — опция `BR2_PACKAGE_BARE_APP_AUTOSTART` (`/etc/init.d/S90bare-app`, лог
-в `/var/log/bare_app.log`).
+`README.md` и `docs/ARCHITECTURE.md`. В образ OGA оно попадает как приложение
+`bare-app` из `APPS` в `configs/oga_defconfig`. Остальное задаётся там же:
+
+```make
+APPS           := bare-app oga-pad
+APPS_AUTOSTART := bare-app                          # /etc/init.d/S90bare-app, лог /var/log/bare_app.log
+APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig   # состав: Kconfig приложения, имя из
+                                                    # apps/bare_app/configs/ или путь
+```
 
 ```sh
 git submodule update --init --recursive apps/bare_app
-make FW=oga rootfs-make BR=bare-app-rebuild   # после правок в apps/bare_app
+make FW=oga rootfs-make BR=bare-app-rebuild   # после правок в исходниках apps/bare_app
 apps/bare_app/tools/oga.sh run                # собрать и запустить на плате через UART
 ```
 

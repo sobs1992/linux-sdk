@@ -232,15 +232,38 @@ ROOTFS_OUT := $(OUT)/buildroot
 ROOTFS_MAKE = BR2_DL_DIR=$(DL_DIR) $(MAKE) -C $(BUILDROOT_SRC) O=$(ROOTFS_OUT) \
               BR2_EXTERNAL=$(BUILDROOT_EXTERNAL) $(BUILDROOT_MAKE_ARGS)
 
+# Applications (packages of BUILDROOT_EXTERNAL built from apps/) come from the
+# firmware config, not from the board's Buildroot defconfig:
+#   APPS            packages to build into the rootfs
+#   APPS_AUTOSTART  of those, started at boot
+#   APPS_CONFIG     package options: package.OPTION=value
+# Buildroot is configured from defconfig.sdk = board defconfig + apps.config.
+APPS_TOOL      := $(SDK_DIR)/scripts/apps-config.sh
+ROOTFS_APPS    := $(ROOTFS_OUT)/apps.config
+ROOTFS_DEFCONF := $(ROOTFS_OUT)/defconfig.sdk
+ROOTFS_BOARD_DEFCONFIG := $(if $(findstring /,$(BUILDROOT_DEFCONFIG)),$(BUILDROOT_DEFCONFIG),$(BUILDROOT_SRC)/configs/$(BUILDROOT_DEFCONFIG))
+
 ifneq ($(FW),)
-$(call inputs-stamp,$(ROOTFS_OUT),$(BUILDROOT_DEFCONFIG) $(BUILDROOT_EXTERNAL))
+$(call inputs-stamp,$(ROOTFS_OUT),$(BUILDROOT_DEFCONFIG) $(BUILDROOT_EXTERNAL) apps: $(APPS) autostart: $(APPS_AUTOSTART) config: $(APPS_CONFIG))
 endif
 
 $(ROOTFS_OUT)/.config: $(ROOTFS_OUT)/.sdk-inputs $(filter /%,$(BUILDROOT_DEFCONFIG))
 	@echo ">>> Configuring $(ROOTFS_OUT)"
-	$(if $(findstring /,$(BUILDROOT_DEFCONFIG)),$(ROOTFS_MAKE) defconfig BR2_DEFCONFIG=$(BUILDROOT_DEFCONFIG),$(ROOTFS_MAKE) $(BUILDROOT_DEFCONFIG))
+	$(APPS_TOOL) fragment $(BUILDROOT_EXTERNAL) "$(APPS)" "$(APPS_AUTOSTART)" "$(APPS_CONFIG)" > $(ROOTFS_APPS).new
+	{ cat $(ROOTFS_BOARD_DEFCONFIG); echo; \
+	  echo "# Applications: APPS, APPS_AUTOSTART, APPS_CONFIG of $(notdir $(FW_CONFIG))"; \
+	  cat $(ROOTFS_APPS).new; } > $(ROOTFS_DEFCONF)
+	$(ROOTFS_MAKE) defconfig BR2_DEFCONFIG=$(ROOTFS_DEFCONF)
+	$(SDK_DIR)/scripts/kconfig-check.sh $@ $(ROOTFS_APPS).new
+	@# Buildroot neither rebuilds a package whose options changed nor removes
+	@# what it installed: do both for every application that changed
+	@for p in $$($(APPS_TOOL) changed $(BUILDROOT_EXTERNAL) $(ROOTFS_APPS) $(ROOTFS_APPS).new); do \
+		echo ">>> $$p: application settings changed, removing it from target/ for a fresh install"; \
+		$(APPS_TOOL) purge $(ROOTFS_OUT) $$p && $(ROOTFS_MAKE) $$p-dirclean || exit 1; \
+	done
+	mv $(ROOTFS_APPS).new $(ROOTFS_APPS)
 
-.PHONY: rootfs rootfs-configure rootfs-menuconfig rootfs-savedefconfig rootfs-sdk rootfs-make rootfs-clean
+.PHONY: rootfs rootfs-configure rootfs-menuconfig rootfs-savedefconfig rootfs-sdk rootfs-make rootfs-clean apps-list
 rootfs: check-fw $(ROOTFS_OUT)/.config
 	$(ROOTFS_MAKE)
 	@mkdir -p $(IMAGES_DIR)
@@ -251,8 +274,17 @@ rootfs-configure: check-fw $(ROOTFS_OUT)/.config
 rootfs-menuconfig: check-fw $(ROOTFS_OUT)/.config
 	$(ROOTFS_MAKE) menuconfig
 
+# Applications are dropped from the saved file: they live in the firmware config
 rootfs-savedefconfig: check-fw $(ROOTFS_OUT)/.config
-	$(ROOTFS_MAKE) savedefconfig
+	$(ROOTFS_MAKE) savedefconfig BR2_DEFCONFIG=$(ROOTFS_OUT)/defconfig
+	$(APPS_TOOL) strip $(BUILDROOT_EXTERNAL) $(ROOTFS_OUT)/defconfig
+	@if [ -n "$(findstring /,$(BUILDROOT_DEFCONFIG))" ]; then cp $(ROOTFS_OUT)/defconfig $(BUILDROOT_DEFCONFIG) && echo "Saved to $(BUILDROOT_DEFCONFIG)"; else \
+		echo "Saved to $(ROOTFS_OUT)/defconfig. The firmware config uses the in-tree '$(BUILDROOT_DEFCONFIG)':"; \
+		echo "copy it into board/<board>/ and point BUILDROOT_DEFCONFIG there to keep it."; fi
+
+# Application packages that APPS can name
+apps-list: check-fw
+	@$(APPS_TOOL) list $(BUILDROOT_EXTERNAL)
 
 # Relocatable cross toolchain + sysroot for application development
 rootfs-sdk: check-fw $(ROOTFS_OUT)/.config
@@ -318,6 +350,7 @@ info: check-fw
 	@$(if $(strip $(BOOTFW_FILES)),echo "Boot FW:   $(BOOTFW_NAME): $(BOOTFW_FILES)",true)
 	@echo "Linux:     $(LINUX_SRC) $(call gitdesc,$(LINUX_SRC)) ARCH=$(LINUX_ARCH) $(LINUX_DEFCONFIG) $(notdir $(LINUX_FRAGMENTS))"
 	@echo "Buildroot: $(BUILDROOT_SRC) $(call gitdesc,$(BUILDROOT_SRC)) $(BUILDROOT_DEFCONFIG)"
+	@echo "Apps:      $(or $(APPS),none)$(if $(APPS_AUTOSTART), (autostart: $(APPS_AUTOSTART)))$(if $(APPS_CONFIG), options: $(APPS_CONFIG))"
 	@echo "Image:     $(IMAGE_FILE)"
 
 help:
@@ -333,6 +366,7 @@ help:
 	@echo "  rootfs                 Buildroot rootfs.tar"
 	@echo "  rootfs-sdk             Buildroot cross toolchain + sysroot tarball"
 	@echo "  rootfs-make BR=<tgt>   run a Buildroot target (e.g. BR=busybox-menuconfig)"
+	@echo "  apps-list              applications for APPS / APPS_AUTOSTART / APPS_CONFIG"
 	@echo "  <comp>-configure / -menuconfig / -savedefconfig / -clean"
 	@echo
 	@echo "Image:"

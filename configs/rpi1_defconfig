@@ -36,6 +36,9 @@ BUILDROOT_SRC       := src/buildroot
 BUILDROOT_EXTERNAL  := board/common/buildroot
 BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
 
+# --- Applications (apps/, see "make apps-list"): APPS, APPS_AUTOSTART, APPS_CONFIG ---
+APPS :=
+
 # --- SD card image ---
 # Layout: [MBR][p1 FAT32 BOOT @16M: firmware, config.txt, u-boot.bin,
 #          zImage, dtbs][p2 ext4 rootfs]

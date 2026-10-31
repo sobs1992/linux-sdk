@@ -52,6 +52,14 @@ BUILDROOT_SRC       := src/buildroot
 BUILDROOT_EXTERNAL  := board/common/buildroot
 BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
 
+# --- Applications (apps/, see "make apps-list") ---
+# Built into the rootfs; the board's Buildroot defconfig does not list them
+APPS           := bare-app oga-pad
+# Started at boot (from APPS). bare-app takes over the screen; F6 quits it.
+APPS_AUTOSTART :=
+# Package options, package.OPTION=value: bare_app's own Kconfig defconfig
+APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig
+
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
 #         [uboot.img @8M][trust.img @12M][p1 FAT32 BOOT @16M][p2 ext4 rootfs]

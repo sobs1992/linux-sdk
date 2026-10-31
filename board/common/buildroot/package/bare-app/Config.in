@@ -6,11 +6,20 @@ config BR2_PACKAGE_BARE_APP
 
 if BR2_PACKAGE_BARE_APP
 
+config BR2_PACKAGE_BARE_APP_DEFCONFIG
+	string "bare_app configuration"
+	default "oga_defconfig"
+	help
+	  What goes into the binary (bare_app's own Kconfig): a name in
+	  apps/bare_app/configs/ or a path to a defconfig file. In the SDK
+	  set it from the firmware config:
+	  APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig
+
 config BR2_PACKAGE_BARE_APP_AUTOSTART
 	bool "start at boot"
 	help
 	  Start bare_app from /etc/init.d/S90bare-app. It takes over the
 	  screen (the text console on tty1 comes back when it quits).
-	  Log: /var/log/bare_app.log.
+	  Log: /var/log/bare_app.log. In the SDK: APPS_AUTOSTART.
 
 endif

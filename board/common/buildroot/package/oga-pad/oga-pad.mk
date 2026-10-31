@@ -17,4 +17,11 @@ define OGA_PAD_INSTALL_TARGET_CMDS
 	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install
 endef
 
+ifeq ($(BR2_PACKAGE_OGA_PAD_AUTOSTART),y)
+define OGA_PAD_INSTALL_INIT_SYSV
+	$(INSTALL) -D -m 0755 $(OGA_PAD_PKGDIR)/S90oga-pad \
+		$(TARGET_DIR)/etc/init.d/S90oga-pad
+endef
+endif
+
 $(eval $(generic-package))

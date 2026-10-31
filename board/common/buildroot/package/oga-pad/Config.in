@@ -3,3 +3,10 @@ config BR2_PACKAGE_OGA_PAD
 	help
 	  Demo for the ODROID-GO Advance: move a square across the
 	  screen with the D-pad (evdev + framebuffer). Source: apps/oga-pad.
+
+config BR2_PACKAGE_OGA_PAD_AUTOSTART
+	bool "start at boot"
+	depends on BR2_PACKAGE_OGA_PAD
+	help
+	  Start oga-pad from /etc/init.d/S90oga-pad; F6 quits it and gives
+	  the screen back to the text console. Log: /var/log/oga-pad.log.

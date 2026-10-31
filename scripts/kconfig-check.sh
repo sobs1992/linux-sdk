@@ -1,9 +1,10 @@
 #!/bin/sh
 # Warn about fragment options that did not end up in the final .config
-# (usually an unmet dependency). Usage: kconfig-check.sh .config frag...
+# (usually an unmet dependency). Any symbol prefix: CONFIG_ (U-Boot,
+# Linux), BR2_ (Buildroot). Usage: kconfig-check.sh .config frag...
 cfg=$1; shift
 for frag; do
-	grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' "$frag" | while read -r line; do
+	grep -E '^([A-Z][A-Za-z0-9_]*=|# [A-Z][A-Za-z0-9_]* is not set$)' "$frag" | while read -r line; do
 		case "$line" in
 		"# "*)
 			sym=${line#\# }; sym=${sym%% *}

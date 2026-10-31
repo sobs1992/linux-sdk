@@ -106,10 +106,30 @@ Busybox init запускает `/etc/init.d/S??*` по порядку имён 
 
 ### Включить и собрать
 
+Пакет, исходники которого лежат в `apps/` (его `*_SITE` указывает туда), SDK считает
+**приложением**. Приложения включаются не в defconfig Buildroot платы, а в конфиге
+прошивки — переменной `APPS`:
+
+```make
+# configs/oga_defconfig
+APPS           := bare-app oga-pad sdk-hello
+APPS_AUTOSTART := sdk-hello        # нужна опция BR2_PACKAGE_SDK_HELLO_AUTOSTART
+```
+
 ```bash
-echo 'BR2_PACKAGE_SDK_HELLO=y' >> board/oga/buildroot/defconfig
+make FW=oga apps-list              # какие приложения есть, у кого автозапуск и опции
 make FW=oga rootfs image
 ```
+
+Строку `BR2_PACKAGE_SDK_HELLO=y` в `board/oga/buildroot/defconfig` писать бесполезно:
+SDK накладывает поверх него список приложений из `APPS`, и всё, чего там нет,
+выключает. Чтобы приложение поддерживало `APPS_AUTOSTART`, дайте ему опцию
+`BR2_PACKAGE_<ИМЯ>_AUTOSTART` и ставьте init-скрипт только при ней. Так сделано
+у `bare-app` и `oga-pad`. Опции пакета задаются через
+`APPS_CONFIG := пакет.ОПЦИЯ=значение`.
+
+Пакеты не из `apps/` (как `esp8089-firmware`) по-прежнему включаются в defconfig
+платы: `echo 'BR2_PACKAGE_X=y' >> board/oga/buildroot/defconfig`.
 
 Проверить без железа:
 

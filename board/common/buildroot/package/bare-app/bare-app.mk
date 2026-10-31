@@ -16,9 +16,10 @@ BARE_APP_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude /third_party/lvgl/demos \
 	--exclude /third_party/lvgl/examples
 
+# Composition of the binary: bare_app's Kconfig, see configs/ in the app.
+# Kconfiglib comes with the app; it needs the host's python3.
 BARE_APP_CONF_OPTS = \
-	-DBARE_APP_WITH_SDL=OFF \
-	-DBARE_APP_BUILD_TESTS=OFF
+	-DBARE_APP_DEFCONFIG=$(call qstrip,$(BR2_PACKAGE_BARE_APP_DEFCONFIG))
 
 ifeq ($(BR2_PACKAGE_BARE_APP_AUTOSTART),y)
 define BARE_APP_INSTALL_INIT_SYSV
