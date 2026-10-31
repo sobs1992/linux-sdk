@@ -1,0 +1,29 @@
+#!/bin/sh
+# Starts the bare_app GUI in the background (bare-app package).
+
+DAEMON=/usr/bin/bare_app
+PIDFILE=/var/run/bare_app.pid
+LOG=/var/log/bare_app.log
+
+case "$1" in
+start)
+	printf "Starting bare_app: "
+	start-stop-daemon -S -q -b -m -p $PIDFILE -x /bin/sh -- \
+		-c "exec $DAEMON >> $LOG 2>&1" && echo "OK" || echo "FAIL"
+	;;
+stop)
+	printf "Stopping bare_app: "
+	# SIGTERM: the app gives the screen back to the text console
+	start-stop-daemon -K -q -p $PIDFILE && echo "OK" || echo "FAIL"
+	rm -f $PIDFILE
+	;;
+restart|reload)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

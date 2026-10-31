@@ -189,6 +189,21 @@ scripts/oga-serial.py key right right a f6          # «нажать» кноп�
 (A = `BTN_EAST`, B = `BTN_SOUTH`). Аналоговый стик (`adc-joystick`) не поддерживается.
 `/tmp` на плате — tmpfs: после перезагрузки загруженное пропадает.
 
+### GUI-приложение bare_app
+
+`apps/bare_app` — отдельный репозиторий (сабмодуль): приложение на LVGL с DRM-слоями,
+кнопками, стиком, батареей и подсветкой. Устройство и сборка описаны в его
+`README.md` и `docs/ARCHITECTURE.md`. В образ OGA оно попадает пакетом `bare-app`
+(`BR2_PACKAGE_BARE_APP=y`, исходники копируются из `apps/bare_app`). Автозапуск при
+загрузке — опция `BR2_PACKAGE_BARE_APP_AUTOSTART` (`/etc/init.d/S90bare-app`, лог
+в `/var/log/bare_app.log`).
+
+```sh
+git submodule update --init --recursive apps/bare_app
+make FW=oga rootfs-make BR=bare-app-rebuild   # после правок в apps/bare_app
+apps/bare_app/tools/oga.sh run                # собрать и запустить на плате через UART
+```
+
 ## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`

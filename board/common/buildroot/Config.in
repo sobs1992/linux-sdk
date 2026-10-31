@@ -1,3 +1,4 @@
 # Custom packages: add "source "$BR2_EXTERNAL_SDK_PATH/package/<name>/Config.in"" lines here.
 source "$BR2_EXTERNAL_SDK_PATH/package/esp8089-firmware/Config.in"
 source "$BR2_EXTERNAL_SDK_PATH/package/oga-pad/Config.in"
+source "$BR2_EXTERNAL_SDK_PATH/package/bare-app/Config.in"

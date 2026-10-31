@@ -1,0 +1,16 @@
+config BR2_PACKAGE_BARE_APP
+	bool "bare_app"
+	help
+	  LVGL GUI application for the SDK (display, gamepad, battery,
+	  backlight). Source: apps/bare_app (git submodule).
+
+if BR2_PACKAGE_BARE_APP
+
+config BR2_PACKAGE_BARE_APP_AUTOSTART
+	bool "start at boot"
+	help
+	  Start bare_app from /etc/init.d/S90bare-app. It takes over the
+	  screen (the text console on tty1 comes back when it quits).
+	  Log: /var/log/bare_app.log.
+
+endif
