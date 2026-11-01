@@ -40,6 +40,8 @@ LINUX_ARCH      := arm64
 LINUX_IMAGE     := Image
 LINUX_DEFCONFIG := defconfig
 LINUX_FRAGMENTS := $(BOARD_DIR)/linux/oga.config
+# Kernel patches (*.patch, in name order), applied to a copy of LINUX_SRC
+LINUX_PATCHES   := $(BOARD_DIR)/linux/patches
 LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
                    rockchip/rk3326-odroid-go2-v11.dtb \
                    rockchip/rk3326-odroid-go3.dtb

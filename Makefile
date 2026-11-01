@@ -69,6 +69,7 @@ BUILDROOT_DEFCONFIG := $(call cfgpath,$(BUILDROOT_DEFCONFIG))
 UBOOT_FRAGMENTS     := $(foreach f,$(UBOOT_FRAGMENTS),$(call sdkpath,$(f)))
 LINUX_FRAGMENTS     := $(foreach f,$(LINUX_FRAGMENTS),$(call sdkpath,$(f)))
 LINUX_EXT_MODULES   := $(foreach m,$(LINUX_EXT_MODULES),$(call sdkpath,$(m)))
+LINUX_PATCHES       := $(if $(strip $(LINUX_PATCHES)),$(call sdkpath,$(strip $(LINUX_PATCHES))))
 
 # ----------------------------------------------------------------------------
 # Kconfig helpers (U-Boot and Linux)
@@ -192,17 +193,53 @@ bootfw-clean: check-fw
 # Linux
 
 LINUX_OUT := $(OUT)/linux
-LINUX_MAKE = $(MAKE) -C $(LINUX_SRC) O=$(LINUX_OUT) ARCH=$(LINUX_ARCH) CROSS_COMPILE=$(CROSS_COMPILE) $(LINUX_MAKE_ARGS)
+
+# The tree the kernel is built from. With LINUX_PATCHES (a directory of
+# *.patch, applied in name order) it is $(OUT)/linux-src: the committed state
+# of LINUX_SRC (git archive) with the patches applied, made again when the
+# commit or a patch changes. LINUX_SRC stays as checked out; edits not
+# committed there are not built then: make them patches.
+ifneq ($(LINUX_PATCHES),)
+LINUX_TREE := $(OUT)/linux-src
+LINUX_PATCH_FILES := $(sort $(wildcard $(LINUX_PATCHES)/*.patch))
+else
+LINUX_TREE := $(LINUX_SRC)
+endif
+
+LINUX_MAKE = $(MAKE) -C $(LINUX_TREE) O=$(LINUX_OUT) ARCH=$(LINUX_ARCH) CROSS_COMPILE=$(CROSS_COMPILE) $(LINUX_MAKE_ARGS)
 
 ifneq ($(FW),)
 $(call inputs-stamp,$(LINUX_OUT),$(LINUX_DEFCONFIG) $(LINUX_FRAGMENTS))
 endif
 
-$(LINUX_OUT)/.config: $(LINUX_OUT)/.sdk-inputs $(filter /%,$(LINUX_DEFCONFIG)) $(LINUX_FRAGMENTS)
-	$(call kconfig-configure,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG),$(LINUX_FRAGMENTS),$(LINUX_SRC))
+$(LINUX_OUT)/.config: $(LINUX_OUT)/.sdk-inputs $(filter /%,$(LINUX_DEFCONFIG)) $(LINUX_FRAGMENTS) | linux-tree
+	$(call kconfig-configure,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG),$(LINUX_FRAGMENTS),$(LINUX_TREE))
+
+# The patched tree. git archive gives every file the commit's time, so the
+# files the old and the new patches touch get a new one: their objects are
+# rebuilt when a patch changes or goes away.
+.PHONY: linux-tree
+linux-tree: check-fw
+ifneq ($(LINUX_PATCHES),)
+	@id="$$(git -C $(LINUX_SRC) rev-parse HEAD) $$(cat $(LINUX_PATCH_FILES) /dev/null | sha1sum | cut -d' ' -f1)"; \
+	if [ "$$(cat $(LINUX_TREE)/.sdk-tree 2>/dev/null)" != "$$id" ]; then \
+		echo ">>> Kernel tree $(LINUX_TREE): $(LINUX_SRC) $$(git -C $(LINUX_SRC) describe --always) + $(words $(LINUX_PATCH_FILES)) patch(es)"; \
+		old="$$(cat $(LINUX_TREE)/.sdk-files 2>/dev/null)"; \
+		rm -rf $(LINUX_TREE) && mkdir -p $(LINUX_TREE) && \
+		git -C $(LINUX_SRC) archive HEAD | tar -x -C $(LINUX_TREE) && \
+		for p in $(LINUX_PATCH_FILES); do \
+			echo "Applying $$(basename $$p)"; \
+			patch -d $(LINUX_TREE) -p1 -s --no-backup-if-mismatch -i $$p || exit 1; \
+		done && \
+		new="$$(cat $(LINUX_PATCH_FILES) /dev/null | sed -n 's|^+++ b/||p' | sort -u)" && \
+		for f in $$old $$new; do [ ! -e $(LINUX_TREE)/$$f ] || touch $(LINUX_TREE)/$$f; done && \
+		echo "$$new" > $(LINUX_TREE)/.sdk-files && \
+		echo "$$id" > $(LINUX_TREE)/.sdk-tree; \
+	fi
+endif
 
 .PHONY: linux linux-configure linux-menuconfig linux-savedefconfig linux-clean
-linux: check-cc $(LINUX_OUT)/.config
+linux: check-cc linux-tree $(LINUX_OUT)/.config
 	$(LINUX_MAKE) -j$(JOBS) $(LINUX_IMAGE) modules $(LINUX_DTBS)
 	rm -rf $(LINUX_INSTALL)
 	mkdir -p $(LINUX_INSTALL)/modules
@@ -223,7 +260,7 @@ linux-savedefconfig: check-cc $(LINUX_OUT)/.config
 	$(call kconfig-savedefconfig,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG))
 
 linux-clean: check-fw
-	rm -rf $(LINUX_OUT) $(LINUX_INSTALL)
+	rm -rf $(LINUX_OUT) $(LINUX_INSTALL) $(if $(LINUX_PATCHES),$(LINUX_TREE))
 
 # ----------------------------------------------------------------------------
 # Root filesystem (Buildroot)
@@ -350,6 +387,7 @@ info: check-fw
 	@$(if $(UBOOT_BL31_FILE),echo "BL31:      $(UBOOT_BL31_FILE)",true)
 	@$(if $(strip $(BOOTFW_FILES)),echo "Boot FW:   $(BOOTFW_NAME): $(BOOTFW_FILES)",true)
 	@echo "Linux:     $(LINUX_SRC) $(call gitdesc,$(LINUX_SRC)) ARCH=$(LINUX_ARCH) $(LINUX_DEFCONFIG) $(notdir $(LINUX_FRAGMENTS))"
+	@$(if $(LINUX_PATCHES),echo "           + $(words $(LINUX_PATCH_FILES)) patch(es) from $(LINUX_PATCHES) -> $(LINUX_TREE)",true)
 	@echo "Buildroot: $(BUILDROOT_SRC) $(call gitdesc,$(BUILDROOT_SRC)) $(BUILDROOT_DEFCONFIG)"
 	@echo "Apps:      $(or $(APPS),none)$(if $(APPS_AUTOSTART), (autostart: $(APPS_AUTOSTART)))$(if $(APPS_CONFIG), options: $(APPS_CONFIG))"
 	@echo "Image:     $(IMAGE_FILE)"

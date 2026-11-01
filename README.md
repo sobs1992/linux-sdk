@@ -113,6 +113,7 @@ dl/                            кэш загрузок (общий для все
 | `BOOTFW_NAME`, `BOOTFW_URL`, `BOOTFW_FILES`, `BOOTFW_HASH` | блобы прошивки (необязательно) |
 | `LINUX_SRC`, `LINUX_ARCH`, `LINUX_IMAGE` | ядро: `arm`/`arm64`, `zImage`/`Image` |
 | `LINUX_DEFCONFIG`, `LINUX_FRAGMENTS`, `LINUX_DTBS`, `LINUX_CMDLINE` | конфиг, dtb, командная строка |
+| `LINUX_PATCHES` | каталог патчей ядра `*.patch` (необязательно): ядро собирается из копии закоммиченного `LINUX_SRC` с патчами в `output/<прошивка>/linux-src`, сам подмодуль не меняется |
 | `BUILDROOT_SRC`, `BUILDROOT_EXTERNAL`, `BUILDROOT_DEFCONFIG` | rootfs |
 | `APPS` | приложения (пакеты из `apps/`) в rootfs; список — `make apps-list` |
 | `APPS_AUTOSTART` | какие из `APPS` запускать при загрузке (init-скрипт `S90<пакет>`) |
