@@ -355,6 +355,7 @@ image: check-fw
 	ROOTFS_FREE_MB=$(IMAGE_ROOTFS_FREE_MB) \
 	DISK_ID=$(IMAGE_DISK_ID) \
 	DATA_START_MB=$(IMAGE_DATA_START_MB) \
+	DATA_SIZE_MB=$(IMAGE_DATA_SIZE_MB) \
 	WORK_DIR=$(OUT)/image-work \
 	HOST_TOOLS=$(ROOTFS_OUT)/host/bin \
 	$(SDK_DIR)/scripts/mkimage.sh $(IMAGE_FILE)

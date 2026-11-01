@@ -1,0 +1,35 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] lib: mods found when bare_app runs the client are active
+
+On the ODROID-GO Advance the game files, mods included, are copied from
+a PC to a FAT32 partition, and the board has no launcher to turn a mod
+on: VCMI only adds the mods its launcher installs to the preset, so a
+copied mod stayed off. When bare_app runs the client (BARE_APP_LANG, as
+in 0001) every installed root mod is added to the active preset unless
+it asks to stay off (keepDisabled). Removing its directory turns it off.
+Translation mods of another language still do not load (0001).
+---
+ lib/modding/ModManager.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/lib/modding/ModManager.cpp b/lib/modding/ModManager.cpp
+index 986a631..de7f0ef 100644
+--- a/lib/modding/ModManager.cpp
++++ b/lib/modding/ModManager.cpp
+@@ -610,6 +610,16 @@ void ModManager::addNewModsToPreset()
+ {
+ 	const TModList & installedMods = getInstalledValidMods();
+ 
++	// Started by bare_app: the game files are copied from a PC and nothing
++	// on the board turns mods on or off, so every mod installed is active
++	// unless it asks to stay off. Removing its directory turns it off.
++	if(std::getenv("BARE_APP_LANG"))
++	{
++		for(const auto & modID : installedMods)
++			if(modID.find('.') == std::string::npos && !modsStorage->getMod(modID).keepDisabled())
++				modsPreset->addRootMod(modID);
++	}
++
+ 	for(const auto & modID : installedMods)
+ 	{
+ 		size_t dotPos = modID.find('.');

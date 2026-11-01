@@ -80,10 +80,12 @@ IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB  := 128
 # Free space added on top of the rootfs contents
 IMAGE_ROOTFS_FREE_MB := 256
-# Data partition p3 from here to the end of the card, ext4 "data" on /data.
-# Not in the image: the board creates it on the first boot and finds it
-# again after "make flash", so its contents survive reflashing. The rootfs
-# must end before it.
+# Data partitions, not in the image: the board creates them on the first
+# boot and finds them again after "make flash", so their contents survive
+# reflashing. p3 ext4 "data" on /data (saved games, settings) from here,
+# p4 FAT32 "GAMES" on /games (game files, copied from a PC) after it to the
+# end of the card. The rootfs must end before p3.
 IMAGE_DATA_START_MB := 4096
+IMAGE_DATA_SIZE_MB  := 1024
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f474131

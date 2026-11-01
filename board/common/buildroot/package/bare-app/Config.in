@@ -50,7 +50,8 @@ config BR2_PACKAGE_BARE_APP_HOMM3
 	help
 	  The VCMI engine (package vcmi, GPLv2) for Heroes III. The game
 	  data is not included: copy Data, Maps and Mp3 of an original
-	  installation to the data partition. In the SDK:
+	  installation to heroes3/ of the games partition (GAMES, /games),
+	  from a PC or with scripts/homm3-install.sh. In the SDK:
 	  APPS_CONFIG += bare-app.HOMM3=y
 
 endif

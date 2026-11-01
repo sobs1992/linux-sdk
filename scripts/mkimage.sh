@@ -6,10 +6,12 @@
 #   16M             p1 FAT32 "BOOT" (bootable): kernel, dtbs, extlinux.conf,
 #                   BOOT_FILES ("src[:name] ...", e.g. MLO, RPi firmware)
 #   16M+BOOT        p2 ext4 "rootfs": Buildroot rootfs.tar + kernel modules
-#   DATA_START_MB   p3 ext4 "data" (optional): not in the image, created by
-#                   /etc/init.d/S05data on the board up to the end of the
-#                   disk; the image only records the start in
-#                   /etc/data-partition and must end before it
+#   DATA_START_MB   p3 ext4 "data" (optional), DATA_SIZE_MB long or up to
+#                   the end of the disk; with DATA_SIZE_MB p4 FAT32 "GAMES"
+#                   after it to the end of the disk. Not in the image:
+#                   /etc/init.d/S05data creates them on the board, the image
+#                   only records "start size" of p3 in sectors in
+#                   /etc/data-partition and must end before p3
 #
 # DTB_LAYOUT picks where the dtbs land in BOOT, matching how U-Boot builds
 # ${fdtfile} for extlinux "fdtdir /": "tree" keeps the vendor dirs
@@ -25,6 +27,7 @@ RAW=${RAW:-}
 BOOT_FILES=${BOOT_FILES:-}
 DTB_LAYOUT=${DTB_LAYOUT:-tree}
 DATA_START_MB=${DATA_START_MB:-}
+DATA_SIZE_MB=${DATA_SIZE_MB:-}
 
 P1_START=32768	# 16 MiB, in 512-byte sectors
 
@@ -98,10 +101,15 @@ mkfs.vfat -F 32 -n BOOT -i "$disk_id" -C "$BOOT_IMG" $(( BOOT_SIZE_MB * 1024 )) 
 mcopy -i "$BOOT_IMG" -s -p -m "$BOOT_DIR"/* ::/
 
 # --- rootfs partition ---
+# Data partition for S05data: "start size" in sectors, no size: to the end
+data_part=
+if [ -n "$DATA_START_MB" ]; then
+	data_part=$(( DATA_START_MB * 2048 ))${DATA_SIZE_MB:+ $(( DATA_SIZE_MB * 2048 ))}
+fi
 ROOT_DIR=$WORK_DIR/rootfs
 ROOT_IMG=$WORK_DIR/rootfs.ext4
 fakeroot -- bash -euo pipefail -c '
-	root=$1 tar=$2 mods=$3 free_mb=$4 img=$5 data_start=$6
+	root=$1 tar=$2 mods=$3 free_mb=$4 img=$5 data_part=$6
 	mkdir -p "$root"
 	tar -xpf "$tar" -C "$root"
 	if [ -d "$mods/lib/modules" ]; then
@@ -113,13 +121,12 @@ fakeroot -- bash -euo pipefail -c '
 	mkdir -p "$root/boot"
 	sed -i "/[[:space:]]\/boot[[:space:]]/d" "$root/etc/fstab"
 	printf "LABEL=BOOT\t/boot\tvfat\tdefaults,noatime\t0\t0\n" >> "$root/etc/fstab"
-	# Data partition start for S05data, in sectors
 	rm -f "$root/etc/data-partition"
-	[ -z "$data_start" ] || echo "$data_start" > "$root/etc/data-partition"
+	[ -z "$data_part" ] || echo "$data_part" > "$root/etc/data-partition"
 	size_mb=$(( $(du -sm "$root" | cut -f1) * 11 / 10 + free_mb ))
 	mke2fs -q -F -t ext4 -L rootfs -d "$root" -E root_owner=0:0 "$img" "${size_mb}M"
 ' _ "$ROOT_DIR" "$ROOTFS_TAR" "$LINUX_DIR/modules" "$ROOTFS_FREE_MB" "$ROOT_IMG" \
-	"${DATA_START_MB:+$(( DATA_START_MB * 2048 ))}"
+	"$data_part"
 rm -rf "$ROOT_DIR"
 
 # --- disk ---

@@ -1,20 +1,25 @@
 #!/bin/sh
 #
-# Data partition: partition 3 of the boot disk, from a fixed start sector
-# to the end of the disk, ext4 labelled "data", mounted on /data. For game
-# data and anything else that must survive "make flash".
+# Data partitions of the boot disk, after the rootfs, kept by "make flash":
+#   p3  ext4 "data" from a fixed start sector, mounted on /data: saved
+#       games, settings and anything else written on the board
+#   p4  FAT32 "GAMES" right after p3 to the end of the disk (optional),
+#       mounted read-only on /games: game files, copied there from a PC
 #
-# The image has only BOOT and rootfs; scripts/mkimage.sh writes the start
-# sector to /etc/data-partition when the firmware config sets
-# IMAGE_DATA_START_MB. The first boot adds the partition and formats it.
-# Flashing the image again rewrites the partition table without it: the
-# next boot adds it at the same start, finds the "data" file system there
-# and keeps it. A partition 3 that is not ext4 "data" is never touched.
-# Needs sfdisk and partx (util-linux), mke2fs and e2label (e2fsprogs).
+# The image has only BOOT and rootfs; scripts/mkimage.sh writes "start
+# size" of p3 in sectors to /etc/data-partition when the firmware config
+# sets IMAGE_DATA_START_MB (and IMAGE_DATA_SIZE_MB: without a size p3 goes
+# to the end of the disk and there is no p4). The first boot adds the
+# partitions and formats them. Flashing the image again rewrites the
+# partition table without them: the next boot adds them at the same place,
+# finds the "data" and "GAMES" file systems there and keeps them. A
+# partition with another file system is never touched.
+#
+# /games is read-only, so switching the board off never leaves the FAT
+# dirty; "mount -o remount,rw /games" to write there from the board.
+# Needs sfdisk, partx and blkid (util-linux), mke2fs (e2fsprogs), mkdosfs.
 
 CONF=/etc/data-partition
-LABEL=data
-MOUNT=/data
 MIN_SECTORS=131072	# 64 MiB
 
 log() { echo "data: $*"; logger -t data "$*" 2>/dev/null; }
@@ -27,6 +32,9 @@ root_disk() {
 part_name() {
 	case $1 in *[0-9]) echo "$1p$2" ;; *) echo "$1$2" ;; esac
 }
+part_end() {
+	echo $(( $(cat "/sys/class/block/$1/start") + $(cat "/sys/class/block/$1/size") ))
+}
 
 wait_node() {
 	i=0
@@ -37,43 +45,84 @@ wait_node() {
 	[ -b "/dev/$1" ] || mknod "/dev/$1" b $(tr ':' ' ' < "/sys/class/block/$1/dev")
 }
 
+# add partition N (the next one) at START, SIZE sectors long (empty: to
+# the end of the disk), of MBR type TYPE
+add_part() {
+	log "adding $(part_name "$disk" "$1") at sector $2"
+	echo "start=$2,${3:+ size=$3,} type=$4" |
+		sfdisk -q --append --no-reread --no-tell-kernel "/dev/$disk" &&
+		partx -a -n "$1" "/dev/$disk" || { log "cannot add partition $1"; return 1; }
+	wait_node "$(part_name "$disk" "$1")"
+}
+
+# the file system on partition $1 is of type $2 and labelled $3
+is_fs() {
+	[ "$(blkid -p -o value -s TYPE "/dev/$1" 2>/dev/null)" = "$2" ] &&
+		[ "$(blkid -p -o value -s LABEL "/dev/$1" 2>/dev/null)" = "$3" ]
+}
+
+data() {
+	if [ ! -e "/sys/class/block/$p3" ]; then
+		if [ "$(part_end "$p2")" -gt "$data_start" ]; then
+			log "rootfs ends at sector $(part_end "$p2"), past the data start $data_start"
+			return 1
+		fi
+		if [ $(( ${games_start:-$disk_size} - data_start )) -lt $MIN_SECTORS ] ||
+		   [ "${games_start:-0}" -gt "$disk_size" ]; then
+			log "no room for a data partition on $disk"
+			return 1
+		fi
+		add_part 3 "$data_start" "$data_size" 83 || return 1
+	elif ! is_fs "$p3" ext4 data; then
+		log "$p3 is not an ext4 \"data\" file system, leaving it alone"
+		return 1
+	fi
+	if ! is_fs "$p3" ext4 data; then
+		log "formatting $p3"
+		mke2fs -q -t ext4 -L data "/dev/$p3" || return 1
+	fi
+	mkdir -p /data
+	# fails, keeping it, if "data" is larger than p3 (from an older layout)
+	mount -t ext4 -o noatime "/dev/$p3" /data || { log "cannot mount $p3"; return 1; }
+	log "$p3 on /data"
+}
+
+games() {
+	if [ ! -e "/sys/class/block/$p4" ]; then
+		if [ "$(part_end "$p3")" -gt "$games_start" ]; then
+			log "$p3 ends at sector $(part_end "$p3"), past the games start $games_start"
+			return 1
+		fi
+		if [ $((disk_size - games_start)) -lt $MIN_SECTORS ]; then
+			log "no room for a games partition on $disk"
+			return 1
+		fi
+		add_part 4 "$games_start" "" c || return 1
+	elif ! is_fs "$p4" vfat GAMES; then
+		log "$p4 is not a FAT \"GAMES\" file system, leaving it alone"
+		return 1
+	fi
+	if ! is_fs "$p4" vfat GAMES; then
+		log "formatting $p4"
+		mkdosfs -n GAMES "/dev/$p4" > /dev/null || return 1
+	fi
+	mkdir -p /games
+	mount -t vfat -o ro,noatime,utf8,umask=022 "/dev/$p4" /games || { log "cannot mount $p4"; return 1; }
+	log "$p4 on /games"
+}
+
 start() {
 	[ -f "$CONF" ] || return 0
-	start=$(cat "$CONF")
+	read -r data_start data_size < "$CONF"
+	games_start=${data_size:+$((data_start + data_size))}
 	disk=$(root_disk) || { log "cannot find the root disk"; return 1; }
+	disk_size=$(cat "/sys/block/$disk/size")
 	p2=$(part_name "$disk" 2)
 	p3=$(part_name "$disk" 3)
-	created=
+	p4=$(part_name "$disk" 4)
 
-	if [ ! -e "/sys/class/block/$p3" ]; then
-		size=$(cat "/sys/block/$disk/size")
-		p2_end=$(( $(cat "/sys/class/block/$p2/start") + $(cat "/sys/class/block/$p2/size") ))
-		if [ "$p2_end" -gt "$start" ]; then
-			log "rootfs ends at sector $p2_end, past the data start $start"
-			return 1
-		fi
-		if [ $((size - start)) -lt $MIN_SECTORS ]; then
-			log "no room for a data partition on $disk"
-			return 0
-		fi
-		log "adding $p3 at sector $start"
-		echo "start=$start, type=83" | sfdisk -q --append --no-reread --no-tell-kernel "/dev/$disk" &&
-			partx -a -n 3 "/dev/$disk" || { log "cannot add $p3"; return 1; }
-		wait_node "$p3"
-		created=1
-	fi
-
-	if [ "$(e2label "/dev/$p3" 2>/dev/null)" != "$LABEL" ]; then
-		if [ -z "$created" ]; then
-			log "$p3 is not an ext4 \"$LABEL\" file system, leaving it alone"
-			return 1
-		fi
-		log "formatting $p3"
-		mke2fs -q -t ext4 -L "$LABEL" "/dev/$p3" || return 1
-	fi
-
-	mkdir -p "$MOUNT"
-	mount -t ext4 -o noatime "/dev/$p3" "$MOUNT" && log "$p3 on $MOUNT"
+	data || return 1
+	[ -z "$games_start" ] || games
 }
 
 case "$1" in
@@ -81,7 +130,9 @@ start)
 	start
 	;;
 stop)
-	mountpoint -q "$MOUNT" && umount "$MOUNT"
+	for m in /games /data; do
+		! mountpoint -q $m || umount $m
+	done
 	;;
 *)
 	echo "Usage: $0 {start|stop}"

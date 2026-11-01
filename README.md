@@ -92,7 +92,7 @@ scripts/fetch-files.sh         загрузка блобов с проверко
 scripts/rk-legacy-pack.sh      упаковка uboot.img/trust.img для SPI miniloader (OGA)
 scripts/flash.sh               запись на SD с проверками
 scripts/apps-config.sh         приложения из конфига прошивки (APPS) -> настройки Buildroot
-scripts/homm3-install.sh       данные Героев III и моды VCMI (HotA, русский) на плату по SSH (/data/vcmi)
+scripts/homm3-install.sh       данные Героев III и моды VCMI (HotA, русский) на раздел GAMES (с ПК или по SSH)
 src/                           сабмодули компонентов
 dl/                            кэш загрузок (общий для всех прошивок)
 ```
@@ -123,6 +123,7 @@ dl/                            кэш загрузок (общий для все
 | `IMAGE_DTB_LAYOUT` | dtb в BOOT: `tree` (`vendor/x.dtb`), `flat` (`x.dtb`) или `both` — как U-Boot строит `fdtfile` |
 | `IMAGE_BOOT_SIZE_MB`, `IMAGE_ROOTFS_FREE_MB`, `IMAGE_DISK_ID` | размеры, идентификатор MBR |
 | `IMAGE_DATA_START_MB` | начало раздела данных `/data` (необязательно, см. ниже) |
+| `IMAGE_DATA_SIZE_MB` | размер `/data`; если задан, после него раздел игр `/games` до конца карты |
 
 Приложения из `apps/` включаются только через `APPS`. SDK накладывает их на defconfig
 Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedefconfig`
@@ -141,17 +142,33 @@ Buildroot платы (`output/<fw>/buildroot/defconfig.sdk`), а `rootfs-savedef
 до 16M          raw-блобы загрузчика (IMAGE_RAW), если плате они нужны
 16M             p1 FAT32 BOOT (активный): ядро, dtb, extlinux/extlinux.conf, IMAGE_BOOT_FILES
 дальше          p2 ext4 rootfs: rootfs.tar + модули ядра; /boot монтируется по LABEL=BOOT
-IMAGE_DATA_START_MB  p3 ext4 data до конца карты, на /data (если задан)
+IMAGE_DATA_START_MB  p3 ext4 data на /data, IMAGE_DATA_SIZE_MB или до конца карты (если задан)
+дальше          p4 FAT32 GAMES до конца карты, на /games (если задан IMAGE_DATA_SIZE_MB)
 ```
 
-Раздела данных в образе нет. Его создаёт при загрузке `/etc/init.d/S05data`: добавляет
-p3 от `IMAGE_DATA_START_MB` до конца карты, форматирует в ext4 с меткой `data` и
-монтирует в `/data`. После `make flash` в таблице разделов снова только p1 и p2;
-скрипт находит на прежнем месте файловую систему `data` и подключает её без
-форматирования, поэтому содержимое `/data` переживает перепрошивку. Раздел 3, который
-не является ext4 `data`, скрипт не трогает. rootfs должен кончаться раньше начала
-раздела, это проверяет `mkimage.sh`. Нужны `sfdisk`, `partx` (util-linux) и `mke2fs`,
-`e2label` (e2fsprogs) в rootfs.
+Разделов данных в образе нет. Их создаёт при загрузке `/etc/init.d/S05data`: добавляет
+p3 от `IMAGE_DATA_START_MB` длиной `IMAGE_DATA_SIZE_MB` (без размера — до конца карты)
+и форматирует в ext4 с меткой `data`, затем p4 от конца p3 до конца карты и форматирует
+в FAT32 с меткой `GAMES`. `/data` — для того, что пишется на плате: сохранения,
+настройки, журналы. `/games` — для файлов игр: карту можно вставить в ПК (Windows,
+Linux, macOS видят раздел GAMES) и скопировать игры туда. На плате `/games`
+монтируется только для чтения, чтобы выключение питания не оставляло FAT «грязной»;
+записать с платы: `mount -o remount,rw /games`.
+
+После `make flash` в таблице разделов снова только p1 и p2; скрипт находит на прежних
+местах файловые системы `data` и `GAMES` и подключает их без форматирования, поэтому
+содержимое обоих разделов переживает перепрошивку. Раздел с другой файловой системой
+скрипт не трогает. rootfs должен кончаться раньше начала p3, это проверяет
+`mkimage.sh`. Нужны `sfdisk`, `partx`, `blkid` (util-linux), `mke2fs` (e2fsprogs) и
+`mkdosfs` (busybox) в rootfs.
+
+Карту со старой разметкой (p3 `data` до конца карты, без p4) скрипт не переразмечает:
+`/data` подключается как раньше, `/games` нет. Перенос: сохранить с платы всё нужное
+из `/data` (`ssh root@<адрес> 'tar -cf - -C /data .' > data.tar`), затем на плате
+`/etc/init.d/S90bare-app stop; umount /data`,
+`dd if=/dev/zero of=/dev/mmcblk0p3 bs=1M count=4`, `sfdisk --delete /dev/mmcblk0 3`,
+`partx -d --nr 3 /dev/mmcblk0`, `/etc/init.d/S05data start` и вернуть сохранения и
+настройки в `/data`, а файлы игр — на `/games`.
 
 `make flash-boot` пишет `images/boot-area.bin`: от первого raw-блоба (или от 16M)
 до конца раздела BOOT. MBR и rootfs не трогаются, поэтому на карте должен быть
@@ -272,29 +289,35 @@ apps/bare_app/tools/oga.sh run                # собрать и запусти
    `make flash DEV=/dev/sdX`.
 
 7. **Первая загрузка.** bare_app запускается сам. `/etc/init.d/S05data` создаёт на остатке
-   карты раздел `/data` (см. «Разметка SD»), он переживает перепрошивку. Wi-Fi и адрес
+   карты разделы `/data` (1 ГБ, ext4: сохранения, настройки) и `/games` (FAT32 `GAMES`:
+   файлы игр), см. «Разметка SD»; оба переживают перепрошивку. Wi-Fi и адрес
    платы — в bare_app: «Настройки» → Wi-Fi; проверка входа: `ssh root@<адрес>`.
 
 8. **Doom** работает сразу: `doom1.wad` уже в образе (`/usr/share/games/doom/`). Свой
-   IWAD (`doom.wad`, `doom2.wad`) кладите в `/data`, например `/data/doom/doom2.wad`, и
-   укажите этот путь в `GAME_DOOM_WAD` (Kconfig bare_app). rootfs при перепрошивке
-   перезаписывается, `/data` нет. Сохранения Doom лежат в rootfs (`GAME_DOOM_DIR`; при
-   автозапуске `HOME=/`, то есть `/.local/share/bare_app/doom`) и при перепрошивке
-   пропадают.
+   IWAD положите с ПК в каталог `doom` раздела GAMES (`GAMES:/doom/doom2.wad`, на плате
+   `/games/doom`). bare_app запускает первый найденный там: `doom2.wad`, `plutonia.wad`,
+   `tnt.wad`, `doom.wad`, `freedoom2.wad`, `freedoom1.wad`, `doom1.wad` (регистр имени не
+   важен); если там пусто — shareware из образа. Настройки и сохранения Doom лежат в
+   `/data/doom` и переживают перепрошивку.
 
 9. **Герои III.** Нужна установка Shadow of Death или Complete (подойдёт и с HotA):
    каталог с `Data` (`H3bitmap.lod`, `H3sprite.lod`, `Heroes3.snd`, `VIDEO.VID`), `Maps`
-   и `MP3`. Скрипт копирует их на плату, скачивает моды в `dl/hota/` и включает их:
+   и `MP3`. Скрипт скачивает моды в `dl/hota/` и копирует всё в `heroes3/` раздела GAMES:
+   на карту, вставленную в ПК, или на плату по SSH:
 
    ```sh
-   scripts/homm3-install.sh ~/games/HoMM3 <адрес платы>
+   scripts/homm3-install.sh ~/games/HoMM3 /media/$USER/GAMES   # карта в ПК
+   scripts/homm3-install.sh ~/games/HoMM3 <адрес платы>        # по SSH
    ```
 
-   На плате всё лежит в `/data` и переживает перепрошивку:
+   Можно и вручную, в том числе из Windows: на GAMES нужны `heroes3/Data`, `heroes3/Maps`,
+   `heroes3/Mp3` и моды в `heroes3/Mods/<id>` (распакованный архив мода, каталог
+   переименован в id: `hota`, `russian-translation`). Все моды в `Mods` включаются сами;
+   чтобы выключить мод, удалите его каталог. Всё переживает перепрошивку:
 
    ```text
-   /data/vcmi/Data, Maps, Mp3   файлы игры
-   /data/vcmi/Mods              моды: hota, russian-translation
+   /games/heroes3/Data, Maps, Mp3   файлы игры (раздел GAMES)
+   /games/heroes3/Mods              моды: hota, russian-translation
    /data/vcmi/Saves             сохранения: Autosave и слоты Slot01..Slot10
    /data/config/vcmi            настройки VCMI (settings.json, modSettings.json)
    /data/cache/vcmi             журнал VCMI_Client_log.txt
@@ -329,8 +352,11 @@ Shareware `doom1.wad` ставит опция пакета (пакет `doom1-wa
 APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
 ```
 
-Свой `doom.wad` или `doom2.wad` можно положить в `/usr/share/games/doom/` и указать
-в `GAME_DOOM_WAD`.
+Свой IWAD кладут на раздел GAMES в `doom/` (`GAME_DOOM_GAME`, на плате `/games/doom`):
+bare_app берёт первый найденный из `doom2.wad`, `plutonia.wad`, `tnt.wad`, `doom.wad`,
+`freedoom2.wad`, `freedoom1.wad`, `doom1.wad`, иначе `GAME_DOOM_WAD` (shareware в
+образе). Настройки и сохранения — в `/data/doom` (`GAME_DOOM_DIR` в `oga_defconfig`
+bare_app).
 
 ### Герои III (VCMI)
 
@@ -339,15 +365,19 @@ APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
 без лаунчера и редактора. Ролики игры (Bink, Smacker) показывает ffmpeg, собранный
 только с этими декодерами; SDL2_mixer получает свои патчи из `package/vcmi/sdl2_mixer/`.
 В меню bare_app появляется пункт «Герои III». Данные игры в образ
-не входят. Их копирует на плату по SSH скрипт, вместе с модами VCMI, которые он
-один раз скачивает в `dl/hota/`:
+не входят. Их копирует скрипт в `heroes3/` раздела GAMES, вместе с модами VCMI, которые
+он один раз скачивает в `dl/hota/`:
 
 ```sh
-scripts/homm3-install.sh ~/games/HoMM3 192.168.50.61    # каталог с Data, Maps, MP3
+scripts/homm3-install.sh ~/games/HoMM3 /media/$USER/GAMES  # карта в ПК; каталог с Data, Maps, MP3
+scripts/homm3-install.sh ~/games/HoMM3 192.168.50.61       # на плату по SSH
 ```
 
 Подойдёт установка Shadow of Death или Complete (в том числе с HotA). Копируются
-только файлы, которые читает VCMI (около 330 МБ), всё в `/data/vcmi`. Моды:
+только файлы, которые читает VCMI (около 330 МБ). bare_app передаёт VCMI каталог игры
+`/games/heroes3` (`GAME_HOMM3_GAME`) и каталог данных `/data` (`GAME_HOMM3_DATA`:
+сохранения, настройки, журналы). Под bare_app VCMI включает все моды из `Mods` (патч
+0006), выключить мод — удалить его каталог. Моды:
 
 - `hota` — Horn of the Abyss для VCMI (около 520 МБ, `--no-hota` без него);
 - `russian-translation` — русский перевод оригинальной игры с русскими шрифтами
@@ -355,7 +385,8 @@ scripts/homm3-install.sh ~/games/HoMM3 192.168.50.61    # каталог с Data
   есть когда русский выбран в bare_app; с HotA заодно включает русские кнопки её
   главного меню.
 
-Повторный запуск сохраняет настройки модов VCMI и добавляет недостающие моды.
+Повторный запуск копирует файлы заново и заменяет каталоги модов; настройки модов
+VCMI остаются в `/data/config/vcmi`.
 Сборка VCMI тяжёлая: компилируется в 4 потока (`VCMI_JOBS`), примерно по 1 ГБ памяти
 на поток.
 

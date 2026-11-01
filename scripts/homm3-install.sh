@@ -1,26 +1,28 @@
 #!/bin/bash
-# Copy Heroes of Might and Magic III data and VCMI mods to a board running
-# VCMI (APPS_CONFIG += bare-app.HOMM3=y), over SSH.
+# Copy Heroes of Might and Magic III files and VCMI mods for a board running
+# VCMI (APPS_CONFIG += bare-app.HOMM3=y) to the games partition of its SD
+# card: mounted on this PC, or on the board over SSH.
 #
-#   homm3-install.sh [--no-hota] [--no-rus] GAME_DIR [root@]HOST
+#   homm3-install.sh [--no-hota] [--no-rus] GAME_DIR GAMES_DIR|[root@]HOST
 #
 # GAME_DIR is an original installation, Shadow of Death or Complete (a HotA
 # installation is fine too): the directory with Data, Maps and MP3. Only
 # what VCMI reads is copied (~330 MB): the SoD/AB archives of Data (empty
 # placeholders and HotA's own files skipped), Maps, MP3.
 #
-# Mods for VCMI, downloaded once into the SDK's dl/hota/, unpacked to Mods/
-# and enabled in VCMI's modSettings.json:
+# Mods for VCMI, downloaded once into the SDK's dl/hota/ and unpacked to
+# Mods/ (VCMI turns on every mod there when bare_app runs it):
 #   hota                 Horn of the Abyss, VCMI's port (~520 MB, CC BY-SA)
 #   russian-translation  the original game in Russian (~70 MB): a translation
 #                        mod, active only while VCMI's language is Russian
 #                        (bare_app's language); with HotA it also switches
 #                        HotA's main menu to Russian buttons
 #
-# On the board: /data/vcmi (VCMI's data directory with XDG_DATA_HOME=/data)
-# and /data/config/vcmi; /data is the data partition (IMAGE_DATA_START_MB).
+# Everything goes to heroes3/ of the games partition: GAMES_DIR is where
+# the card's FAT32 "GAMES" partition is mounted on this PC; over SSH it is
+# /games (IMAGE_DATA_SIZE_MB), mounted read-only, writable for the copy.
 # The board has no rsync: files go as a tar stream, so a rerun copies all
-# of them again. A rerun keeps VCMI's mod settings and adds missing mods.
+# of them again. Saved games and settings are on the board's /data.
 set -euo pipefail
 
 SDK_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,8 +33,6 @@ MODS="
 hota $REPO/horn-of-the-abyss/releases/download/1.7/horn-of-the-abyss-vcmi-1.7.zip
 russian-translation $REPO/mega-pack-rus/releases/download/1.7/mega-pack-rus-vcmi-1.7.zip
 "
-DEST=/data/vcmi
-CONF=/data/config/vcmi
 
 die() { echo "homm3-install: $*" >&2; exit 1; }
 
@@ -46,10 +46,16 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
-[ $# -eq 2 ] || die "usage: $0 [--no-hota] [--no-rus] GAME_DIR [root@]HOST"
+[ $# -eq 2 ] || die "usage: $0 [--no-hota] [--no-rus] GAME_DIR GAMES_DIR|[root@]HOST"
 game=$1
-host=$2
-case $host in *@*) ;; *) host=root@$host ;; esac
+host=
+if [ -d "$2" ]; then
+	dest=$2/heroes3
+else
+	dest=/games/heroes3
+	host=$2
+	case $host in *@*) ;; *) host=root@$host ;; esac
+fi
 
 # Directories by name, any case (MP3, Mp3, mp3)
 subdir() { find "$game" -mindepth 1 -maxdepth 1 -type d -iname "$1" | head -n1; }
@@ -59,8 +65,10 @@ mp3=$(subdir mp3)
 [ -n "$data" ] && [ -f "$(find "$data" -maxdepth 1 -iname h3bitmap.lod | head -n1)" ] ||
 	die "$game: no Data/H3bitmap.lod, not a Heroes III installation"
 
-ssh "$host" "mountpoint -q /data" ||
-	die "$host: /data is not mounted (data partition, IMAGE_DATA_START_MB)"
+if [ -n "$host" ]; then
+	ssh "$host" "mountpoint -q /games" ||
+		die "$host: /games is not mounted (games partition, IMAGE_DATA_SIZE_MB)"
+fi
 
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
@@ -97,34 +105,31 @@ done < <(find "$data" -maxdepth 1 -type f -size +0 \
 [ -z "$maps" ] || ln -s "$maps" "$staging/game/Maps"
 [ -z "$mp3" ] || ln -s "$mp3" "$staging/game/Mp3"
 
-echo "Copying game data to $host:$DEST: $(du -shL "$staging/game" | cut -f1)"
-tar -C "$staging/game" -chf - . | ssh "$host" "mkdir -p $DEST && tar -C $DEST -xf -"
-
-for id in $mods; do
-	echo "Copying the mod $id to $host:$DEST/Mods/$id: $(du -shL "$staging/Mods/$id" | cut -f1)"
-	tar -C "$staging/Mods" -chf - "$id" |
-		ssh "$host" "rm -rf $DEST/Mods/$id && mkdir -p $DEST/Mods && tar -C $DEST/Mods -xf -"
-done
-
-# Enable them. A new modSettings.json lists them (VCMI keeps the base mod
-# "vcmi" itself); an existing one, with the player's submod choices, gets
-# the missing ids added to the "mods" line of its active preset.
-if [ -n "$mods" ]; then
-	ssh "$host" "sh -s" <<-EOF
-	set -e
-	f=$CONF/modSettings.json
-	mkdir -p $CONF
-	if [ ! -f \$f ]; then
-		list=\$(for m in vcmi $mods; do printf '"%s", ' \$m; done)
-		printf '{\n\t"activePreset" : "default",\n\t"presets" : {\n\t\t"default" : {\n\t\t\t"mods" : [ %s ],\n\t\t\t"settings" : {}\n\t\t}\n\t}\n}\n' "\${list%, }" > \$f
+# copy the contents of a directory (symlinks followed) into one on the
+# games partition; run a shell command where the games partition is
+copy() {
+	if [ -z "$host" ]; then
+		mkdir -p "$2"
+		cp -rL "$1/." "$2/"
 	else
-		for m in $mods; do
-			grep -q "\"mods\" : \[.*\"\$m\"" \$f || sed -i "s/\(\"mods\" : \[\)/\1 \"\$m\",/" \$f
-		done
+		tar -C "$1" -chf - . | ssh "$host" "mkdir -p '$2' && tar -C '$2' -xf -"
 	fi
-	grep '"mods"' \$f
-	EOF
+}
+run() { if [ -z "$host" ]; then sh -c "$1"; else ssh "$host" "$1"; fi; }
+
+if [ -n "$host" ]; then
+	ssh "$host" "mount -o remount,rw /games"
+	trap 'rm -rf "$staging"; ssh "$host" "sync; mount -o remount,ro /games"' EXIT
 fi
 
-ssh "$host" "sync; df -h /data | tail -n1"
+echo "Copying game data to ${host:+$host:}$dest: $(du -shL "$staging/game" | cut -f1)"
+copy "$staging/game" "$dest"
+
+for id in $mods; do
+	echo "Copying the mod $id to ${host:+$host:}$dest/Mods/$id: $(du -shL "$staging/Mods/$id" | cut -f1)"
+	run "rm -rf '$dest/Mods/$id'"
+	copy "$staging/Mods/$id" "$dest/Mods/$id"
+done
+
+run "sync; df -h '$dest' | tail -n1"
 echo "Done"
