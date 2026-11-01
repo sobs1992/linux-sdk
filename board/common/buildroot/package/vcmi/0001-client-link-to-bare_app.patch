@@ -8,8 +8,9 @@ window, twice the size of bare_app's video layer, stays in memory: after
 each SDL_RenderPresent its content goes to bare_app scaled down 2:1, or a
 1:1 part around the cursor (L1 switches). Gamepad messages become SDL game
 controller events, so VCMI's own controller support drives the game. The
-D-pad moves the magnifier (back to the cursor once the stick moves), or in
-the overview scrolls the adventure map wherever the cursor is; the map
+D-pad moves the magnifier off the cursor (once the stick moves, the cursor
+comes into view at the edge it was beyond), or in the overview scrolls
+the adventure map wherever the cursor is; the map
 scrolls at a screen border only while the stick pushes that way, since
 the stick leaves the cursor there.
 
@@ -46,16 +47,16 @@ Signed-off-by: Sobs <antohasobne@gmail.com>
  client/HeroMovementController.cpp             |  20 +-
  client/HeroMovementController.h               |   3 +
  client/adventureMap/AdventureMapInterface.cpp |  25 ++
- client/adventureMap/CMinimap.cpp              |  19 ++
+ client/adventureMap/CMinimap.cpp              |  19 +
  client/eventsSDL/InputHandler.cpp             |   9 +
- client/renderSDL/BareAppLink.cpp              | 428 ++++++++++++++++++++++++++
- client/renderSDL/BareAppLink.h                |  82 +++++
+ client/renderSDL/BareAppLink.cpp              | 441 ++++++++++++++++++++++++
+ client/renderSDL/BareAppLink.h                |  83 +++++
  client/renderSDL/ScreenHandler.cpp            |  23 +-
  clientapp/EntryPoint.cpp                      |   8 +
  lib/GameLibrary.cpp                           |  15 +
  lib/modding/ModManager.cpp                    |   5 +
  lib/texts/TextOperations.cpp                  |  22 ++
- 13 files changed, 663 insertions(+), 4 deletions(-)
+ 13 files changed, 677 insertions(+), 4 deletions(-)
 
 diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
 index 232538e..df3bfe6 100644
@@ -250,10 +251,10 @@ index da1f40c..4e7f045 100644
  		preprocessEvent(ev);
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
 new file mode 100644
-index 0000000..8b35d08
+index 0000000..ec68bbc
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.cpp
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,441 @@
 +/*
 + * BareAppLink.cpp, part of VCMI engine
 + *
@@ -267,6 +268,9 @@ index 0000000..8b35d08
 +#include "BareAppLink.h"
 +
 +#include "../GameEngine.h"
++#include "../eventsSDL/InputHandler.h"
++#include "../gui/CursorHandler.h"
++#include "../render/IScreenHandler.h"
 +#include "../../lib/CConfigHandler.h"
 +
 +#include <SDL.h>
@@ -281,8 +285,6 @@ index 0000000..8b35d08
 +
 +namespace
 +{
-+/// The magnifier moves when the cursor comes this close to its edge
-+constexpr int magnifierMargin = 48;
 +/// Cursor images are smaller than this, hot spot included
 +constexpr int cursorReach = 64;
 +/// D-pad: the magnifier's speed, window pixels per second
@@ -391,15 +393,9 @@ index 0000000..8b35d08
 +		}
 +		if(!detached)
 +		{
-+			// Keep the cursor inside, a margin from the edges
-+			if(cursor.x < viewport.x + magnifierMargin)
-+				viewport.x = cursor.x - magnifierMargin;
-+			if(cursor.x > viewport.x + w - magnifierMargin)
-+				viewport.x = cursor.x - w + magnifierMargin;
-+			if(cursor.y < viewport.y + magnifierMargin)
-+				viewport.y = cursor.y - magnifierMargin;
-+			if(cursor.y > viewport.y + h - magnifierMargin)
-+				viewport.y = cursor.y - h + magnifierMargin;
++			// The cursor pushes the view at its edges
++			viewport.x = std::clamp(viewport.x, cursor.x - w + 1, cursor.x);
++			viewport.y = std::clamp(viewport.y, cursor.y - h + 1, cursor.y);
 +		}
 +		viewport.x = std::clamp(viewport.x, 0, std::max(srcW - w, 0));
 +		viewport.y = std::clamp(viewport.y, 0, std::max(srcH - h, 0));
@@ -574,6 +570,24 @@ index 0000000..8b35d08
 +	viewport += direction * std::max<int>(magnifierSpeed * passed / 1000, 1);
 +}
 +
++/// The D-pad has moved the magnifier off the cursor: the cursor comes in at
++/// the edge it was beyond, the view stays where it is
++void BareAppLink::cursorIntoView()
++{
++	const Point & cursor = ENGINE->getCursorPosition();
++	const int w = shm->width;
++	const int h = shm->height;
++	if(cursor.x >= viewport.x && cursor.x < viewport.x + w && cursor.y >= viewport.y && cursor.y < viewport.y + h)
++		return;
++
++	const Point target(std::clamp(cursor.x, viewport.x, viewport.x + w - 1),
++		std::clamp(cursor.y, viewport.y, viewport.y + h - 1));
++	// as VCMI's own controller cursor moves (InputSourceGameController::doCursorMove)
++	const int scale = ENGINE->screenHandler().getScalingFactor();
++	ENGINE->input().setCursorPosition(target);
++	ENGINE->cursor().cursorMove(target.x * scale, target.y * scale);
++}
++
 +Point BareAppLink::mapScrollDirection()
 +{
 +	mapScrollAt = SDL_GetTicks();
@@ -637,13 +651,13 @@ index 0000000..8b35d08
 +
 +void BareAppLink::onAxis(int axis, int value)
 +{
-+	// The left stick moves the cursor, and the magnifier comes back to it
++	// The left stick moves the cursor, from inside the magnifier
 +	if(axis != GP_AXIS_LX && axis != GP_AXIS_LY)
 +		return;
 +	if(value && detached)
 +	{
 +		detached = false;
-+		rejoin = true;
++		cursorIntoView();
 +	}
 +	if(axis == GP_AXIS_LX)
 +	{
@@ -684,10 +698,10 @@ index 0000000..8b35d08
 +}
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
 new file mode 100644
-index 0000000..b968a66
+index 0000000..11159e9
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,83 @@
 +/*
 + * BareAppLink.h, part of VCMI engine
 + *
@@ -750,6 +764,7 @@ index 0000000..b968a66
 +	Point dpadDirection() const;
 +	void updateDpad();
 +	void moveMagnifier();
++	void cursorIntoView();
 +	void compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst);
 +	void drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst);
 +
@@ -758,7 +773,7 @@ index 0000000..b968a66
 +	bool magnifier = false;
 +	Point viewport;		///< top left of the magnified part, in window pixels
 +	bool detached = false;	///< the D-pad has moved the magnifier off the cursor
-+	bool rejoin = false;	///< the stick has moved since: back to the cursor
++	bool rejoin = false;	///< the magnifier has opened: around the cursor
 +	uint32_t movedAt = 0;	///< SDL_GetTicks() of the last magnifier move check
 +	uint32_t dpad = 0;	///< D-pad directions held, gp_button bits
 +	bool swiping = false;	///< the D-pad holds VCMI's right stick

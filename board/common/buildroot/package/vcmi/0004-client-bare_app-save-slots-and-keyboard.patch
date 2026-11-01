@@ -1,0 +1,1019 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app save slots and on-screen keyboard
+
+The console has no keyboard, so typing a save's name was the hard part
+of saving. When bare_app runs the client (see 0001):
+
+- the autosave after each turn is one file, Saves/Autosave, replaced
+  every turn and listed first; VCMI's dated autosave folders are not made;
+- the save screen lists ten slots (Saves/Slot01..Slot10), empty ones too,
+  instead of the name field; an empty slot shows the game being saved,
+  a full one asks before it is overwritten, and the "saved" message
+  names the slot instead of the file;
+- the load screen shows the autosave and the slots first, by their
+  names ("Autosave", "Slot 3"), then any other saves;
+- a text input that the player clicks (a town's name, a search box,
+  numbers) opens an on-screen keyboard over the other half of the
+  screen: digits, Russian (when the game is in Russian) and Latin
+  letters, capitals, space. The stick's cursor or the D-pad picks a key
+  and A presses it; B is "done", Select cancels, X erases. As on mobile,
+  an input that gets focus by itself does not open it.
+
+Also fixed on the way, for everybody: a text input with its own
+confirmation (a town's name) could not be clicked again once a window
+had been over it, since its deactivation dropped its clicks for good.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+ .../vcmi/Content/config/translations/english.json |   7 +
+ .../vcmi/Content/config/translations/russian.json |   7 +
+ client/CMakeLists.txt                             |   3 +-
+ client/CPlayerInterface.cpp                       |  11 +
+ client/eventsSDL/InputHandler.cpp                 |  13 +
+ client/lobby/CSavingScreen.cpp                    |  47 ++-
+ client/lobby/SelectionTab.cpp                     |  85 ++++-
+ client/lobby/SelectionTab.h                       |   5 +
+ client/renderSDL/BareAppLink.cpp                  |  43 ++-
+ client/renderSDL/BareAppLink.h                    |  15 +-
+ client/widgets/CTextInput.cpp                     |  16 +
+ client/widgets/CTextInput.h                       |   7 +
+ client/windows/BareAppKeyboard.cpp                | 363 ++++++++++++++++++++
+ client/windows/BareAppKeyboard.h                  |  69 ++++
+ 14 files changed, 678 insertions(+), 13 deletions(-)
+
+diff --git a/Mods/vcmi/Content/config/translations/english.json b/Mods/vcmi/Content/config/translations/english.json
+index f7a2010..54405f7 100644
+--- a/Mods/vcmi/Content/config/translations/english.json
++++ b/Mods/vcmi/Content/config/translations/english.json
+@@ -301,6 +301,13 @@
+ 	"vcmi.adventureOptions.smoothDragging.help": "{Smooth Map Dragging}\n\nWhen enabled, map dragging has a modern run out effect.",
+ 	"vcmi.adventureOptions.smoothDragging.hover": "Smooth Map Dragging",
+ 	"vcmi.artifact.charges": "Charges",
++	"vcmi.bareApp.autosave": "Autosave",
++	"vcmi.bareApp.slot": "Slot %d",
++	"vcmi.bareApp.emptySlot": "Slot %d (empty)",
++	"vcmi.bareApp.keyboard.done": "Done",
++	"vcmi.bareApp.keyboard.erase": "Erase",
++	"vcmi.bareApp.keyboard.caps": "Caps",
++	"vcmi.bareApp.keyboard.space": "Space",
+ 	"vcmi.battle.action.attack": "Use melee attack",
+ 	"vcmi.battle.action.attackLongWeapon": "Use Long Weapon attack",
+ 	"vcmi.battle.action.genie": "Cast random beneficial spell",
+diff --git a/Mods/vcmi/Content/config/translations/russian.json b/Mods/vcmi/Content/config/translations/russian.json
+index 19ebd08..71914f2 100644
+--- a/Mods/vcmi/Content/config/translations/russian.json
++++ b/Mods/vcmi/Content/config/translations/russian.json
+@@ -303,6 +303,13 @@
+ 	"vcmi.adventureOptions.smoothDragging.help": "{Плавное перетаскивание карты}\n\nПри включении этой функции окончание перетаскивания карты мышью происходит плавно.",
+ 	"vcmi.adventureOptions.smoothDragging.hover": "Плавное перетаскивание карты",
+ 	"vcmi.artifact.charges": "Заряды",
++	"vcmi.bareApp.autosave": "Автосохранение",
++	"vcmi.bareApp.slot": "Слот %d",
++	"vcmi.bareApp.emptySlot": "Слот %d (пусто)",
++	"vcmi.bareApp.keyboard.done": "Готово",
++	"vcmi.bareApp.keyboard.erase": "Стереть",
++	"vcmi.bareApp.keyboard.caps": "Заглавные",
++	"vcmi.bareApp.keyboard.space": "Пробел",
+ 	"vcmi.battle.action.attack": "Использовать атаку ближнего боя",
+ 	"vcmi.battle.action.genie": "Наложить случайное полезное заклинание",
+ 	"vcmi.battle.action.info": "Показать информацию об отряде",
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index df3bfe6..c4b61d8 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -573,7 +573,8 @@ endif()
+ # Link to bare_app (renderSDL/BareAppLink.h): VCMI_BARE_APP_IPC is bare_app's
+ # src directory, for games/game_ipc.h and core/input.h
+ if(VCMI_BARE_APP_IPC)
+-	target_sources(vcmiclientcommon PRIVATE renderSDL/BareAppLink.cpp renderSDL/BareAppLink.h)
++	target_sources(vcmiclientcommon PRIVATE renderSDL/BareAppLink.cpp renderSDL/BareAppLink.h
++		windows/BareAppKeyboard.cpp windows/BareAppKeyboard.h)
+ 	target_include_directories(vcmiclientcommon PRIVATE ${VCMI_BARE_APP_IPC})
+ 	target_compile_definitions(vcmiclientcommon PUBLIC VCMI_BARE_APP)	# for clientapp too
+ endif()
+diff --git a/client/CPlayerInterface.cpp b/client/CPlayerInterface.cpp
+index 81f2505..06d6dbb 100644
+--- a/client/CPlayerInterface.cpp
++++ b/client/CPlayerInterface.cpp
+@@ -66,6 +66,9 @@
+ #include "windows/GUIClasses.h"
+ #include "windows/InfoWindows.h"
+ #include "windows/settings/SettingsMainWindow.h"
++#ifdef VCMI_BARE_APP
++#include "renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../lib/callback/CDynLibHandler.h"
+ #include "../lib/CConfigHandler.h"
+@@ -249,6 +252,14 @@ void CPlayerInterface::playerStartsTurn(PlayerColor player)
+ 
+ void CPlayerInterface::performAutosave()
+ {
++#ifdef VCMI_BARE_APP
++	if(BareAppLink::get())
++	{
++		// One autosave, the first in the lists (BareAppLink::saveSlot)
++		cb->save(BareAppLink::savePath(0), false);
++		return;
++	}
++#endif
+ 	int frequency = static_cast<int>(settings["general"]["saveFrequency"].Integer());
+ 	if(frequency > 0 && cb->getDate() % frequency == 0)
+ 	{
+diff --git a/client/eventsSDL/InputHandler.cpp b/client/eventsSDL/InputHandler.cpp
+index 4e7f045..8609697 100644
+--- a/client/eventsSDL/InputHandler.cpp
++++ b/client/eventsSDL/InputHandler.cpp
+@@ -13,6 +13,7 @@
+ 
+ #ifdef VCMI_BARE_APP
+ #include "../renderSDL/BareAppLink.h"
++#include "../windows/BareAppKeyboard.h"
+ #endif
+ 
+ #include "NotificationHandler.h"
+@@ -435,11 +436,23 @@ void InputHandler::setCursorPosition(const Point & position)
+ 
+ void InputHandler::startTextInput(const Rect & where)
+ {
++#ifdef VCMI_BARE_APP
++	// The console has no keyboard: an on-screen one
++	if(BareAppLink::get())
++	{
++		BareAppKeyboard::open(where);
++		return;
++	}
++#endif
+ 	textHandler->startTextInput(where);
+ }
+ 
+ void InputHandler::stopTextInput()
+ {
++#ifdef VCMI_BARE_APP
++	if(BareAppLink::get())
++		return;	// the on-screen keyboard closes by itself
++#endif
+ 	textHandler->stopTextInput();
+ }
+ 
+diff --git a/client/lobby/CSavingScreen.cpp b/client/lobby/CSavingScreen.cpp
+index b85354a..fedb2ea 100644
+--- a/client/lobby/CSavingScreen.cpp
++++ b/client/lobby/CSavingScreen.cpp
+@@ -18,6 +18,9 @@
+ #include "../gui/Shortcut.h"
+ #include "../widgets/Buttons.h"
+ #include "../widgets/CTextInput.h"
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../../lib/CConfigHandler.h"
+ #include "../../lib/callback/CCallback.h"
+@@ -27,6 +30,7 @@
+ #include "../../lib/mapping/CMapInfo.h"
+ #include "../../lib/mapping/CMapHeader.h"
+ #include "../../lib/GameLibrary.h"
++#include "../../lib/texts/MetaString.h"
+ 
+ CSavingScreen::CSavingScreen()
+ 	: CSelectionBase(ESelectionScreen::saveGame)
+@@ -53,7 +57,8 @@ const CMapInfo * CSavingScreen::getMapInfo()
+ 
+ const StartInfo * CSavingScreen::getStartInfo()
+ {
+-	if (localMi)
++	// an empty save slot (SelectionTab::showSaveSlots) has none: the game's own
++	if (localMi && localMi->scenarioOptionsOfSave)
+ 		return localMi->scenarioOptionsOfSave.get();
+ 	return GAME->interface()->cb->getStartInfo();
+ }
+@@ -76,15 +81,43 @@ void CSavingScreen::close()
+ 
+ void CSavingScreen::saveGame()
+ {
+-	if(!(tabSel && tabSel->inputName && tabSel->inputName->getText().size()))
+-		return;
+-
+-	std::string path = "Saves/" + tabSel->curFolder + tabSel->inputName->getText();
++	std::string path;
++	std::string name;
++#ifdef VCMI_BARE_APP
++	if(BareAppLink::get())
++	{
++		// into the selected slot (SelectionTab::showSaveSlots)
++		const auto selected = tabSel ? tabSel->getSelectedMapInfo() : nullptr;
++		if(!selected || selected->saveSlot < 1)
++			return;
++		path = BareAppLink::savePath(selected->saveSlot);
++		name = BareAppLink::saveName(selected->saveSlot);
++	}
++	else
++#endif
++	{
++		if(!(tabSel && tabSel->inputName && tabSel->inputName->getText().size()))
++			return;
++		path = "Saves/" + tabSel->curFolder + tabSel->inputName->getText();
++		name = tabSel->inputName->getText();
++	}
+ 
+-	auto overWrite = [this, path]() -> void
++	auto overWrite = [this, path, name]() -> void
+ 	{
+ 		Settings lastSave = settings.write["general"]["lastSave"];
+ 		lastSave->String() = path;
++#ifdef VCMI_BARE_APP
++		if(BareAppLink::get())
++		{
++			// the server's "saved" message would name the file, not the slot
++			GAME->interface()->cb->save(path, false);
++			close();
++			MetaString saved = MetaString::createFromTextID("core.genrltxt.350");
++			saved.replaceRawString(name);
++			GAME->interface()->showInfoDialog(saved.toString());
++			return;
++		}
++#endif
+ 		GAME->interface()->cb->save(path, true);
+ 		close();
+ 	};
+@@ -92,7 +125,7 @@ void CSavingScreen::saveGame()
+ 	if(CResourceHandler::get("local")->existsResource(ResourcePath(path, EResType::SAVEGAME)))
+ 	{
+ 		std::string hlp = LIBRARY->generaltexth->allTexts[493]; //%s exists. Overwrite?
+-		boost::algorithm::replace_first(hlp, "%s", tabSel->inputName->getText());
++		boost::algorithm::replace_first(hlp, "%s", name);
+ 		GAME->interface()->showYesNoDialog(hlp, overWrite, nullptr);
+ 	}
+ 	else
+diff --git a/client/lobby/SelectionTab.cpp b/client/lobby/SelectionTab.cpp
+index 3eef7dd..848aff7 100644
+--- a/client/lobby/SelectionTab.cpp
++++ b/client/lobby/SelectionTab.cpp
+@@ -36,9 +36,13 @@
+ #include "../render/IImage.h"
+ #include "../render/IRenderHandler.h"
+ #include "../mainmenu/CCampaignScreen.h"
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../../lib/CConfigHandler.h"
+ #include "../../lib/IGameSettings.h"
++#include "../../lib/callback/CCallback.h"
+ #include "../../lib/filesystem/Filesystem.h"
+ #include "../../lib/campaign/CampaignState.h"
+ #include "../../lib/mapping/CMapInfo.h"
+@@ -100,6 +104,15 @@ bool mapSorter::operator()(const std::shared_ptr<ElementInfo> aaa, const std::sh
+ 		}
+ 	}
+ 
++#ifdef VCMI_BARE_APP
++	// bare_app's autosave first, then the slots in their order
++	if(aaa->saveSlot != bbb->saveSlot && (aaa->saveSlot >= 0 || bbb->saveSlot >= 0))
++	{
++		const auto rank = [](int slot) { return slot >= 0 ? slot : BareAppLink::saveSlots + 1; };
++		return rank(aaa->saveSlot) < rank(bbb->saveSlot);
++	}
++#endif
++
+ 	auto a = aaa->mapHeader.get();
+ 	auto b = bbb->mapHeader.get();
+ 	if(a && b) //if we are sorting scenarios
+@@ -373,6 +386,15 @@ void SelectionTab::toggleMode()
+ 
+ 		case ESelectionScreen::saveGame:
+ 			parseSaves(getFiles("Saves/", EResType::SAVEGAME));
++#ifdef VCMI_BARE_APP
++			if(BareAppLink::get())
++			{
++				// No keyboard to type a name: the player picks a slot
++				showSaveSlots();
++				inputName->disable();
++				break;
++			}
++#endif
+ 			inputName->enable();
+ 			inputName->activate();
+ 			restoreLastSelection();
+@@ -427,7 +449,9 @@ void SelectionTab::clickReleased(const Point & cursorPosition)
+ 				return;
+ 			}
+ 
+-			if(!curItems[py]->isFolder)
++			if(curItems[py]->emptySlot)
++				select(line);
++			else if(!curItems[py]->isFolder)
+ 				CInfoWindow::showYesNoDialog(LIBRARY->generaltexth->translate("vcmi.lobby.deleteFile") + "\n\n" + curItems[py]->fullFileURI, std::vector<std::shared_ptr<CComponent>>(), [this, py](){
+ 					LobbyDelete ld;
+ 					ld.type = tabType == ESelectionScreen::newGame ? LobbyDelete::EType::RANDOMMAP : LobbyDelete::EType::SAVEGAME;
+@@ -1026,6 +1050,35 @@ void SelectionTab::parseMaps(const std::unordered_set<ResourcePath> & files)
+ 	}
+ }
+ 
++#ifdef VCMI_BARE_APP
++/// The save list as bare_app's slots: all of them, empty ones too, and nothing else
++void SelectionTab::showSaveSlots()
++{
++	vstd::erase_if(allItems, [](const std::shared_ptr<ElementInfo> & item) { return item->saveSlot < 1; });
++	for(auto & item : allItems)
++	{
++		// a save of another kind (a campaign's) is hidden from the list, not from its slot
++		if(!item->mapHeader)
++			item->saveInit(ResourcePath(item->fileURI, EResType::SAVEGAME));
++	}
++
++	for(int slot = 1; slot <= BareAppLink::saveSlots; slot++)
++	{
++		if(vstd::contains_if(allItems, [slot](const std::shared_ptr<ElementInfo> & item) { return item->saveSlot == slot; }))
++			continue;
++		// the game being saved stands for it: its map is what the slot would get
++		auto empty = std::make_shared<ElementInfo>();
++		empty->mapHeader = std::make_unique<CMapHeader>(*GAME->interface()->cb->getMapHeader());
++		empty->originalFileURI = BareAppLink::savePath(slot);
++		empty->fileURI = boost::to_upper_copy(empty->originalFileURI);
++		empty->saveSlot = slot;
++		empty->emptySlot = true;
++		empty->name = BareAppLink::saveName(slot, true);
++		allItems.push_back(empty);
++	}
++}
++#endif
++
+ std::vector<ResourcePath> SelectionTab::parseSaves(const std::unordered_set<ResourcePath> & files)
+ {
+ 	std::vector<ResourcePath> unsupported;
+@@ -1037,6 +1090,14 @@ std::vector<ResourcePath> SelectionTab::parseSaves(const std::unordered_set<Reso
+ 			auto mapInfo = std::make_shared<ElementInfo>();
+ 			mapInfo->saveInit(file);
+ 			mapInfo->name = mapInfo->getNameForList();
++#ifdef VCMI_BARE_APP
++			if(BareAppLink::get())
++			{
++				mapInfo->saveSlot = BareAppLink::saveSlot(mapInfo->originalFileURI);
++				if(mapInfo->saveSlot >= 0)
++					mapInfo->name = BareAppLink::saveName(mapInfo->saveSlot);
++			}
++#endif
+ 
+ 			// Filter out other game modes
+ 			bool isCampaign = mapInfo->scenarioOptionsOfSave->mode == EStartMode::CAMPAIGN;
+@@ -1212,6 +1273,28 @@ void SelectionTab::ListItem::updateItem(std::shared_ptr<ElementInfo> info, bool
+ 		return;
+ 	}
+ 
++#ifdef VCMI_BARE_APP
++	if(info->emptySlot)
++	{
++		// nothing to tell about it but its name
++		labelAmountOfPlayers->disable();
++		labelMapSizeLetter->disable();
++		iconFolder->disable();
++		pictureEmptyLine->disable();
++		iconFormat->disable();
++		iconVictoryCondition->disable();
++		iconLossCondition->disable();
++		labelNumberOfCampaignMaps->disable();
++		labelName->enable();
++		labelName->setMaxWidth(316);
++		labelName->alignment = ETextAlignment::CENTER;
++		labelName->moveTo(Point(pos.x + LABEL_POS_X, labelName->pos.y));
++		labelName->setText(info->name);
++		labelName->setColor(color);
++		return;
++	}
++#endif
++
+ 	labelName->enable();
+ 	if(info->campaign)
+ 	{
+diff --git a/client/lobby/SelectionTab.h b/client/lobby/SelectionTab.h
+index de766c7..e0d3814 100644
+--- a/client/lobby/SelectionTab.h
++++ b/client/lobby/SelectionTab.h
+@@ -38,6 +38,8 @@ public:
+ 	std::string name = "";
+ 	bool isFolder = false;
+ 	bool isAutoSaveFolder = false;
++	int saveSlot = -1;	///< bare_app's autosave (0) or slot (BareAppLink::saveSlot)
++	bool emptySlot = false;	///< a slot with nothing saved in it yet
+ };
+ 
+ /// Class which handles map sorting by different criteria
+@@ -144,6 +146,9 @@ private:
+ 	bool isMapSupported(const CMapInfo & info);
+ 	void parseMaps(const std::unordered_set<ResourcePath> & files);
+ 	std::vector<ResourcePath> parseSaves(const std::unordered_set<ResourcePath> & files);
++#ifdef VCMI_BARE_APP
++	void showSaveSlots();
++#endif
+ 	void parseCampaigns(const std::unordered_set<ResourcePath> & files);
+ 	std::unordered_set<ResourcePath> getFiles(std::string dirURI, EResType resType);
+ 
+diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
+index ec68bbc..687843f 100644
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -15,6 +15,8 @@
+ #include "../gui/CursorHandler.h"
+ #include "../render/IScreenHandler.h"
+ #include "../../lib/CConfigHandler.h"
++#include "../../lib/GameLibrary.h"
++#include "../../lib/texts/CGeneralTextHandler.h"
+ 
+ #include <SDL.h>
+ #include <sys/mman.h>
+@@ -325,10 +327,45 @@ void BareAppLink::cursorIntoView()
+ 
+ 	const Point target(std::clamp(cursor.x, viewport.x, viewport.x + w - 1),
+ 		std::clamp(cursor.y, viewport.y, viewport.y + h - 1));
+-	// as VCMI's own controller cursor moves (InputSourceGameController::doCursorMove)
++	moveCursor(target);
++}
++
++void BareAppLink::moveCursor(const Point & position)
++{
++	// as InputSourceGameController::doCursorMove
+ 	const int scale = ENGINE->screenHandler().getScalingFactor();
+-	ENGINE->input().setCursorPosition(target);
+-	ENGINE->cursor().cursorMove(target.x * scale, target.y * scale);
++	ENGINE->input().setCursorPosition(position);
++	ENGINE->cursor().cursorMove(position.x * scale, position.y * scale);
++}
++
++std::string BareAppLink::savePath(int slot)
++{
++	if(slot == 0)
++		return "Saves/Autosave";
++	return (boost::format("Saves/Slot%02d") % slot).str();
++}
++
++int BareAppLink::saveSlot(const std::string & path)
++{
++	// only right in Saves/, not in its folders
++	if(!boost::istarts_with(path, "Saves/"))
++		return -1;
++	const std::string name = path.substr(6);
++	if(boost::iequals(name, "Autosave"))
++		return 0;
++	if(name.size() != 6 || !boost::istarts_with(name, "Slot") || !std::isdigit(name[4]) || !std::isdigit(name[5]))
++		return -1;
++	const int slot = std::stoi(name.substr(4));
++	return slot >= 1 && slot <= saveSlots ? slot : -1;
++}
++
++std::string BareAppLink::saveName(int slot, bool empty)
++{
++	if(slot == 0)
++		return LIBRARY->generaltexth->translate("vcmi.bareApp.autosave");
++	std::string name = LIBRARY->generaltexth->translate(empty ? "vcmi.bareApp.emptySlot" : "vcmi.bareApp.slot");
++	boost::replace_first(name, "%d", std::to_string(slot));
++	return name;
+ }
+ 
+ Point BareAppLink::mapScrollDirection()
+diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
+index 11159e9..801033a 100644
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -47,9 +47,22 @@ public:
+ 	Point stickDirection() const;
+ 	/// The D-pad's direction for the adventure map to scroll (overview
+ 	/// only), called while map scrolling is active: the D-pad stops
+-	/// swiping meanwhile
++	/// swiping meanwhile. The on-screen keyboard steps with it too.
+ 	Point mapScrollDirection();
+ 
++	/// Moves VCMI's cursor, as its own controller cursor moves
++	static void moveCursor(const Point & position);
++
++	/// Saves without typing names: one autosave after each turn, first in
++	/// the lists, and numbered slots for the player's own
++	static constexpr int saveSlots = 10;
++	/// "Saves/Autosave" for slot 0, "Saves/Slot01".. for the others
++	static std::string savePath(int slot);
++	/// The slot of a save (its path from the data directory), or -1
++	static int saveSlot(const std::string & path);
++	/// What the lists call a slot
++	static std::string saveName(int slot, bool empty = false);
++
+ private:
+ 	BareAppLink(game_shm * shm);
+ 
+diff --git a/client/widgets/CTextInput.cpp b/client/widgets/CTextInput.cpp
+index 4cfdb63..f1e919e 100644
+--- a/client/widgets/CTextInput.cpp
++++ b/client/widgets/CTextInput.cpp
+@@ -19,6 +19,9 @@
+ #include "../render/Graphics.h"
+ #include "../render/IFont.h"
+ #include "../render/IRenderHandler.h"
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../../lib/texts/TextOperations.h"
+ 
+@@ -89,6 +92,15 @@ void CTextInputWithConfirm::textInputted(const std::string & enteredText)
+ 		CTextInput::textInputted(enteredText);
+ }
+ 
++void CTextInputWithConfirm::activate()
++{
++	// deactivate() drops clicks: without them the input could not be
++	// clicked again once a window has been over it
++	addUsedEvents(LCLICK);
++
++	CTextInput::activate();
++}
++
+ void CTextInputWithConfirm::deactivate()
+ {
+ 	removeUsedEvents(LCLICK);
+@@ -401,6 +413,10 @@ void CTextInput::activate()
+ #if defined(VCMI_MOBILE)
+ 		//giveFocus();
+ #else
++#ifdef VCMI_BARE_APP
++		// as on mobile: the on-screen keyboard waits for a click
++		if(!BareAppLink::get())
++#endif
+ 		ENGINE->input().startTextInput(pos);
+ #endif
+ 	}
+diff --git a/client/widgets/CTextInput.h b/client/widgets/CTextInput.h
+index 9e8bca2..60f109d 100644
+--- a/client/widgets/CTextInput.h
++++ b/client/widgets/CTextInput.h
+@@ -23,6 +23,9 @@ class IImage;
+ class CFocusable : public CIntObject
+ {
+ 	friend void removeFocusFromActiveInput();
++#ifdef VCMI_BARE_APP
++	friend class BareAppKeyboard;	// types into the input with focus
++#endif
+ 
+ 	static std::atomic<int> usageIndex;
+ 	static std::list<CFocusable *> focusables; //all existing objs
+@@ -47,6 +50,9 @@ public:
+ /// Text input box where players can enter text
+ class CTextInput : public CFocusable
+ {
++#ifdef VCMI_BARE_APP
++	friend class BareAppKeyboard;
++#endif
+ protected:
+ 	using TextEditedCallback = std::function<void(const std::string &)>;
+ 	using TextFilterCallback = std::function<void(std::string &, const std::string &)>;
+@@ -128,5 +134,6 @@ public:
+ 	bool receiveEvent(const Point & position, int eventType) const override;
+ 	void onFocusGot() override;
+ 	void textInputted(const std::string & enteredText) override;
++	void activate() override;
+ 	void deactivate() override;
+ };
+diff --git a/client/windows/BareAppKeyboard.cpp b/client/windows/BareAppKeyboard.cpp
+new file mode 100644
+index 0000000..0b888eb
+--- /dev/null
++++ b/client/windows/BareAppKeyboard.cpp
+@@ -0,0 +1,363 @@
++/*
++ * BareAppKeyboard.cpp, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++#include "StdInc.h"
++#include "BareAppKeyboard.h"
++
++#include "../GameEngine.h"
++#include "../gui/Shortcut.h"
++#include "../gui/WindowHandler.h"
++#include "../render/Canvas.h"
++#include "../render/Colors.h"
++#include "../renderSDL/BareAppLink.h"
++#include "../widgets/CTextInput.h"
++#include "../widgets/Images.h"
++
++#include "../../lib/CConfigHandler.h"
++#include "../../lib/GameLibrary.h"
++#include "../../lib/texts/CGeneralTextHandler.h"
++#include "../../lib/texts/TextOperations.h"
++
++namespace
++{
++/// Keys are laid out on a grid this many keys wide
++constexpr int columns = 12;
++constexpr int rows = 5;
++constexpr int rowHeight = 56;
++constexpr int margin = 8;
++/// Between two keys
++constexpr int gap = 4;
++/// D-pad held: the first step, then the next ones (ms)
++constexpr uint32_t dpadDelay = 400;
++constexpr uint32_t dpadRepeat = 120;
++
++struct Layout
++{
++	const char * name;
++	std::array<const char *, 3> lower;
++	std::array<const char *, 3> upper;
++};
++
++const Layout layoutTable[] = {
++	{ "EN", { "qwertyuiop", "asdfghjkl", "zxcvbnm.,!" }, { "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM.,!" } },
++	{ "RU", { "йцукенгшщзхъ", "фывапролджэё", "ячсмитьбю.,!" }, { "ЙЦУКЕНГШЩЗХЪ", "ФЫВАПРОЛДЖЭЁ", "ЯЧСМИТЬБЮ.,!" } },
++};
++
++std::vector<std::string> characters(const std::string & text)
++{
++	std::vector<std::string> result;
++	for(size_t i = 0; i < text.size(); i += TextOperations::getUnicodeCharacterSize(text[i]))
++		result.push_back(text.substr(i, TextOperations::getUnicodeCharacterSize(text[i])));
++	return result;
++}
++}
++
++void BareAppKeyboard::open(const Rect & inputArea)
++{
++	if(!ENGINE->windows().findWindows<BareAppKeyboard>().empty())
++		return;
++	auto * input = dynamic_cast<CTextInput *>(CFocusable::inputWithFocus);
++	if(input)
++		ENGINE->windows().createAndPushWindow<BareAppKeyboard>(input, inputArea);
++}
++
++BareAppKeyboard::BareAppKeyboard(CTextInput * target, const Rect & inputArea)
++	: CWindowObject(SHADOW_DISABLED)
++	, target(target)
++	, initialText(target->getText())
++{
++	OBJECT_CONSTRUCTION;
++
++	// Across the screen, on the half without the input: it shows what is typed
++	const Point screen = ENGINE->screenDimensions();
++	pos.w = screen.x;
++	pos.h = rows * rowHeight + 2 * margin;
++	pos.x = 0;
++	pos.y = inputArea.center().y < screen.y / 2 ? screen.y - pos.h : 0;
++	backgroundTexture = std::make_shared<CFilledTexture>(ImagePath::builtin("DiBoxBck"), Rect(0, 0, pos.w, pos.h));
++
++	// Latin always, the game's own alphabet first
++	layouts.push_back(0);
++	if(settings["general"]["language"].String() == "russian")
++		layouts.insert(layouts.begin(), 1);
++	createKeys();
++
++	addUsedEvents(LCLICK | KEYBOARD | TIME);
++}
++
++void BareAppKeyboard::createKeys()
++{
++	std::array<std::vector<std::pair<Key, int>>, rows> grid;
++	const auto add = [&grid](int row, Action action, const std::string & lower = "", const std::string & upper = "", int width = 1)
++	{
++		grid[row].push_back({ Key{ Rect(), row, action, lower, upper }, width });
++	};
++
++	for(const auto & digit : characters("1234567890-"))
++		add(0, Action::TYPE, digit, digit);
++	add(0, Action::ERASE);
++
++	const Layout & letters = layoutTable[layouts[layout]];
++	for(int row = 0; row < 3; row++)
++	{
++		const auto lower = characters(letters.lower[row]);
++		const auto upper = characters(letters.upper[row]);
++		for(size_t i = 0; i < lower.size() && i < upper.size(); i++)
++			add(row + 1, Action::TYPE, lower[i], upper[i]);
++	}
++
++	const int switcher = layouts.size() > 1 ? 2 : 0;
++	add(4, Action::CAPS, "", "", 2);
++	if(switcher)
++		add(4, Action::LAYOUT, "", "", switcher);
++	add(4, Action::SPACE, " ", " ", columns - 2 - switcher - 3);
++	add(4, Action::DONE, "", "", 3);
++
++	// Shorter rows in the middle
++	keys.clear();
++	const int unit = (pos.w - 2 * margin) / columns;
++	for(int row = 0; row < rows; row++)
++	{
++		int units = 0;
++		for(const auto & key : grid[row])
++			units += key.second;
++		int x = margin + (columns - units) * unit / 2;
++		const int y = margin + row * rowHeight;
++		for(auto & [key, width] : grid[row])
++		{
++			key.area = Rect(x + gap / 2, y + gap / 2, width * unit - gap, rowHeight - gap);
++			keys.push_back(key);
++			x += width * unit;
++		}
++	}
++}
++
++int BareAppKeyboard::keyAt(const Point & position) const
++{
++	for(size_t i = 0; i < keys.size(); i++)
++		if((keys[i].area + pos.topLeft()).isInside(position))
++			return static_cast<int>(i);
++	return -1;
++}
++
++std::string BareAppKeyboard::label(const Key & key) const
++{
++	switch(key.action)
++	{
++		case Action::TYPE:
++			return caps ? key.upper : key.lower;
++		case Action::ERASE:
++			return LIBRARY->generaltexth->translate("vcmi.bareApp.keyboard.erase");
++		case Action::CAPS:
++			return LIBRARY->generaltexth->translate("vcmi.bareApp.keyboard.caps");
++		case Action::LAYOUT:
++			return layoutTable[layouts[(layout + 1) % layouts.size()]].name;
++		case Action::SPACE:
++			return LIBRARY->generaltexth->translate("vcmi.bareApp.keyboard.space");
++		case Action::DONE:
++			return LIBRARY->generaltexth->translate("vcmi.bareApp.keyboard.done");
++	}
++	return "";
++}
++
++void BareAppKeyboard::showAll(Canvas & to)
++{
++	CWindowObject::showAll(to);
++
++	for(size_t i = 0; i < keys.size(); i++)
++	{
++		const Key & key = keys[i];
++		const Rect area = key.area + pos.topLeft();
++		const bool lit = static_cast<int>(i) == hovered;
++		const bool on = key.action == Action::CAPS && caps;
++
++		to.drawColorBlended(area, lit ? ColorRGBA(255, 255, 255, 48) : ColorRGBA(0, 0, 0, 96));
++		to.drawBorder(area, lit ? Colors::YELLOW : ColorRGBA(128, 100, 75), lit ? 2 : 1);
++		to.drawText(area.center(), key.action == Action::TYPE ? FONT_BIG : FONT_MEDIUM,
++			lit || on ? Colors::YELLOW : Colors::WHITE, ETextAlignment::CENTER, label(key));
++	}
++}
++
++void BareAppKeyboard::press(const Key & key)
++{
++	switch(key.action)
++	{
++		case Action::TYPE:
++		case Action::SPACE:
++			target->textInputted(caps ? key.upper : key.lower);
++			break;
++		case Action::ERASE:
++			target->keyPressed(EShortcut::GLOBAL_BACKSPACE);
++			break;
++		case Action::CAPS:
++			caps = !caps;
++			break;
++		case Action::LAYOUT:
++			layout = (layout + 1) % layouts.size();
++			createKeys();
++			hovered = keyAt(ENGINE->getCursorPosition());
++			break;
++		case Action::DONE:
++			finish(true);
++			return;
++	}
++	// the input is under this window, inactive: it does not redraw itself
++	ENGINE->windows().totalRedraw();
++}
++
++void BareAppKeyboard::step(const Point & direction)
++{
++	if(keys.empty())
++		return;
++
++	int next = hovered;
++	if(next < 0)
++	{
++		// from the first letter
++		next = static_cast<int>(std::find_if(keys.begin(), keys.end(), [](const Key & key) { return key.row == 1; }) - keys.begin());
++	}
++	else
++	{
++		if(direction.x)
++		{
++			// along the row, round
++			std::vector<int> row;
++			for(size_t i = 0; i < keys.size(); i++)
++				if(keys[i].row == keys[next].row)
++					row.push_back(static_cast<int>(i));
++			const int at = static_cast<int>(std::find(row.begin(), row.end(), next) - row.begin());
++			const int count = static_cast<int>(row.size());
++			next = row[(at + direction.x + count) % count];
++		}
++		if(direction.y)
++		{
++			// the nearest key of the next row, round
++			const int row = (keys[next].row + direction.y + rows) % rows;
++			const int x = keys[next].area.center().x;
++			int best = -1;
++			for(size_t i = 0; i < keys.size(); i++)
++			{
++				if(keys[i].row != row)
++					continue;
++				if(best < 0 || std::abs(keys[i].area.center().x - x) < std::abs(keys[best].area.center().x - x))
++					best = static_cast<int>(i);
++			}
++			next = best;
++		}
++	}
++
++	hovered = next;
++	BareAppLink::moveCursor(keys[next].area.center() + pos.topLeft());
++	redraw();
++}
++
++bool BareAppKeyboard::targetAlive() const
++{
++	// an input that is gone has lost its focus too
++	return CFocusable::inputWithFocus == target;
++}
++
++void BareAppKeyboard::finish(bool accept)
++{
++	if(targetAlive())
++	{
++		if(!accept && target->getText() != initialText)
++		{
++			target->setText(initialText);
++			if(target->onTextEdited)
++				target->onTextEdited(initialText);
++		}
++		// an input with its own confirmation (a town's name) confirms or
++		// cancels on these, and drops its focus
++		target->keyPressed(accept ? EShortcut::GLOBAL_ACCEPT : EShortcut::GLOBAL_CANCEL);
++		// the others drop it here: back under focus, they would open the keyboard again
++		target->removeFocus();
++	}
++	close();
++	ENGINE->windows().totalRedraw();
++}
++
++void BareAppKeyboard::clickPressed(const Point & cursorPosition)
++{
++	pressed = keyAt(cursorPosition);
++}
++
++void BareAppKeyboard::clickReleased(const Point & cursorPosition)
++{
++	// on release: the release of a click that closes the keyboard stays here
++	const int key = keyAt(cursorPosition);
++	if(key >= 0 && key == pressed)
++	{
++		const Key copy = keys[key];	// a layout switch replaces the keys
++		press(copy);
++	}
++	pressed = -1;
++}
++
++bool BareAppKeyboard::captureThisKey(EShortcut key)
++{
++	return key == EShortcut::GLOBAL_ACCEPT || key == EShortcut::GLOBAL_CANCEL
++		|| key == EShortcut::GLOBAL_BACKSPACE || key == EShortcut::ADVENTURE_END_TURN;
++}
++
++void BareAppKeyboard::keyPressed(EShortcut key)
++{
++	switch(key)
++	{
++		case EShortcut::GLOBAL_ACCEPT:
++			finish(true);
++			break;
++		case EShortcut::GLOBAL_CANCEL:
++			finish(false);
++			break;
++		case EShortcut::GLOBAL_BACKSPACE:
++		case EShortcut::ADVENTURE_END_TURN:	// X on the console
++			press(Key{ Rect(), 0, Action::ERASE, "", "" });
++			break;
++		default:
++			break;
++	}
++}
++
++void BareAppKeyboard::tick(uint32_t msPassed)
++{
++	if(!targetAlive())
++	{
++		close();
++		return;
++	}
++
++	const int under = keyAt(ENGINE->getCursorPosition());
++	if(under != hovered)
++	{
++		hovered = under;
++		redraw();
++	}
++
++	// The D-pad steps from key to key (while the magnifier is off: it moves that)
++	auto * link = BareAppLink::get();
++	const Point direction = link ? link->mapScrollDirection() : Point(0, 0);
++	if(direction != dpad)
++	{
++		dpad = direction;
++		dpadRepeatIn = dpadDelay;
++		if(direction != Point(0, 0))
++			step(direction);
++	}
++	else if(direction != Point(0, 0))
++	{
++		if(msPassed >= dpadRepeatIn)
++		{
++			step(direction);
++			dpadRepeatIn = dpadRepeat;
++		}
++		else
++			dpadRepeatIn -= msPassed;
++	}
++}
+diff --git a/client/windows/BareAppKeyboard.h b/client/windows/BareAppKeyboard.h
+new file mode 100644
+index 0000000..de599ef
+--- /dev/null
++++ b/client/windows/BareAppKeyboard.h
+@@ -0,0 +1,69 @@
++/*
++ * BareAppKeyboard.h, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++#pragma once
++
++#include "CWindowObject.h"
++
++class CFilledTexture;
++class CTextInput;
++
++/// On-screen keyboard for bare_app: the console has no keyboard. A text
++/// input opens it when the player clicks it (InputHandler::startTextInput),
++/// and the keys type into that input. The stick's cursor or the D-pad picks
++/// a key, A presses it; B is "done", Select cancels, X erases.
++class BareAppKeyboard : public CWindowObject
++{
++	enum class Action
++	{
++		TYPE, ERASE, CAPS, LAYOUT, SPACE, DONE
++	};
++
++	struct Key
++	{
++		Rect area;	///< in the window
++		int row;
++		Action action;
++		std::string lower;	///< what it types, or its label
++		std::string upper;
++	};
++
++	CTextInput * target;
++	std::string initialText;
++	std::shared_ptr<CFilledTexture> backgroundTexture;
++	std::vector<Key> keys;
++	std::vector<int> layouts;	///< indices into the layout table
++	size_t layout = 0;
++	bool caps = false;
++	int hovered = -1;	///< key under the cursor
++	int pressed = -1;	///< key the click started on
++	Point dpad;
++	uint32_t dpadRepeatIn = 0;	///< ms
++
++	void createKeys();
++	int keyAt(const Point & position) const;
++	std::string label(const Key & key) const;
++	void press(const Key & key);
++	void step(const Point & direction);
++	void finish(bool accept);
++	bool targetAlive() const;
++
++public:
++	BareAppKeyboard(CTextInput * target, const Rect & inputArea);
++
++	/// Opens the keyboard for the text input with focus, unless it is open
++	static void open(const Rect & inputArea);
++
++	void showAll(Canvas & to) override;
++	void clickPressed(const Point & cursorPosition) override;
++	void clickReleased(const Point & cursorPosition) override;
++	bool captureThisKey(EShortcut key) override;
++	void keyPressed(EShortcut key) override;
++	void tick(uint32_t msPassed) override;
++};
