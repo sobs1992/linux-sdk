@@ -412,10 +412,10 @@ index de766c7..e0d3814 100644
  	std::unordered_set<ResourcePath> getFiles(std::string dirURI, EResType resType);
  
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
-index c461b3b..7b7aa4b 100644
+index 4c15ff9..1684bd5 100644
 --- a/client/renderSDL/BareAppLink.cpp
 +++ b/client/renderSDL/BareAppLink.cpp
-@@ -15,6 +15,8 @@
+@@ -18,6 +18,8 @@
  #include "../gui/CursorHandler.h"
  #include "../render/IScreenHandler.h"
  #include "../../lib/CConfigHandler.h"
@@ -424,7 +424,7 @@ index c461b3b..7b7aa4b 100644
  
  #include <SDL.h>
  #include <sys/mman.h>
-@@ -325,10 +327,45 @@ void BareAppLink::cursorIntoView()
+@@ -391,10 +393,45 @@ void BareAppLink::cursorIntoView()
  
  	const Point target(std::clamp(cursor.x, viewport.x, viewport.x + w - 1),
  		std::clamp(cursor.y, viewport.y, viewport.y + h - 1));
@@ -474,10 +474,10 @@ index c461b3b..7b7aa4b 100644
  
  Point BareAppLink::mapScrollDirection()
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
-index 5b8b975..ca4bc86 100644
+index ee77d5e..6ab5c84 100644
 --- a/client/renderSDL/BareAppLink.h
 +++ b/client/renderSDL/BareAppLink.h
-@@ -48,13 +48,26 @@ public:
+@@ -55,13 +55,26 @@ public:
  	Point stickDirection() const;
  	/// The D-pad's direction for the adventure map to scroll (overview
  	/// only), called while map scrolling is active: the D-pad stops

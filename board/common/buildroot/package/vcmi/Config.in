@@ -7,11 +7,14 @@ config BR2_PACKAGE_VCMI
 	depends on !BR2_STATIC_LIBS
 	depends on !BR2_TOOLCHAIN_USES_UCLIBC # tbb
 	depends on BR2_TOOLCHAIN_SUPPORTS_ALWAYS_LOCKFREE_ATOMIC_INTS # boost-locale
+	depends on BR2_PACKAGE_FFMPEG_ARCH_SUPPORTS
 	select BR2_PACKAGE_BOOST
 	select BR2_PACKAGE_BOOST_DATE_TIME
 	select BR2_PACKAGE_BOOST_FILESYSTEM
 	select BR2_PACKAGE_BOOST_LOCALE
 	select BR2_PACKAGE_BOOST_PROGRAM_OPTIONS
+	select BR2_PACKAGE_FFMPEG
+	select BR2_PACKAGE_FFMPEG_SWSCALE
 	select BR2_PACKAGE_LIBSQUISH
 	select BR2_PACKAGE_LIBPNG
 	select BR2_PACKAGE_MINIZIP_ZLIB
@@ -25,7 +28,7 @@ config BR2_PACKAGE_VCMI
 	  VCMI, an open-source engine for Heroes of Might and Magic III:
 	  the client (vcmiclient, with the game server built in), the
 	  adventure AI Nullkiller2 and the battle AIs BattleAI and
-	  StupidAI. No launcher, map editor, video or Lua.
+	  StupidAI. No launcher, map editor or Lua.
 
 	  The game data is not included: VCMI needs the Data, Maps and
 	  Mp3 directories of an original installation (Shadow of Death
@@ -33,7 +36,8 @@ config BR2_PACKAGE_VCMI
 
 	  SDL2 gets its dummy video driver (VCMI draws in software into
 	  a window kept in memory) and SDL2_mixer MP3 support (the
-	  game's music).
+	  game's music). FFmpeg is built with what the game's videos
+	  need only: Bink and Smacker.
 
 	  https://vcmi.eu/
 

@@ -232,12 +232,97 @@ make FW=oga rootfs-make BR=bare-app-rebuild   # после правок в ис�
 apps/bare_app/tools/oga.sh run                # собрать и запустить на плате через UART
 ```
 
+#### Образ с bare_app и играми: по шагам
+
+1. **Исходники.** bare_app и doomgeneric внутри него — вложенные сабмодули:
+
+   ```sh
+   git submodule update --init --recursive
+   ```
+
+2. **Хост.** Пакеты из «Быстрого старта»; остальное Buildroot проверит сам. Сборка
+   занимает около 21 ГБ в `output/oga` и 2,6 ГБ загрузок в `dl/`. VCMI компилируется
+   в 4 потока, примерно по 1 ГБ памяти на поток (`VCMI_JOBS`).
+
+3. **Локальные файлы, которых нет в git** (`.gitignore`):
+   - `board/common/buildroot/authorized_keys` — ваш открытый SSH-ключ
+     (`cp ~/.ssh/id_ed25519.pub board/common/buildroot/authorized_keys`). У root нет
+     пароля, а dropbear пустой не пускает, поэтому без ключа по SSH не войти, а данные
+     Героев копируются именно по SSH;
+   - `board/oga/buildroot/wifi.conf` — сети для `wpa_supplicant`, если плата должна
+     подключиться к Wi-Fi сразу. Без него сеть выбирается в bare_app: «Настройки» → Wi-Fi.
+
+     ```text
+     network={
+     	ssid="МояСеть"
+     	psk="пароль"
+     }
+     ```
+
+4. **Конфиг.** `make oga_defconfig`. В `configs/oga_defconfig` уже включено всё нужное:
+   bare_app с автозапуском, Doom с shareware `doom1.wad` (`bare-app.DOOM_WAD=y`), Герои III
+   (`bare-app.HOMM3=y`) и патч ядра для звука (`LINUX_PATCHES`, без него звук играет
+   вдвое медленнее).
+
+5. **Сборка.** `make`, без `-j`: компоненты собираются по очереди, потоки внутри каждого
+   задаёт `JOBS`. Первая сборка долгая (тулчейн, ядро, VCMI). Результат —
+   `output/oga/images/oga.img`.
+
+6. **Запись.** Проверьте, что `make info` показывает `Firmware: oga`, затем
+   `make flash DEV=/dev/sdX`.
+
+7. **Первая загрузка.** bare_app запускается сам. `/etc/init.d/S05data` создаёт на остатке
+   карты раздел `/data` (см. «Разметка SD»), он переживает перепрошивку. Wi-Fi и адрес
+   платы — в bare_app: «Настройки» → Wi-Fi; проверка входа: `ssh root@<адрес>`.
+
+8. **Doom** работает сразу: `doom1.wad` уже в образе (`/usr/share/games/doom/`). Свой
+   IWAD (`doom.wad`, `doom2.wad`) кладите в `/data`, например `/data/doom/doom2.wad`, и
+   укажите этот путь в `GAME_DOOM_WAD` (Kconfig bare_app). rootfs при перепрошивке
+   перезаписывается, `/data` нет. Сохранения Doom лежат в rootfs (`GAME_DOOM_DIR`; при
+   автозапуске `HOME=/`, то есть `/.local/share/bare_app/doom`) и при перепрошивке
+   пропадают.
+
+9. **Герои III.** Нужна установка Shadow of Death или Complete (подойдёт и с HotA):
+   каталог с `Data` (`H3bitmap.lod`, `H3sprite.lod`, `Heroes3.snd`, `VIDEO.VID`), `Maps`
+   и `MP3`. Скрипт копирует их на плату, скачивает моды в `dl/hota/` и включает их:
+
+   ```sh
+   scripts/homm3-install.sh ~/games/HoMM3 <адрес платы>
+   ```
+
+   На плате всё лежит в `/data` и переживает перепрошивку:
+
+   ```text
+   /data/vcmi/Data, Maps, Mp3   файлы игры
+   /data/vcmi/Mods              моды: hota, russian-translation
+   /data/vcmi/Saves             сохранения: Autosave и слоты Slot01..Slot10
+   /data/config/vcmi            настройки VCMI (settings.json, modSettings.json)
+   /data/cache/vcmi             журнал VCMI_Client_log.txt
+   ```
+
+   Язык игры следует языку bare_app («Настройки» → «Язык»); русский перевод работает,
+   когда выбран русский.
+
+10. **Обновление после правок:**
+
+    ```sh
+    make rootfs-make BR=bare-app-rebuild && make && make flash DEV=/dev/sdX   # bare_app
+    make rootfs-make BR=vcmi-dirclean && make && make flash DEV=/dev/sdX      # патчи VCMI
+    make rootfs-make BR=sdl2_mixer-dirclean && make ...                       # патчи sdl2_mixer
+    make linux && make && make flash DEV=/dev/sdX                             # патчи ядра
+    ```
+
+    Патчи пакета Buildroot накладываются только на свежераспакованные исходники, поэтому
+    после их правки нужен `-dirclean`, а не `-rebuild`. bare_app можно проверить и без
+    перепрошивки: `apps/bare_app/tools/oga.sh run` (через UART).
+
 #### Doom
 
 В меню bare_app есть пункт «Doom», его включает символ `GAME_DOOM` в Kconfig приложения
 (в `oga_defconfig` он включён). Сама игра — отдельная программа `/usr/bin/bare_app_doom`
 из `apps/bare_app/ports/doom` (doomgeneric, GPLv2). В `bare_app` она не линкуется,
-поэтому GPL на него не распространяется. Игра рисует в видеослой DRM, звука нет.
+поэтому GPL на него не распространяется. Игра рисует в видеослой DRM, звуковые эффекты
+выводит сама через ALSA, музыки нет.
 Shareware `doom1.wad` ставит опция пакета (пакет `doom1-wad`):
 
 ```make
@@ -250,8 +335,10 @@ APPS_CONFIG := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y
 ### Герои III (VCMI)
 
 `APPS_CONFIG += bare-app.HOMM3=y` (включено в `oga_defconfig`) собирает пакет `vcmi`:
-клиент [VCMI](https://vcmi.eu/) 1.7.5 с патчем связи с bare_app, без лаунчера,
-редактора и видео. В меню bare_app появляется пункт «Герои III». Данные игры в образ
+клиент [VCMI](https://vcmi.eu/) 1.7.5 с патчами (`board/common/buildroot/package/vcmi`)
+без лаунчера и редактора. Ролики игры (Bink, Smacker) показывает ffmpeg, собранный
+только с этими декодерами; SDL2_mixer получает свои патчи из `package/vcmi/sdl2_mixer/`.
+В меню bare_app появляется пункт «Герои III». Данные игры в образ
 не входят. Их копирует на плату по SSH скрипт, вместе с модами VCMI, которые он
 один раз скачивает в `dl/hota/`:
 

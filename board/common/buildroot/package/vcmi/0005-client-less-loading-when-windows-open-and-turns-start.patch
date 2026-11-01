@@ -1,0 +1,674 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: less loading when windows open and turns start
+
+Profiled on the ODROID-GO Advance (Cortex-A35): the stops of a third to
+half a second when a window opened or a turn started were loading, not
+drawing.
+
+- Every sound played was read and converted again (resampled from 22 to
+  44 kHz), the cached ones too, the uncached ones twice: playSoundImpl
+  loaded it before it looked at the cache. At the start of a turn the
+  new day's sound and the map's ambient sounds took ~200 ms.
+- Every animation copied its file's layout, twice, and a portrait file
+  lists all creatures (the info bar's garrison, the kingdom overview's
+  heroes). The layout is now shared with RenderHandler's cache and
+  copied only when an animation changes it (flips, added frames).
+  Registering icons copies a shared cached layout instead of changing
+  it, so animations keep the layout they were made with, as before.
+- Images are cached only while something uses them: closing a window let
+  go of its images, and opening it again read and decoded them again
+  (mods' PNG files). When bare_app runs the client (0001) the images
+  used last stay loaded, up to 64 MB counted as 32-bit pixels.
+- The new game list read the headers of all the maps whenever it opened
+  (226 maps here: about a second). When bare_app runs the client they
+  are read once a session, in the background while the main menu is up;
+  the list waits for that read if it opens before it ends.
+- SDL converts a sound's rate with a windowed sinc filter: ~0.1 s for a
+  few seconds of a 22 kHz sound, and sounds load as they are first
+  played (a battle's start, every new creature). When bare_app runs the
+  client, WAV files (8 or 16 bits, mono or stereo) are converted to the
+  device's format by linear interpolation; anything else goes to SDL.
+
+The kingdom overview opened again: 330 ms -> 90 ms. The start of a turn
+stopped the game for 360-460 ms, now 50-160 ms; the first battle of a
+game 515 ms -> ~400 ms; opening the new game list 2.1 s -> 0.96 s, again
+~0.5 s.
+
+Upstream: not submitted (only keeping images is specific to the SDK)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+ client/lobby/SelectionTab.cpp      | 105 +++++++++++++++++++++++++++--
+ client/lobby/SelectionTab.h        |  12 +++-
+ client/mainmenu/CMainMenu.cpp      |   6 ++
+ client/media/CSoundHandler.cpp     |  94 ++++++++++++++++++++++++--
+ client/render/CAnimation.cpp       |  34 +++++++---
+ client/render/CAnimation.h         |  11 ++-
+ client/renderSDL/RenderHandler.cpp |  72 +++++++++++++++++---
+ client/renderSDL/RenderHandler.h   |  15 ++++-
+ 8 files changed, 313 insertions(+), 36 deletions(-)
+
+diff --git a/client/lobby/SelectionTab.cpp b/client/lobby/SelectionTab.cpp
+index 848aff7..5d9d518 100644
+--- a/client/lobby/SelectionTab.cpp
++++ b/client/lobby/SelectionTab.cpp
+@@ -38,9 +38,12 @@
+ #include "../mainmenu/CCampaignScreen.h"
+ #ifdef VCMI_BARE_APP
+ #include "../renderSDL/BareAppLink.h"
++
++#include <future>
+ #endif
+ 
+ #include "../../lib/CConfigHandler.h"
++#include "../../lib/CThreadHelper.h"
+ #include "../../lib/IGameSettings.h"
+ #include "../../lib/callback/CCallback.h"
+ #include "../../lib/filesystem/Filesystem.h"
+@@ -369,10 +372,7 @@ void SelectionTab::toggleMode()
+ 		case ESelectionScreen::newGame:
+ 			{
+ 				inputName->disable();
+-				auto files = getFiles("Maps/", EResType::MAP);
+-				files.erase(ResourcePath("Maps/Tutorial.tut", EResType::MAP));
+-				files.erase(ResourcePath("Maps/BattleOnlyMode.vmap", EResType::MAP));
+-				parseMaps(files);
++				parseMaps(getNewGameMaps());
+ 				break;
+ 			}
+ 
+@@ -1028,10 +1028,95 @@ size_t SelectionTab::getHiddenIncompatibleMapsCount() const
+ 	return hiddenIncompatibleMapsCount;
+ }
+ 
++#ifdef VCMI_BARE_APP
++namespace
++{
++/// Map headers read once a session when bare_app runs the client: the new
++/// game list read all of them whenever it opened, a second on the ODROID-GO
++/// Advance. prefetchMaps() reads them in the background at the main menu.
++/// nullptr: the map cannot be read.
++std::map<ResourcePath, std::shared_ptr<ElementInfo>> readMaps;
++std::future<void> mapPrefetch;
++std::mutex readMapsMutex;
++
++std::shared_ptr<ElementInfo> readMap(const ResourcePath & file)
++{
++	{
++		std::scoped_lock lock(readMapsMutex);
++		auto found = readMaps.find(file);
++		if(found != readMaps.end())
++			return found->second;
++	}
++
++	std::shared_ptr<ElementInfo> mapInfo;
++	try
++	{
++		mapInfo = std::make_shared<ElementInfo>();
++		mapInfo->mapInit(file.getOriginalName());
++		mapInfo->name = mapInfo->getNameForList();
++	}
++	catch(std::exception & e)
++	{
++		logGlobal->error("Map %s is invalid. Message: %s", file.getName(), e.what());
++		mapInfo = nullptr;
++	}
++
++	std::scoped_lock lock(readMapsMutex);
++	readMaps[file] = mapInfo;
++	return mapInfo;
++}
++
++void waitForMapPrefetch()
++{
++	std::future<void> prefetch;
++	{
++		std::scoped_lock lock(readMapsMutex);
++		prefetch = std::move(mapPrefetch);
++	}
++	if(prefetch.valid())
++		prefetch.wait();
++}
++}
++
++void SelectionTab::prefetchMaps()
++{
++	if(!BareAppLink::get())
++		return;
++	{
++		std::scoped_lock lock(readMapsMutex);
++		if(mapPrefetch.valid() || !readMaps.empty())
++			return;
++	}
++
++	// the file lists are made here, in the main thread: only the headers
++	// are read in the background, as VCMI reads them in its network thread
++	auto files = getNewGameMaps();
++	std::scoped_lock lock(readMapsMutex);
++	mapPrefetch = std::async(std::launch::async, [files = std::move(files)]()
++	{
++		setThreadName("prefetchMaps");
++		for(const auto & file : files)
++			readMap(file);
++	});
++}
++#endif
++
+ void SelectionTab::parseMaps(const std::unordered_set<ResourcePath> & files)
+ {
+ 	logGlobal->debug("Parsing %d maps", files.size());
+ 	allItems.clear();
++#ifdef VCMI_BARE_APP
++	if(BareAppLink::get())
++	{
++		for(const auto & file : files)
++		{
++			auto mapInfo = readMap(file);
++			if(mapInfo && isMapSupported(*mapInfo))
++				allItems.push_back(mapInfo);
++		}
++		return;
++	}
++#endif
+ 	for(auto & file : files)
+ 	{
+ 		try
+@@ -1193,6 +1278,18 @@ void SelectionTab::parseCampaigns(const std::unordered_set<ResourcePath> & files
+ 	}
+ }
+ 
++std::unordered_set<ResourcePath> SelectionTab::getNewGameMaps()
++{
++#ifdef VCMI_BARE_APP
++	// the background read touches the same file lists
++	waitForMapPrefetch();
++#endif
++	auto files = getFiles("Maps/", EResType::MAP);
++	files.erase(ResourcePath("Maps/Tutorial.tut", EResType::MAP));
++	files.erase(ResourcePath("Maps/BattleOnlyMode.vmap", EResType::MAP));
++	return files;
++}
++
+ std::unordered_set<ResourcePath> SelectionTab::getFiles(std::string dirURI, EResType resType)
+ {
+ 	boost::to_upper(dirURI);
+diff --git a/client/lobby/SelectionTab.h b/client/lobby/SelectionTab.h
+index e0d3814..88930cf 100644
+--- a/client/lobby/SelectionTab.h
++++ b/client/lobby/SelectionTab.h
+@@ -53,6 +53,15 @@ public:
+ 
+ class SelectionTab : public CIntObject
+ {
++public:
++#ifdef VCMI_BARE_APP
++	/// When bare_app runs the client: starts reading the maps' headers in
++	/// the background (at the main menu), so that the new game list opens
++	/// at once. They are read once a session.
++	static void prefetchMaps();
++#endif
++
++private:
+ 	struct ListItem : public CIntObject
+ 	{
+ 		std::shared_ptr<CLabel> labelAmountOfPlayers;
+@@ -150,7 +159,8 @@ private:
+ 	void showSaveSlots();
+ #endif
+ 	void parseCampaigns(const std::unordered_set<ResourcePath> & files);
+-	std::unordered_set<ResourcePath> getFiles(std::string dirURI, EResType resType);
++	static std::unordered_set<ResourcePath> getFiles(std::string dirURI, EResType resType);
++	static std::unordered_set<ResourcePath> getNewGameMaps();
+ 
+ 	void handleUnsupportedSavegames(const std::vector<ResourcePath> & files);
+ };
+diff --git a/client/mainmenu/CMainMenu.cpp b/client/mainmenu/CMainMenu.cpp
+index add5dd2..29dee58 100644
+--- a/client/mainmenu/CMainMenu.cpp
++++ b/client/mainmenu/CMainMenu.cpp
+@@ -39,6 +39,9 @@
+ #include "../widgets/ObjectLists.h"
+ #include "../widgets/TextControls.h"
+ #include "../widgets/VideoWidget.h"
++#ifdef VCMI_BARE_APP
++#include "../lobby/SelectionTab.h"
++#endif
+ #include "../windows/InfoWindows.h"
+ #include "../windows/wiki/WikiWindow.h"
+ #include "../CServerHandler.h"
+@@ -338,6 +341,9 @@ CMainMenu::CMainMenu()
+ {
+ 	pos.w = ENGINE->screenDimensions().x;
+ 	pos.h = ENGINE->screenDimensions().y;
++#ifdef VCMI_BARE_APP
++	SelectionTab::prefetchMaps();
++#endif
+ 
+ 	menu = std::make_shared<CMenuScreen>(CMainMenuConfig::get().getConfig()["window"]);
+ 	OBJECT_CONSTRUCTION;
+diff --git a/client/media/CSoundHandler.cpp b/client/media/CSoundHandler.cpp
+index 47de49d..48c93b3 100644
+--- a/client/media/CSoundHandler.cpp
++++ b/client/media/CSoundHandler.cpp
+@@ -17,6 +17,90 @@
+ 
+ #include <SDL_mixer.h>
+ 
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++
++namespace
++{
++/// A WAV file in the device's format, its rate converted by linear
++/// interpolation: SDL's windowed sinc filter took ~0.1 s for a few seconds
++/// of a 22 kHz sound on the ODROID-GO Advance, and the game loads sounds as
++/// it plays them (at a battle's start, for every new creature). nullptr
++/// for what it does not handle: SDL converts that.
++Mix_Chunk * loadWavQuickly(const ui8 * data, si64 size)
++{
++	int freq;
++	Uint16 format;
++	int channels;
++	if(!Mix_QuerySpec(&freq, &format, &channels) || format != AUDIO_S16SYS || channels != 2)
++		return nullptr;
++
++	SDL_AudioSpec spec;
++	Uint8 * buffer;
++	Uint32 length;
++	if(!SDL_LoadWAV_RW(SDL_RWFromConstMem(data, static_cast<int>(size)), 1, &spec, &buffer, &length))
++		return nullptr;
++	const int sampleBytes = spec.format == AUDIO_S16LSB ? 2 : 1;
++	const size_t frames = length / (sampleBytes * std::max<int>(spec.channels, 1));
++	if((spec.format != AUDIO_S16LSB && spec.format != AUDIO_U8) || (spec.channels != 1 && spec.channels != 2) || spec.freq <= 0 || frames == 0)
++	{
++		SDL_FreeWAV(buffer);
++		return nullptr;
++	}
++
++	const auto sample = [&](size_t frame, int channel) -> int
++	{
++		const size_t i = frame * spec.channels + (spec.channels == 2 ? channel : 0);
++		if(spec.format == AUDIO_U8)
++			return (buffer[i] - 128) * 256;
++		Sint16 value;
++		std::memcpy(&value, buffer + 2 * i, 2);
++		return SDL_SwapLE16(value);
++	};
++	const size_t outFrames = static_cast<uint64_t>(frames) * freq / spec.freq;
++	auto * out = static_cast<Sint16 *>(SDL_malloc(std::max<size_t>(outFrames, 1) * 4));
++	auto * chunk = static_cast<Mix_Chunk *>(SDL_malloc(sizeof(Mix_Chunk)));
++	if(!out || !chunk)
++	{
++		SDL_free(out);
++		SDL_free(chunk);
++		SDL_FreeWAV(buffer);
++		return nullptr;
++	}
++	for(size_t i = 0; i < outFrames; i++)
++	{
++		// the source position, 16.16 fixed point
++		const uint64_t position = static_cast<uint64_t>(i) * spec.freq * 65536 / freq;
++		const size_t frame = position >> 16;
++		const size_t next = std::min(frame + 1, frames - 1);
++		const int weight = static_cast<int>(position & 0xffff);
++		for(int c = 0; c < 2; c++)
++			out[2 * i + c] = static_cast<Sint16>((sample(frame, c) * (65536 - weight) + sample(next, c) * weight) >> 16);
++	}
++	SDL_FreeWAV(buffer);
++
++	// as Mix_LoadWAV_RW makes them: Mix_FreeChunk frees both
++	chunk->allocated = 1;
++	chunk->abuf = reinterpret_cast<Uint8 *>(out);
++	chunk->alen = static_cast<Uint32>(outFrames * 4);
++	chunk->volume = MIX_MAX_VOLUME;
++	return chunk;
++}
++}
++#endif
++
++static Mix_Chunk * loadChunk(const ui8 * data, si64 size)
++{
++#ifdef VCMI_BARE_APP
++	if(BareAppLink::get())
++	{
++		if(auto * chunk = loadWavQuickly(data, size))
++			return chunk;
++	}
++#endif
++	return Mix_LoadWAV_RW(SDL_RWFromConstMem(data, static_cast<int>(size)), 1); // will free ops
++}
++
+ #define VCMI_SOUND_NAME(x)
+ #define VCMI_SOUND_FILE(y) #y,
+ 
+@@ -86,9 +170,7 @@ CSoundHandler::MixChunkPtr CSoundHandler::getSoundChunk(const AudioPath & sound)
+ 	try
+ 	{
+ 		auto data = CResourceHandler::get()->load(sound.addPrefix("SOUNDS/"))->readAll();
+-		SDL_RWops * ops = SDL_RWFromMem(data.first.get(), data.second);
+-		Mix_Chunk * chunk = Mix_LoadWAV_RW(ops, 1); // will free ops
+-		return MixChunkPtr(chunk);
++		return MixChunkPtr(loadChunk(data.first.get(), data.second));
+ 	}
+ 	catch(std::exception & e)
+ 	{
+@@ -103,9 +185,7 @@ CSoundHandler::MixChunkPtr CSoundHandler::getSoundChunk(std::pair<std::unique_pt
+ 	{
+ 		std::vector<ui8> startBytes = std::vector<ui8>(data.first.get(), data.first.get() + std::min(static_cast<si64>(100), data.second));
+ 
+-		SDL_RWops * ops = SDL_RWFromMem(data.first.get(), data.second);
+-		Mix_Chunk * chunk = Mix_LoadWAV_RW(ops, 1); // will free ops
+-		return MixChunkPtr(chunk);
++		return MixChunkPtr(loadChunk(data.first.get(), data.second));
+ 	}
+ 	catch(std::exception & e)
+ 	{
+@@ -192,7 +272,7 @@ int CSoundHandler::playSoundImpl(const AudioPath & sound, int repeats, bool useC
+ 		return -1;
+ 
+ 	int channel;
+-	MixChunkPtr chunkPtr = getSoundChunk(sound);
++	MixChunkPtr chunkPtr;
+ 	Mix_Chunk * chunk = nullptr;
+ 	if (!useCache)
+ 	{
+diff --git a/client/render/CAnimation.cpp b/client/render/CAnimation.cpp
+index 4b5b9d8..cf33c80 100644
+--- a/client/render/CAnimation.cpp
++++ b/client/render/CAnimation.cpp
+@@ -101,21 +101,33 @@ void CAnimation::printError(size_t frame, size_t group, std::string type) const
+ 	logGlobal->error("%s error: Request for frame not present in CAnimation! File name: %s, Group: %d, Frame: %d", type, name.getOriginalName(), group, frame);
+ }
+ 
+-CAnimation::CAnimation(const AnimationPath & Name, std::map<size_t, std::vector <ImageLocator> > layout, EImageBlitMode mode):
++CAnimation::CAnimation(const AnimationPath & Name, std::shared_ptr<const std::map<size_t, std::vector<ImageLocator>>> layout, EImageBlitMode mode):
+ 	name(boost::starts_with(Name.getName(), "SPRITES") ? Name : Name.addPrefix("SPRITES/")),
+-	source(layout),
++	source(std::move(layout)),
+ 	mode(mode)
+ {
+-	if(source.empty())
++	if(source->empty())
+ 		logAnim->error("Animation %s failed to load", Name.getOriginalName());
+ }
+ 
++// Copying the layout for every animation took most of the time of opening
++// a window with creatures (a portrait file lists all of them)
++CAnimation::Layout & CAnimation::editSource()
++{
++	if(!sourceCopied)
++	{
++		source = std::make_shared<Layout>(*source);
++		sourceCopied = true;
++	}
++	return const_cast<Layout &>(*source);	// made here, not const
++}
++
+ CAnimation::~CAnimation() = default;
+ 
+ void CAnimation::duplicateImage(const size_t sourceGroup, const size_t sourceFrame, const size_t targetGroup)
+ {
+ 	ImageLocator clone(getImageLocator(sourceFrame, sourceGroup));
+-	source[targetGroup].push_back(clone);
++	editSource()[targetGroup].push_back(clone);
+ }
+ 
+ std::shared_ptr<IImage> CAnimation::getImage(size_t frame, size_t group, bool verbose)
+@@ -141,22 +153,22 @@ std::shared_ptr<IImage> CAnimation::getImageImpl(size_t frame, size_t group, boo
+ 
+ size_t CAnimation::size(size_t group) const
+ {
+-	auto iter = source.find(group);
+-	if (iter != source.end())
++	auto iter = source->find(group);
++	if (iter != source->end())
+ 		return iter->second.size();
+ 	return 0;
+ }
+ 
+ void CAnimation::horizontalFlip()
+ {
+-	for(auto & group : source)
++	for(auto & group : editSource())
+ 		for(size_t i = 0; i < group.second.size(); ++i)
+ 			horizontalFlip(i, group.first);
+ }
+ 
+ void CAnimation::verticalFlip()
+ {
+-	for(auto & group : source)
++	for(auto & group : editSource())
+ 		for(size_t i = 0; i < group.second.size(); ++i)
+ 			verticalFlip(i, group.first);
+ }
+@@ -174,7 +186,7 @@ void CAnimation::horizontalFlip(size_t frame, size_t group)
+ 
+ 	auto locator = getImageLocator(frame, group);
+ 	locator.horizontalFlip = !locator.horizontalFlip;
+-	source[group][frame] = locator;
++	editSource()[group][frame] = locator;
+ }
+ 
+ void CAnimation::verticalFlip(size_t frame, size_t group)
+@@ -190,7 +202,7 @@ void CAnimation::verticalFlip(size_t frame, size_t group)
+ 
+ 	auto locator = getImageLocator(frame, group);
+ 	locator.verticalFlip = !locator.verticalFlip;
+-	source[group][frame] = locator;
++	editSource()[group][frame] = locator;
+ }
+ 
+ void CAnimation::playerColored(PlayerColor targetPlayer)
+@@ -214,7 +226,7 @@ ImageLocator CAnimation::getImageLocator(size_t frame, size_t group) const
+ {
+ 	try
+ 	{
+-		const ImageLocator & locator = source.at(group).at(frame);
++		const ImageLocator & locator = source->at(group).at(frame);
+ 
+ 		if (!locator.empty())
+ 			return locator;
+diff --git a/client/render/CAnimation.h b/client/render/CAnimation.h
+index 6b9e662..9f1f9fc 100644
+--- a/client/render/CAnimation.h
++++ b/client/render/CAnimation.h
+@@ -26,8 +26,13 @@ class RenderHandler;
+ class CAnimation
+ {
+ private:
+-	//source[group][position] - location of this frame
+-	std::map<size_t, std::vector <ImageLocator> > source;
++	using Layout = std::map<size_t, std::vector<ImageLocator>>;
++
++	//source[group][position] - location of this frame. RenderHandler's
++	//layout of the file, shared with its other animations until changed
++	std::shared_ptr<const Layout> source;
++	bool sourceCopied = false;
++	Layout & editSource();
+ 
+ 	//bitmap[group][position], store objects with loaded bitmaps
+ 	std::map<size_t, std::map<size_t, std::shared_ptr<IImage> > > images;
+@@ -51,7 +56,7 @@ private:
+ 
+ 	std::shared_ptr<IImage> getImageImpl(size_t frame, size_t group=0, bool verbose=true);
+ public:
+-	CAnimation(const AnimationPath & Name, std::map<size_t, std::vector <ImageLocator> > layout, EImageBlitMode mode);
++	CAnimation(const AnimationPath & Name, std::shared_ptr<const std::map<size_t, std::vector<ImageLocator>>> layout, EImageBlitMode mode);
+ 	~CAnimation();
+ 
+ 	//duplicates frame at [sourceGroup, sourceFrame] as last frame in targetGroup
+diff --git a/client/renderSDL/RenderHandler.cpp b/client/renderSDL/RenderHandler.cpp
+index 72c9d58..20a82ee 100644
+--- a/client/renderSDL/RenderHandler.cpp
++++ b/client/renderSDL/RenderHandler.cpp
+@@ -13,6 +13,9 @@
+ #include "SDLImage.h"
+ #include "ScalableImage.h"
+ #include "FontChain.h"
++#ifdef VCMI_BARE_APP
++#include "BareAppLink.h"
++#endif
+ 
+ #include "../GameEngine.h"
+ 
+@@ -158,7 +161,20 @@ void RenderHandler::initFromJson(AnimationLayoutMap & source, const JsonNode & c
+ 	}
+ }
+ 
+-RenderHandler::AnimationLayoutMap & RenderHandler::getAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode)
++std::shared_ptr<const RenderHandler::AnimationLayoutMap> RenderHandler::getAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode)
++{
++	return getAnimationLayoutEntry(path, scalingFactor, mode);
++}
++
++RenderHandler::AnimationLayoutMap & RenderHandler::editAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode)
++{
++	auto & entry = getAnimationLayoutEntry(path, scalingFactor, mode);
++	if(entry.use_count() > 1)
++		entry = std::make_shared<AnimationLayoutMap>(*entry);
++	return *entry;
++}
++
++std::shared_ptr<RenderHandler::AnimationLayoutMap> & RenderHandler::getAnimationLayoutEntry(const AnimationPath & path, int scalingFactor, EImageBlitMode mode)
+ {
+ 	static constexpr std::array scaledSpritesPath = {
+ 		"", // 0x
+@@ -205,7 +221,7 @@ RenderHandler::AnimationLayoutMap & RenderHandler::getAnimationLayout(const Anim
+ 		initFromJson(result, config, mode);
+ 	}
+ 
+-	animationLayouts[actualPath] = result;
++	animationLayouts[actualPath] = std::make_shared<AnimationLayoutMap>(std::move(result));
+ 	return animationLayouts[actualPath];
+ }
+ 
+@@ -216,14 +232,14 @@ int RenderHandler::getScalingFactor() const
+ 
+ ImageLocator RenderHandler::getLocatorForAnimationFrame(const AnimationPath & path, int frame, int group, int scaling, EImageBlitMode mode)
+ {
+-	const auto & layout = getAnimationLayout(path, scaling, mode);
+-	if (!layout.count(group))
++	const auto layout = getAnimationLayout(path, scaling, mode);
++	if (!layout->count(group))
+ 		return ImageLocator();
+ 
+-	if (frame >= layout.at(group).size())
++	if (frame >= layout->at(group).size())
+ 		return ImageLocator();
+ 
+-	const auto & locator = layout.at(group).at(frame);
++	const auto & locator = layout->at(group).at(frame);
+ 	if (locator.image || locator.defFile)
+ 		return locator;
+ 
+@@ -237,16 +253,56 @@ std::shared_ptr<ScalableImageShared> RenderHandler::loadImageImpl(const ImageLoc
+ 	{
+ 		auto locked = it->second.lock();
+ 		if (locked)
++		{
++			keepRecent(locked);
+ 			return locked;
++		}
+ 	}
+ 
+ 	auto sdlImage = loadImageFromFileUncached(locator);
+ 	auto scaledImage = std::make_shared<ScalableImageShared>(locator, sdlImage);
+ 
+ 	storeCachedImage(locator, scaledImage);
++	keepRecent(scaledImage);
+ 	return scaledImage;
+ }
+ 
++/// The cache holds images only while something uses them: closing a window
++/// let go of all of its images, and opening it again read and decoded them
++/// again (a third of a second for the kingdom overview on the ODROID-GO
++/// Advance). When bare_app runs the client, the ones used last stay loaded.
++void RenderHandler::keepRecent(const std::shared_ptr<ScalableImageShared> & image)
++{
++#ifdef VCMI_BARE_APP
++	/// Pixels as 32 bits (paletted ones take less): the adventure map, a
++	/// town and the windows around them, on a console with 1 GB
++	static constexpr size_t budget = 64 * 1024 * 1024;
++
++	if(!BareAppLink::get())
++		return;
++
++	auto found = recentIndex.find(image.get());
++	if(found != recentIndex.end())
++	{
++		recentImages.splice(recentImages.begin(), recentImages, found->second);
++		return;
++	}
++
++	const Point size = image->dimensions();
++	const size_t bytes = static_cast<size_t>(std::max(size.x, 0)) * std::max(size.y, 0) * 4;
++	recentImages.emplace_front(image, bytes);
++	recentIndex[image.get()] = recentImages.begin();
++	recentBytes += bytes;
++
++	while(recentBytes > budget && recentImages.size() > 1)
++	{
++		recentBytes -= recentImages.back().second;
++		recentIndex.erase(recentImages.back().first.get());
++		recentImages.pop_back();
++	}
++#endif
++}
++
+ std::shared_ptr<ISharedImage> RenderHandler::loadImageFromFileUncached(const ImageLocator & locator)
+ {
+ 	if(locator.image)
+@@ -498,7 +554,7 @@ void RenderHandler::addImageListEntries(const EntityService * service)
+ 			if (imageName.empty())
+ 				return;
+ 
+-			auto & layout = getAnimationLayout(AnimationPath::builtin("SPRITES/" + listName), 1, EImageBlitMode::COLORKEY);
++			auto & layout = editAnimationLayout(AnimationPath::builtin("SPRITES/" + listName), 1, EImageBlitMode::COLORKEY);
+ 
+ 			JsonNode entry;
+ 			entry["file"].String() = imageName;
+@@ -646,5 +702,5 @@ std::shared_ptr<AssetGenerator> RenderHandler::getAssetGenerator()
+ void RenderHandler::updateGeneratedAssets()
+ {
+ 	for(const auto & [key, value] : assetGenerator->generateAllAnimations())
+-		animationLayouts[key] = value;
++		animationLayouts[key] = std::make_shared<AnimationLayoutMap>(value);
+ }
+diff --git a/client/renderSDL/RenderHandler.h b/client/renderSDL/RenderHandler.h
+index 15c4291..0d1a0be 100644
+--- a/client/renderSDL/RenderHandler.h
++++ b/client/renderSDL/RenderHandler.h
+@@ -28,8 +28,14 @@ class RenderHandler final : public IRenderHandler
+ 
+ 	std::map<AnimationPath, std::map<int, std::map<int, std::pair<std::string, CDefFile::SSpriteDef>>>> animationSpriteDefs;
+ 	std::map<AnimationPath, std::weak_ptr<CDefFile>> animationFiles;
+-	std::map<AnimationPath, AnimationLayoutMap> animationLayouts;
++	std::map<AnimationPath, std::shared_ptr<AnimationLayoutMap>> animationLayouts;
+ 	std::map<SharedImageLocator, std::weak_ptr<ScalableImageShared>> imageFiles;
++	/// Images used last, most recent first, with the memory they take: kept
++	/// loaded when nothing shows them, so that a window opened again does
++	/// not read and decode its images again (keepRecent)
++	std::list<std::pair<std::shared_ptr<ScalableImageShared>, size_t>> recentImages;
++	std::map<const ScalableImageShared *, decltype(recentImages)::iterator> recentIndex;
++	size_t recentBytes = 0;
+ 	std::map<EFonts, std::shared_ptr<const IFont>> fonts;
+ 	std::shared_ptr<AssetGenerator> assetGenerator;
+ 	std::shared_ptr<HdImageLoader> hdImageLoader;
+@@ -39,12 +45,17 @@ class RenderHandler final : public IRenderHandler
+ 	std::pair<std::string, CDefFile::SSpriteDef> getAnimationSpriteDef(const AnimationPath & path, int frame, int group);
+ 	ImagePath getAnimationFrameName(const AnimationPath & path, int frame, int group);
+ 	std::shared_ptr<CDefFile> getAnimationFile(const AnimationPath & path);
+-	AnimationLayoutMap & getAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode);
++	std::shared_ptr<AnimationLayoutMap> & getAnimationLayoutEntry(const AnimationPath & path, int scalingFactor, EImageBlitMode mode);
++	/// The layout of an animation file, shared with the animations made of it
++	std::shared_ptr<const AnimationLayoutMap> getAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode);
++	/// The same to be changed: animations keep the layout they were made with
++	AnimationLayoutMap & editAnimationLayout(const AnimationPath & path, int scalingFactor, EImageBlitMode mode);
+ 	void initFromJson(AnimationLayoutMap & layout, const JsonNode & config, EImageBlitMode mode) const;
+ 
+ 	void addImageListEntry(size_t index, size_t group, const std::string & listName, const std::string & imageName);
+ 	void addImageListEntries(const EntityService * service);
+ 	void storeCachedImage(const ImageLocator & locator, std::shared_ptr<ScalableImageShared> image);
++	void keepRecent(const std::shared_ptr<ScalableImageShared> & image);
+ 
+ 	std::shared_ptr<ScalableImageShared> loadImageImpl(const ImageLocator & config);
+ 

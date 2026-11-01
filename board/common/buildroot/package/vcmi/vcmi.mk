@@ -32,10 +32,11 @@ VCMI_DEPENDENCIES = \
 	sdl2_mixer \
 	sdl2_ttf \
 	tbb \
-	zlib
+	zlib \
+	ffmpeg
 
 # Only the client: the game server is built into it. No Qt (launcher,
-# editor, translations), no ffmpeg (videos), no Discord, no ONNX (MMAI).
+# editor, translations), no Discord, no ONNX (MMAI). Videos with ffmpeg.
 # Nullkiller2 is the default adventure AI, BattleAI the default battle AI.
 # The release tarball has no .git, so no version from git either.
 VCMI_CONF_OPTS = \
@@ -45,7 +46,7 @@ VCMI_CONF_OPTS = \
 	-DENABLE_EDITOR=OFF \
 	-DENABLE_LOBBY=OFF \
 	-DENABLE_TRANSLATIONS=OFF \
-	-DENABLE_VIDEO=OFF \
+	-DENABLE_VIDEO=ON \
 	-DENABLE_DISCORD=OFF \
 	-DENABLE_LUA=OFF \
 	-DENABLE_ERM=OFF \
@@ -81,9 +82,28 @@ endef
 # needed. Buildroot's sdl2 disables that driver and sdl2_mixer disables
 # MP3 (the game's music). Their *_CONF_OPTS are expanded only when they
 # are configured, so a later option added here wins.
+#
+# sdl2_mixer also gets the patches in sdl2_mixer/ (a subdirectory: the
+# ones here are VCMI's): its dr_mp3 seeks by decoding the whole track up to
+# the position, and VCMI resumes tracks. Hooks are expanded when they run,
+# as the options are.
+#
+# FFmpeg gets only what the game's videos need (Bink and Smacker, the
+# original game's and Horn of the Abyss's), under 2 MB stripped
+# instead of all of it; options added last win, as above.
 ifeq ($(BR2_PACKAGE_VCMI),y)
 SDL2_CONF_OPTS += --enable-video-dummy
 SDL2_MIXER_CONF_OPTS += --enable-music-mp3 --enable-music-mp3-drmp3
+FFMPEG_CONF_OPTS += \
+	--disable-everything --disable-programs --disable-network \
+	--disable-avdevice --disable-avfilter \
+	--enable-decoder=bink,binkaudio_dct,binkaudio_rdft,smacker,smackaud \
+	--enable-demuxer=bink,smacker
+
+define VCMI_PATCH_SDL2_MIXER
+	$(APPLY_PATCHES) $(SDL2_MIXER_DIR) $(VCMI_PKGDIR)/sdl2_mixer \*.patch
+endef
+SDL2_MIXER_POST_PATCH_HOOKS += VCMI_PATCH_SDL2_MIXER
 endif
 
 $(eval $(cmake-package))

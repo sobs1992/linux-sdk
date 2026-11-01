@@ -1,0 +1,73 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] music_drmp3: seek with a seek table
+
+dr_mp3 seeks by decoding every frame before the position. VCMI resumes
+a track where it was left (after a jingle, at the end of a turn), and on
+the ODROID-GO Advance's Cortex-A35 that decoding stopped the game for
+about a second, in its main thread.
+
+On the first seek into a track, build dr_mp3's seek table (256 points):
+it only parses the frame headers, and a seek then decodes just the few
+frames before its point. Resuming a track there: ~1 s -> 70-80 ms.
+
+Upstream: not submitted
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+ src/codecs/music_drmp3.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/codecs/music_drmp3.c b/src/codecs/music_drmp3.c
+index 497295c..1264b10 100644
+--- a/src/codecs/music_drmp3.c
++++ b/src/codecs/music_drmp3.c
+@@ -56,10 +56,14 @@ typedef struct {
+     drmp3_int16 *buffer;
+     int buffer_size;
+     int channels;
++    drmp3_seek_point *seek_points;
+ 
+     Mix_MusicMetaTags tags;
+ } DRMP3_Music;
+ 
++/* Seek points in a table: a few minutes of music, a point every second or so */
++#define DRMP3_SEEK_POINTS 256
++
+ 
+ static size_t DRMP3_ReadCB(void *context, void *buf, size_t size)
+ {
+@@ -215,6 +219,24 @@ static int DRMP3_Seek(void *context, double position)
+ {
+     DRMP3_Music *music = (DRMP3_Music *)context;
+     drmp3_uint64 destpos = (drmp3_uint64)(position * music->dec.sampleRate);
++
++    /*
++     * Without a seek table dr_mp3 decodes everything before the position:
++     * a second for a few minutes of music on a Cortex-A35, in the caller's
++     * thread. The table only parses the frame headers; a seek then decodes
++     * the few frames before its point.
++     */
++    if (destpos > 0 && !music->seek_points) {
++        drmp3_uint32 count = DRMP3_SEEK_POINTS;
++
++        music->seek_points = (drmp3_seek_point *)SDL_malloc(count * sizeof(drmp3_seek_point));
++        if (music->seek_points &&
++            !(drmp3_calculate_seek_points(&music->dec, &count, music->seek_points) &&
++              drmp3_bind_seek_table(&music->dec, count, music->seek_points))) {
++            SDL_free(music->seek_points);
++            music->seek_points = NULL;
++        }
++    }
+     drmp3_seek_to_pcm_frame(&music->dec, destpos);
+     return 0;
+ }
+@@ -245,6 +267,10 @@ static void DRMP3_Delete(void *context)
+     drmp3_uninit(&music->dec);
+     meta_tags_clear(&music->tags);
+ 
++    if (music->seek_points) {
++        SDL_free(music->seek_points);
++    }
++
+     if (music->stream) {
+         SDL_FreeAudioStream(music->stream);
+     }

@@ -1,0 +1,39 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] music: seek an MP3 before locking the audio
+
+Mix_FadeInMusicPos() seeked with the audio locked. The first seek into an
+MP3 builds dr_mp3's seek table (70-80 ms for a few minutes of music on
+the ODROID-GO Advance), and meanwhile the audio callback waited: with a
+buffer of 46 ms the sound broke up when VCMI resumed a track (the end of
+a battle, of a turn).
+
+A music that is not playing is seeked before the audio is locked; the
+seek under the lock is then quick, as the table is there.
+
+Upstream: not submitted
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+ src/music.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/music.c b/src/music.c
+index 5b4030b..da1692e 100644
+--- a/src/music.c
++++ b/src/music.c
+@@ -889,6 +889,16 @@ int Mix_FadeInMusicPos(Mix_Music *music, int loops, int ms, double position)
+     music->fade_step = 0;
+     music->fade_steps = (ms + ms_per_step - 1) / ms_per_step;
+ 
++    /*
++     * The audio callback waits while the audio is locked, and a seek can
++     * take long: dr_mp3 builds its seek table on the first one. A music that
++     * is not playing is seeked before; the seek under the lock is then quick.
++     */
++    if (position > 0.0 && music != music_playing &&
++        music->interface->api == MIX_MUSIC_DRMP3 && music->interface->Seek) {
++        music->interface->Seek(music->context, position);
++    }
++
+     /* Play the puppy */
+     Mix_LockAudio();
+     /* If the current music is fading out, wait for the fade to complete */

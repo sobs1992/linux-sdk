@@ -3,10 +3,10 @@ Subject: [PATCH] client: link to bare_app
 
 bare_app (the SDK's LVGL launcher for the ODROID-GO Advance) starts the
 client as a game in its own process, with a socket and shared memory
-(bare_app's src/games/game_ipc.h). With SDL's dummy video driver the
-window, twice the size of bare_app's video layer, stays in memory: after
-each SDL_RenderPresent its content goes to bare_app scaled down 2:1, or a
-1:1 part around the cursor (L1 switches). Gamepad messages become SDL game
+(bare_app's src/games/game_ipc.h). SDL's dummy video driver shows
+nothing: VCMI's screen, twice the size of bare_app's video layer, goes to
+bare_app each frame scaled down 2:1, or as a 1:1 part around the cursor
+(L1 switches), with the cursor drawn over it at full size. Gamepad messages become SDL game
 controller events, so VCMI's own controller support drives the game. The
 D-pad moves the magnifier off the cursor (once the stick moves, the cursor
 comes into view at the edge it was beyond), or in the overview scrolls
@@ -17,10 +17,17 @@ Ctrl and Shift (a click on a stack splits it as in HotA: one creature
 off, into equal parts); F3 cancels, F4 opens the options.
 
 The link also sets what a handheld needs: quiet logging (the default
-traces into a file on the SD card), no second stick dead zone. And it removes per-frame and per-step work that a Cortex-A35
-cannot afford, found by profiling on the device:
-- the screen texture has the window's format and is not cleared first,
-  so presenting is a copy instead of a per-pixel blend plus a fill;
+traces into a file on the SD card), no second stick dead zone, no vsync
+(the dummy driver has none: the frame rate limit never waited, and the
+client drew 70-90 frames a second on a whole core, 1-3 of them new). And
+it removes per-frame and per-step work that a Cortex-A35 cannot afford,
+found by profiling on the device:
+- presenting skips SDL's renderer, which copied the screen into a texture
+  and the texture into the window: the link scales the screen surface
+  straight into bare_app's frame (NEON, four pixels at a time) and draws
+  the software cursor itself. A frame on the adventure map at 30 frames
+  a second and 1.3 GHz: 18.4 ms -> 10.2 ms, the main thread 63% -> 34%
+  of a core;
 - while a hero walks, the info bar is rebuilt once per walk, not per
   tile, and changed tiles redraw only the minimap, not the whole
   adventure map (both ran under the interface lock and stopped the walk
@@ -51,14 +58,15 @@ Signed-off-by: Sobs <antohasobne@gmail.com>
  client/adventureMap/AdventureMapInterface.cpp |  25 +
  client/adventureMap/CMinimap.cpp              |  19 +
  client/eventsSDL/InputHandler.cpp             |  21 +
- client/renderSDL/BareAppLink.cpp              | 445 ++++++++++++++++++
- client/renderSDL/BareAppLink.h                |  90 ++++
- client/renderSDL/ScreenHandler.cpp            |  23 +-
+ client/renderSDL/BareAppLink.cpp              | 511 ++++++++++++++++++
+ client/renderSDL/BareAppLink.h                | 102 ++++
+ client/renderSDL/CursorSoftware.cpp           |  12 +
+ client/renderSDL/ScreenHandler.cpp            |  25 +-
  clientapp/EntryPoint.cpp                      |   8 +
  lib/GameLibrary.cpp                           |  15 +
  lib/modding/ModManager.cpp                    |   5 +
  lib/texts/TextOperations.cpp                  |  22 +
- 13 files changed, 700 insertions(+), 4 deletions(-)
+ 14 files changed, 793 insertions(+), 3 deletions(-)
 
 diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
 index 232538e..df3bfe6 100644
@@ -284,10 +292,10 @@ index da1f40c..ce07b50 100644
  
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
 new file mode 100644
-index 0000000..c461b3b
+index 0000000..4c15ff9
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.cpp
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,511 @@
 +/*
 + * BareAppLink.cpp, part of VCMI engine
 + *
@@ -299,6 +307,9 @@ index 0000000..c461b3b
 + */
 +#include "StdInc.h"
 +#include "BareAppLink.h"
++#include "SDL_Extensions.h"
++#include "../../lib/Rect.h"
++#include "../../lib/constants/Enumerations.h"
 +
 +#include "../GameEngine.h"
 +#include "../eventsSDL/InputHandler.h"
@@ -312,14 +323,16 @@ index 0000000..c461b3b
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
++#ifdef __ARM_NEON
++#include <arm_neon.h>
++#endif
++
 +// bare_app's headers: the exchange and its gamepad button names
 +#include "games/game_ipc.h"
 +#include "core/input.h"
 +
 +namespace
 +{
-+/// Cursor images are smaller than this, hot spot included
-+constexpr int cursorReach = 64;
 +/// D-pad: the magnifier's speed, window pixels per second
 +constexpr int magnifierSpeed = 480;
 +/// D-pad: VCMI's right stick held this far (it squares that: ~0.3 of full speed)
@@ -336,6 +349,21 @@ index 0000000..c461b3b
 +inline uint32_t average(uint32_t a, uint32_t b)
 +{
 +	return (a & b) + (((a ^ b) & 0xfefefefe) >> 1);
++}
++
++/// An ARGB pixel (straight alpha) over an XRGB one
++inline uint32_t blend(uint32_t under, uint32_t over)
++{
++	const uint32_t a = over >> 24;
++	uint32_t out = 0;
++
++	for(int shift = 0; shift < 24; shift += 8)
++	{
++		const uint32_t o = (over >> shift) & 0xff;
++		const uint32_t u = (under >> shift) & 0xff;
++		out |= ((o * a + u * (255 - a) + 127) / 255) << shift;
++	}
++	return out;
 +}
 +
 +[[noreturn]] void leave()
@@ -403,8 +431,11 @@ index 0000000..c461b3b
 +
 +	Settings video = settings.write["video"];
 +	video["fullscreen"].Bool() = false;
++	// SDL's dummy video driver has no vsync: with it on (the default) the
++	// frame rate limit never waits, and frames nobody sees take a whole core
++	video["vsync"].Bool() = false;
 +	video["driver"].String() = "software";	// the only one with the dummy driver
-+	video["cursor"].String() = "software";	// drawn into the frame
++	video["cursor"].String() = "software";	// the link draws it (setCursor)
 +}
 +
 +void BareAppLink::compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst)
@@ -447,7 +478,19 @@ index 0000000..c461b3b
 +			const uint32_t * a = src + 2 * y * srcPitch;
 +			const uint32_t * b = a + srcPitch;
 +			uint32_t * out = dst + y * dstPitch;
-+			for(int x = 0; x < w; x++)
++			int x = 0;
++#ifdef __ARM_NEON
++			// four at a time, the same rounding down per channel
++			for(; x + 4 <= w; x += 4)
++			{
++				const uint32x4x2_t top = vld2q_u32(a + 2 * x);
++				const uint32x4x2_t bottom = vld2q_u32(b + 2 * x);
++				const uint8x16_t upper = vhaddq_u8(vreinterpretq_u8_u32(top.val[0]), vreinterpretq_u8_u32(top.val[1]));
++				const uint8x16_t lower = vhaddq_u8(vreinterpretq_u8_u32(bottom.val[0]), vreinterpretq_u8_u32(bottom.val[1]));
++				vst1q_u32(out + x, vreinterpretq_u32_u8(vhaddq_u8(upper, lower)));
++			}
++#endif
++			for(; x < w; x++)
 +				out[x] = average(average(a[2 * x], a[2 * x + 1]), average(b[2 * x], b[2 * x + 1]));
 +		}
 +		return;
@@ -463,59 +506,90 @@ index 0000000..c461b3b
 +	}
 +}
 +
-+/// The overview halves the cursor too, and on a 3.5" screen it gets lost.
-+/// The window holds the screen with the cursor drawn over it: the pixels
-+/// that differ around the cursor are the cursor, put back at full size.
-+void BareAppLink::drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst)
++void BareAppLink::setCursor(const SDL_Surface * image, const Point & position, const Point & hotSpot)
 +{
-+	if(!screen || screen->w != window->w || screen->h != window->h || screen->format->BytesPerPixel != 4)
++	cursorImage = image;
++	cursorPosition = position;
++	cursorHotSpot = hotSpot;
++}
++
++/// The cursor over the frame, at full size: the overview would halve it too,
++/// and on a 3.5" screen it gets lost. Its hot spot stays where VCMI's is.
++void BareAppLink::drawCursor(uint32_t * dst, const Point & screenSize)
++{
++	const SDL_Surface * image = std::exchange(cursorImage, nullptr);	// hidden unless set again
++	if(!image || image->format->format != SDL_PIXELFORMAT_ARGB8888)
 +		return;
 +
-+	const Point & cursor = ENGINE->getCursorPosition();
++	const int w = shm->width;
++	const int h = shm->height;
 +	const int dstPitch = shm->stride / 4;
-+	const int x0 = std::max(cursor.x - cursorReach, 0);
-+	const int y0 = std::max(cursor.y - cursorReach, 0);
-+	const int x1 = std::min(cursor.x + cursorReach, window->w);
-+	const int y1 = std::min(cursor.y + cursorReach, window->h);
++	const Point origin = magnifier
++		? cursorPosition - cursorHotSpot - viewport
++		: Point(cursorPosition.x * w / screenSize.x, cursorPosition.y * h / screenSize.y) - cursorHotSpot;
 +
-+	for(int y = y0; y < y1; y++)
++	for(int y = std::max(0, -origin.y); y < image->h && origin.y + y < h; y++)
 +	{
-+		const int outY = cursor.y / 2 + y - cursor.y;
-+		if(outY < 0 || outY >= static_cast<int>(shm->height))
-+			continue;
-+		const auto * win = static_cast<const uint32_t *>(window->pixels) + y * window->pitch / 4;
-+		const auto * scr = static_cast<const uint32_t *>(screen->pixels) + y * screen->pitch / 4;
-+		for(int x = x0; x < x1; x++)
++		const auto * in = reinterpret_cast<const uint32_t *>(static_cast<const uint8_t *>(image->pixels) + y * image->pitch);
++		uint32_t * out = dst + (origin.y + y) * dstPitch + origin.x;
++		for(int x = std::max(0, -origin.x); x < image->w && origin.x + x < w; x++)
 +		{
-+			const int outX = cursor.x / 2 + x - cursor.x;
-+			if(outX >= 0 && outX < static_cast<int>(shm->width) && ((win[x] ^ scr[x]) & 0xffffff))
-+				dst[outY * dstPitch + outX] = win[x];
++			if(in[x] >> 24 == 0xff)
++				out[x] = in[x];
++			else if(in[x] >> 24)
++				out[x] = blend(out[x], in[x]);
 +		}
 +	}
 +}
 +
-+void BareAppLink::present(SDL_Window * window, SDL_Surface * screen)
++/// Grayscale and the like, as VCMI's screen texture gets them
++void BareAppLink::applyColorScheme(ColorScheme scheme, uint32_t * frame)
 +{
-+	SDL_Surface * surface = SDL_GetWindowSurface(window);
-+	if(!surface || surface->format->BytesPerPixel != 4)
++	if(scheme != ColorScheme::GRAYSCALE && scheme != ColorScheme::H2_SCHEME)
++		return;
++	SDL_Surface * surface = SDL_CreateRGBSurfaceWithFormatFrom(frame, shm->width, shm->height, 32, shm->stride, SDL_PIXELFORMAT_RGB888);
++	if(!surface)
++		return;
++	const Rect all(0, 0, shm->width, shm->height);
++	if(scheme == ColorScheme::GRAYSCALE)
++		CSDL_Ext::convertToGrayscale(surface, all);
++	else
++		CSDL_Ext::convertToH2Scheme(surface, all);
++	SDL_FreeSurface(surface);
++}
++
++void BareAppLink::capture(SDL_Surface * screen, ColorScheme scheme)
++{
++	captured = Point(0, 0);
++	if(!screen || screen->format->BytesPerPixel != 4)
 +	{
 +		static bool reported = false;
 +		if(!reported)
-+			logGlobal->error("bare_app link: no 32-bit window surface: %s", SDL_GetError());
++			logGlobal->error("bare_app link: no 32-bit screen surface");
 +		reported = true;
 +		return;
 +	}
 +
 +	const uint64_t start = SDL_GetPerformanceCounter();
 +	auto * frame = static_cast<uint32_t *>(game_shm_frame(shm, back));
-+	SDL_LockSurface(surface);
-+	compose(static_cast<const uint32_t *>(surface->pixels), surface->w, surface->h, surface->pitch / 4, frame);
-+	if(!magnifier && surface->w == static_cast<int>(2 * shm->width))
-+		drawCursor(surface, screen, frame);
-+	SDL_UnlockSurface(surface);
++	SDL_LockSurface(screen);
++	compose(static_cast<const uint32_t *>(screen->pixels), screen->w, screen->h, screen->pitch / 4, frame);
++	SDL_UnlockSurface(screen);
++	applyColorScheme(scheme, frame);
++	captured = Point(screen->w, screen->h);
++	composeTime += SDL_GetPerformanceCounter() - start;
++}
++
++void BareAppLink::present()
++{
++	// once per capture: publishing changes the buffer being drawn
++	const Point screenSize = std::exchange(captured, Point(0, 0));
++	if(screenSize == Point(0, 0))
++		return;
++	auto * frame = static_cast<uint32_t *>(game_shm_frame(shm, back));
++	drawCursor(frame, screenSize);
 +
 +	framesDrawn++;
-+	composeTime += SDL_GetPerformanceCounter() - start;
 +	const uint32_t now = SDL_GetTicks();
 +	if(now - statsSince >= statsPeriodMs)
 +	{
@@ -735,10 +809,10 @@ index 0000000..c461b3b
 +}
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
 new file mode 100644
-index 0000000..5b8b975
+index 0000000..ee77d5e
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,102 @@
 +/*
 + * BareAppLink.h, part of VCMI engine
 + *
@@ -753,15 +827,15 @@ index 0000000..5b8b975
 +#include "../../lib/Point.h"
 +
 +struct SDL_Surface;
-+struct SDL_Window;
 +struct game_shm;
++enum class ColorScheme : int8_t;
 +
 +/// The client as a game of bare_app, an LVGL launcher for handheld consoles
 +/// (ODROID-GO Advance). bare_app starts it with a socket and shared memory
 +/// (bare_app's src/games/game_ipc.h) and runs SDL's dummy video driver: the
-+/// window, twice the size of bare_app's video layer, stays in memory. Its
++/// screen, twice the size of bare_app's video layer, stays in memory. Its
 +/// frames go to bare_app scaled down 2:1 (overview) or as a 1:1 part around
-+/// the cursor (magnifier); L1 switches. Gamepad events come back and become
++/// the cursor (magnifier), the cursor drawn over them; L1 switches. Gamepad events come back and become
 +/// SDL game controller events, so VCMI's own controller support drives the
 +/// game. The D-pad moves the magnifier, or in the overview scrolls the
 +/// adventure map (elsewhere it swipes, as VCMI's right stick). F1 and F2
@@ -779,9 +853,16 @@ index 0000000..5b8b975
 +	/// quiet logging); before logging is configured. bare_app's language is
 +	/// set earlier, by GameLibrary, before the mods load.
 +	void configure();
-+	/// Publish the window's content (after SDL_RenderPresent); screen is
-+	/// the same picture before the cursor was drawn over it
-+	void present(SDL_Window * window, SDL_Surface * screen);
++	/// Take VCMI's screen into bare_app's frame, scaled, in the color
++	/// scheme: under the interface lock, as other threads draw into it too
++	void capture(SDL_Surface * screen, ColorScheme scheme);
++	/// Draw the cursor over the frame taken last and publish it. With
++	/// capture() it takes the place of SDL's renderer, which would copy the
++	/// whole screen twice more on the way.
++	void present();
++	/// The software cursor for the frame being presented: its image, and
++	/// where its hot spot is (CursorSoftware::render)
++	void setCursor(const SDL_Surface * image, const Point & position, const Point & hotSpot);
 +	/// Gamepad messages into SDL events (main thread, before SDL_PollEvent)
 +	void poll();
 +
@@ -808,7 +889,8 @@ index 0000000..5b8b975
 +	void moveMagnifier();
 +	void cursorIntoView();
 +	void compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst);
-+	void drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst);
++	void drawCursor(uint32_t * dst, const Point & screenSize);
++	void applyColorScheme(ColorScheme scheme, uint32_t * frame);
 +
 +	game_shm * shm;
 +	unsigned back = 0;	///< buffer being drawn
@@ -823,14 +905,48 @@ index 0000000..5b8b975
 +	Point stick;		///< last left stick values
 +	bool ctrl = false;	///< F1 held
 +	bool shift = false;	///< F2 held
++	Point captured;		///< the screen's size when taken, (0, 0): nothing new to present
++	const SDL_Surface * cursorImage = nullptr;	///< set for each frame, none: hidden
++	Point cursorPosition;	///< in screen pixels
++	Point cursorHotSpot;	///< in the image
 +	std::vector<uint32_t> last;	///< the frame published last
 +	uint32_t framesDrawn = 0;
 +	uint32_t framesSent = 0;
 +	uint32_t statsSince = 0;	///< SDL_GetTicks()
 +	uint64_t composeTime = 0;	///< SDL_GetPerformanceCounter() ticks
 +};
+diff --git a/client/renderSDL/CursorSoftware.cpp b/client/renderSDL/CursorSoftware.cpp
+index dc8a7f9..68cbc35 100644
+--- a/client/renderSDL/CursorSoftware.cpp
++++ b/client/renderSDL/CursorSoftware.cpp
+@@ -18,6 +18,10 @@
+ #include "../CMT.h"
+ #include "SDL_Extensions.h"
+ 
++#ifdef VCMI_BARE_APP
++#include "BareAppLink.h"
++#endif
++
+ #include <SDL_render.h>
+ #include <SDL_events.h>
+ 
+@@ -30,6 +34,14 @@ void CursorSoftware::update()
+ 
+ void CursorSoftware::render()
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++	{
++		link->setCursor(cursorSurface, pos, pivot);
++		return;
++	}
++#endif
++
+ 	Point renderPos = pos - pivot;
+ 
+ 	SDL_Rect destRect;
 diff --git a/client/renderSDL/ScreenHandler.cpp b/client/renderSDL/ScreenHandler.cpp
-index 09819e1..b411738 100644
+index 09819e1..03a5b72 100644
 --- a/client/renderSDL/ScreenHandler.cpp
 +++ b/client/renderSDL/ScreenHandler.cpp
 @@ -29,6 +29,10 @@
@@ -844,42 +960,48 @@ index 09819e1..b411738 100644
  #include <vstd/DateUtils.h>
  
  #ifdef VCMI_ANDROID
-@@ -431,7 +435,14 @@ void ScreenHandler::initializeScreenBuffers()
+@@ -431,7 +435,8 @@ void ScreenHandler::initializeScreenBuffers()
  	//No blending for screen itself. Required for proper cursor rendering.
  	SDL_SetSurfaceBlendMode(screen, SDL_BLENDMODE_NONE);
  
 -	screenTexture = SDL_CreateTexture(mainRenderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, logicalSize.x, logicalSize.y);
 +	Uint32 textureFormat = SDL_PIXELFORMAT_ARGB8888;
-+#ifdef VCMI_BARE_APP
-+	// The software renderer would blend the opaque screen into the window
-+	// pixel by pixel; with the window's own format and no alpha it copies
-+	if(BareAppLink::get())
-+		textureFormat = SDL_PIXELFORMAT_RGB888;
-+#endif
 +	screenTexture = SDL_CreateTexture(mainRenderer, textureFormat, SDL_TEXTUREACCESS_STREAMING, logicalSize.x, logicalSize.y);
  
  	if(nullptr == screenTexture)
  	{
-@@ -678,10 +689,18 @@ void ScreenHandler::updateScreenTexture()
+@@ -661,6 +666,14 @@ Canvas ScreenHandler::getScreenCanvas() const
+ 
+ void ScreenHandler::updateScreenTexture()
+ {
++#ifdef VCMI_BARE_APP
++	// the link takes the screen itself, still under the interface lock
++	if(auto * link = BareAppLink::get())
++	{
++		link->capture(screen, colorScheme);
++		return;
++	}
++#endif
+ 	if(colorScheme == ColorScheme::NONE)
+ 	{
+ 		SDL_UpdateTexture(screenTexture, nullptr, screen->pixels, screen->pitch);
+@@ -678,6 +691,16 @@ void ScreenHandler::updateScreenTexture()
  
  void ScreenHandler::presentScreenTexture()
  {
--	SDL_RenderClear(mainRenderer);
-+#ifdef VCMI_BARE_APP
-+	// the screen covers the whole window: clearing it first is wasted work
-+	if(!BareAppLink::get())
-+#endif
-+		SDL_RenderClear(mainRenderer);
- 	SDL_RenderCopy(mainRenderer, screenTexture, nullptr, nullptr);
- 	ENGINE->cursor().render();
- 	SDL_RenderPresent(mainRenderer);
 +#ifdef VCMI_BARE_APP
 +	if(auto * link = BareAppLink::get())
-+		link->present(mainWindow, screen);
++	{
++		// The window is never shown: the cursor (it calls setCursor) goes
++		// over the frame the link took in updateScreenTexture
++		ENGINE->cursor().render();
++		link->present();
++		return;
++	}
 +#endif
- }
- 
- std::vector<Point> ScreenHandler::getSupportedResolutions() const
+ 	SDL_RenderClear(mainRenderer);
+ 	SDL_RenderCopy(mainRenderer, screenTexture, nullptr, nullptr);
+ 	ENGINE->cursor().render();
 diff --git a/clientapp/EntryPoint.cpp b/clientapp/EntryPoint.cpp
 index 6adc6de..bb57196 100644
 --- a/clientapp/EntryPoint.cpp
