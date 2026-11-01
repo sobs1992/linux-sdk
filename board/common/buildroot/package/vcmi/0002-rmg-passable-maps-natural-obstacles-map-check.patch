@@ -1,0 +1,2474 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] rmg: passable maps, natural obstacles, map check
+
+Random maps could have parts no hero gets to: a main town whose gate
+stands in water or in a pocket sealed by water and obstacles, objects
+behind obstacles or under underground rock, guards inside rocks,
+sealed pockets of land, and template connections that exist only on
+paper (a "connection by water" over a lake too small to get boats, or
+a lake where no boat fitted).
+
+Checked on the finished map (lib/rmg/RmgValidator): the real objects
+and terrain, walking, boats and shipyards, monoliths and subterranean
+gates; guards count as passable, they are there to be fought. From
+every player's town all other players, zones, template connections
+(only through the two zones, or by sea) and visitable objects must be
+reachable, and no land may be sealed off. What fails is repaired:
+- obstacles (or rock underground) on the cheapest way in are cleared,
+  only inside the zone of the target so no zone guard is bypassed, the
+  way 2-3 tiles wide, and the cleared ground gets obstacles again
+  around it; two water tiles at most become a land bridge;
+- a broken connection gets a way through the obstacles between the
+  zones with the template's guard at the border, else a boat on the
+  shared sea, else a pair of monoliths placed in obstacles far from
+  other objects, its entrance guarded;
+- land objects in water or on rock get land under them, obstacles
+  over an entrance go, sealed pockets get obstacles (big ones are
+  opened instead), empty one-tile spurs are planted over.
+A map that still fails is generated again (3 attempts at most).
+
+At the source:
+- the main town was moved by (2, 2) after its place had been checked,
+  into water or out of the zone: the gate is now aimed at the zone's
+  centre while the place is searched;
+- a connection counts as made by water only over a lake big enough to
+  get boats;
+- a required object that does not fit no longer drops all the
+  required objects after it (the other end of a monolith pair, mines);
+- a wide connection is several passages along the common border, not
+  one gap.
+
+Landscape (lib/rmg/modificators/ObstaclePlacer): mountains only form
+ridges along a zone's edge or the heart of a wide blocked mass, not a
+wall in the middle of open land; mountains, forests and lakes grow next
+to their own kind, forests rather inside the zone; the tiles along
+roads stay open. ObstacleProxy keeps each obstacle's kind from its
+biome set and asks the placer how much an obstacle is wanted at a place.
+
+Measured on the host over 428 maps (107 VCMI and HotA templates x 4
+seeds, smallest size), checked independently of the generator: maps with
+unreachable objects 45 -> 0, with players cut off from each other
+70 -> 0, with sealed land 331 -> 0 (not counted: [HotA] Boomerang, whose
+zone 11 the template connects to nothing); 11 maps needed a second
+attempt; time per map +14%. Largest sizes: 107 maps, all clean, one
+second attempt. On the ODROID-GO Advance the check takes 0.15 s on a
+72x72 map and 2.6 s of 37 s on a 144x144 two-level map for 8 players.
+---
+ lib/CMakeLists.txt                         |    2 +
+ lib/mapping/ObstacleProxy.cpp              |   16 +-
+ lib/mapping/ObstacleProxy.h                |   10 +
+ lib/rmg/CMapGenerator.cpp                  |   75 +-
+ lib/rmg/CMapGenerator.h                    |    9 +
+ lib/rmg/RmgValidator.cpp                   | 1665 ++++++++++++++++++++++++++++
+ lib/rmg/RmgValidator.h                     |  142 +++
+ lib/rmg/modificators/ConnectionsPlacer.cpp |   22 +-
+ lib/rmg/modificators/ObjectManager.cpp     |   13 +-
+ lib/rmg/modificators/ObstaclePlacer.cpp    |  117 ++
+ lib/rmg/modificators/ObstaclePlacer.h      |    9 +
+ lib/rmg/modificators/TownPlacer.cpp        |   11 +-
+ lib/rmg/modificators/WaterProxy.cpp        |    6 +-
+ lib/rmg/modificators/WaterProxy.h          |    3 +
+ 14 files changed, 2079 insertions(+), 21 deletions(-)
+
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index f7bfa6a..7c7e336 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -219,6 +219,7 @@ set(lib_MAIN_SRCS
+ 	rmg/RmgArea.cpp
+ 	rmg/RmgObject.cpp
+ 	rmg/RmgPath.cpp
++	rmg/RmgValidator.cpp
+ 	rmg/CMapGenerator.cpp
+ 	rmg/CMapGenOptions.cpp
+ 	rmg/CRmgTemplate.cpp
+@@ -688,6 +689,7 @@ set(lib_MAIN_HEADERS
+ 	rmg/RmgArea.h
+ 	rmg/RmgObject.h
+ 	rmg/RmgPath.h
++	rmg/RmgValidator.h
+ 	rmg/CMapGenerator.h
+ 	rmg/CMapGenOptions.h
+ 	rmg/CRmgTemplate.h
+diff --git a/lib/mapping/ObstacleProxy.cpp b/lib/mapping/ObstacleProxy.cpp
+index 0e8b84d..19e73aa 100644
+--- a/lib/mapping/ObstacleProxy.cpp
++++ b/lib/mapping/ObstacleProxy.cpp
+@@ -43,6 +43,14 @@ void ObstacleProxy::collectPossibleObstacles(TerrainId terrain)
+ 	sortObstacles();
+ }
+ 
++ObstacleSet::EObstacleType ObstacleProxy::getObstacleType(const ObjectTemplate & temp) const
++{
++	auto it = obstacleTypes.find(&temp);
++	if(it != obstacleTypes.end())
++		return it->second;
++	return LIBRARY->biomeHandler->convertObstacleClass(temp.id);
++}
++
+ void ObstacleProxy::sortObstacles()
+ {
+ 	for(const auto & o : obstaclesBySize)
+@@ -189,6 +197,7 @@ bool ObstacleProxy::prepareBiome(const ObstacleSetFilter & filter, vstd::RNG & r
+ 		(terrain == TerrainId::WATER && selectedSets > 0))
+ 	{
+ 		obstaclesBySize.clear();
++		obstacleTypes.clear();
+ 		for (const auto & os : obstacleSets)
+ 		{
+ 			for (const auto & temp : os->getObstacles())
+@@ -196,6 +205,7 @@ bool ObstacleProxy::prepareBiome(const ObstacleSetFilter & filter, vstd::RNG & r
+ 				if(temp->getBlockMapOffset().isValid())
+ 				{
+ 					obstaclesBySize[temp->getBlockedOffsets().size()].push_back(temp);
++					obstacleTypes[temp.get()] = os->getType();
+ 				}
+ 			}
+ 		}
+@@ -274,6 +284,10 @@ int ObstacleProxy::getWeightedObjects(const int3 & tile, vstd::RNG & rand, IGame
+ 				if(isProhibited(rmgObject->getArea()))
+ 					continue;
+ 
++				int preference = obstaclePreference(*temp, rmgObject->getArea());
++				if(preference < 0)
++					continue;
++
+ 				int coverageBlocked = 0;
+ 				int coveragePossible = 0;
+ 				//do not use area intersection in optimization purposes
+@@ -287,7 +301,7 @@ int ObstacleProxy::getWeightedObjects(const int3 & tile, vstd::RNG & rand, IGame
+ 				}
+ 
+ 				int coverageOverlap = possibleObstacle.first - coverageBlocked - coveragePossible;
+-				int weight = possibleObstacle.first + coverageBlocked - coverageOverlap * possibleObstacle.first;
++				int weight = possibleObstacle.first + coverageBlocked - coverageOverlap * possibleObstacle.first + preference;
+ 				assert(coverageOverlap >= 0);
+ 
+ 				if(weight > maxWeight)
+diff --git a/lib/mapping/ObstacleProxy.h b/lib/mapping/ObstacleProxy.h
+index a5a3069..1cb66b9 100644
+--- a/lib/mapping/ObstacleProxy.h
++++ b/lib/mapping/ObstacleProxy.h
+@@ -11,6 +11,7 @@
+ #pragma once
+ 
+ #include "../rmg/RmgObject.h"
++#include "../mapObjects/ObstacleSetHandler.h"
+ #include "CMapEditManager.h"
+ 
+ VCMI_LIB_NAMESPACE_BEGIN
+@@ -51,6 +52,14 @@ public:
+ 
+ 	virtual void postProcess(const rmg::Object& object) {};
+ 
++	/// Kind of the obstacle (mountains, trees...): from the biome set it was
++	/// chosen from, else from its object class
++	ObstacleSet::EObstacleType getObstacleType(const ObjectTemplate & temp) const;
++
++	/// How much this obstacle is wanted on this area: negative forbids it,
++	/// positive prefers it over other obstacles of the same size
++	virtual int obstaclePreference(const ObjectTemplate & temp, const rmg::Area & objArea) const { return 0; }
++
+ protected:
+ 	int getWeightedObjects(const int3& tile, vstd::RNG& rand, IGameInfoCallback * cb, std::list<rmg::Object>& allObjects, std::vector<std::pair<rmg::Object*, int3>>& weightedObjects);
+ 	void sortObstacles();
+@@ -59,6 +68,7 @@ protected:
+ 
+ 	using ObstacleVector = std::vector<std::shared_ptr<const ObjectTemplate>>;
+ 	std::map<int, ObstacleVector> obstaclesBySize;
++	std::map<const ObjectTemplate *, ObstacleSet::EObstacleType> obstacleTypes;
+ 	using ObstaclePair = std::pair<int, ObstacleVector>;
+ 	std::vector<ObstaclePair> possibleObstacles;
+ };
+diff --git a/lib/rmg/CMapGenerator.cpp b/lib/rmg/CMapGenerator.cpp
+index 0e86e74..20f9a14 100644
+--- a/lib/rmg/CMapGenerator.cpp
++++ b/lib/rmg/CMapGenerator.cpp
+@@ -25,6 +25,7 @@
+ #include "../constants/StringConstants.h"
+ #include "../filesystem/Filesystem.h"
+ #include "CZonePlacer.h"
++#include "RmgValidator.h"
+ #include "CRoadRandomizer.h"
+ #include "TileInfo.h"
+ #include "Zone.h"
+@@ -44,7 +45,8 @@ VCMI_LIB_NAMESPACE_BEGIN
+ CMapGenerator::CMapGenerator(CMapGenOptions& mapGenOptions, IGameInfoCallback * cb, int RandomSeed) :
+ 	mapGenOptions(mapGenOptions), randomSeed(RandomSeed),
+ 	monolithIndex(0),
+-	rand(std::make_unique<CRandomGenerator>(RandomSeed))
++	rand(std::make_unique<CRandomGenerator>(RandomSeed)),
++	cb(cb)
+ {
+ 	loadConfig();
+ 	mapGenOptions.finalize(*rand);
+@@ -52,6 +54,16 @@ CMapGenerator::CMapGenerator(CMapGenOptions& mapGenOptions, IGameInfoCallback *
+ 	placer = std::make_shared<CZonePlacer>(*map);
+ }
+ 
++const std::string & CMapGenerator::getValidationReport() const
++{
++	return validationReport;
++}
++
++int CMapGenerator::getValidationAttempts() const
++{
++	return validationAttempts;
++}
++
+ int CMapGenerator::getRandomSeed() const
+ {
+ 	return randomSeed;
+@@ -124,16 +136,57 @@ std::unique_ptr<CMap> CMapGenerator::generate()
+ 	Load::Progress::setupStepsTill(5, 30);
+ 	try
+ 	{
+-		addHeaderInfo();
+-		map->initTiles(*this, *rand);
+-		Load::Progress::step();
+-		initQuestArtsRemaining();
+-		genZones();
+-		Load::Progress::step();
+-		map->getMap(this).calculateGuardingGreaturePositions(); //clear map so that all tiles are unguarded
+-		map->addModificators();
+-		Load::Progress::step(3);
+-		fillZones();
++		// A map the validator cannot repair is generated again, with the
++		// random generator where the previous attempt left it
++		const int attempts = 3;
++		for(int attempt = 1; ; attempt++)
++		{
++			addHeaderInfo();
++			map->initTiles(*this, *rand);
++			Load::Progress::step();
++			initQuestArtsRemaining();
++			genZones();
++			Load::Progress::step();
++			map->getMap(this).calculateGuardingGreaturePositions(); //clear map so that all tiles are unguarded
++			map->addModificators();
++			Load::Progress::step(3);
++			fillZones();
++
++			const auto checkStart = std::chrono::steady_clock::now();
++			RmgValidator validator(*map, *rand);
++			RmgValidator::Report report;
++			try
++			{
++				report = validator.checkAndFix();
++			}
++			catch(const rmgException & e)
++			{
++				// A repair that went wrong: the map is not to be trusted
++				logGlobal->error("Random map check failed: %s", e.what());
++				report.unreachableZones = 1;
++			}
++			validationReport = report.toString();
++			validationAttempts = attempt;
++			logGlobal->info("Random map check took %d ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - checkStart).count());
++			if(!report.critical())
++			{
++				logGlobal->info("Random map check: %s", validationReport);
++				break;
++			}
++			if(attempt == attempts)
++			{
++				logGlobal->error("Random map check failed, keeping the map: %s", validationReport);
++				break;
++			}
++			logGlobal->warn("Random map check failed, generating again: %s", validationReport);
++			map = std::make_unique<RmgMap>(mapGenOptions, cb);
++			placer = std::make_shared<CZonePlacer>(*map);
++			monolithIndex = 0;
++			questArtifacts.clear();
++			connectionsLeft.clear();
++			Load::Progress::reset();
++			Load::Progress::setupStepsTill(5, 30);
++		}
+ 		//updated guarded tiles will be calculated in CGameState::initMapObjects()
+ 		map->getZones().clear();
+ 
+diff --git a/lib/rmg/CMapGenerator.h b/lib/rmg/CMapGenerator.h
+index 3f7cb89..3596cce 100644
+--- a/lib/rmg/CMapGenerator.h
++++ b/lib/rmg/CMapGenerator.h
+@@ -75,6 +75,11 @@ public:
+ 	void addWaterTreasuresInfo();
+ 
+ 	int getRandomSeed() const;
++
++	/// What the check of the finished map found (RmgValidator::Report)
++	const std::string & getValidationReport() const;
++	/// How many times the map was generated
++	int getValidationAttempts() const;
+ 	
+ private:
+ 	std::unique_ptr<vstd::RNG> rand;
+@@ -89,6 +94,10 @@ private:
+ 	int monolithIndex;
+ 	std::vector<ArtifactID> questArtifacts;
+ 
++	IGameInfoCallback * cb;
++	std::string validationReport;
++	int validationAttempts = 0;
++
+ 	/// Generation methods
+ 	void loadConfig();
+ 	
+diff --git a/lib/rmg/RmgValidator.cpp b/lib/rmg/RmgValidator.cpp
+new file mode 100644
+index 0000000..6674475
+--- /dev/null
++++ b/lib/rmg/RmgValidator.cpp
+@@ -0,0 +1,1665 @@
++/*
++ * RmgValidator.cpp, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++
++#include "StdInc.h"
++#include "RmgValidator.h"
++
++#include "RmgMap.h"
++#include "Zone.h"
++#include "MapProxy.h"
++#include "RmgObject.h"
++#include "modificators/ObjectManager.h"
++
++#include "../GameLibrary.h"
++#include "../TerrainHandler.h"
++#include "../entities/faction/CFaction.h"
++#include "../mapObjectConstructors/AObjectTypeHandler.h"
++#include "../mapObjectConstructors/CObjectClassesHandler.h"
++#include "../mapObjects/CGObjectInstance.h"
++#include "../mapObjects/CGCreature.h"
++#include "../mapObjects/MiscObjects.h"
++#include "../mapObjects/ObjectTemplate.h"
++#include "../mapObjects/ObstacleSetHandler.h"
++#include "../mapping/CMap.h"
++#include "../mapping/ObstacleProxy.h"
++
++#include <vstd/RNG.h>
++
++VCMI_LIB_NAMESPACE_BEGIN
++
++namespace
++{
++
++/// Objects that are gone once visited (or fought, or passed with a key):
++/// they never close a way for good
++bool isRemovableType(MapObjectID id)
++{
++	switch(id.toEnum())
++	{
++		case Obj::MONSTER:
++		case Obj::RANDOM_MONSTER:
++		case Obj::RANDOM_MONSTER_L1:
++		case Obj::RANDOM_MONSTER_L2:
++		case Obj::RANDOM_MONSTER_L3:
++		case Obj::RANDOM_MONSTER_L4:
++		case Obj::RANDOM_MONSTER_L5:
++		case Obj::RANDOM_MONSTER_L6:
++		case Obj::RANDOM_MONSTER_L7:
++		case Obj::RESOURCE:
++		case Obj::RANDOM_RESOURCE:
++		case Obj::ARTIFACT:
++		case Obj::RANDOM_ART:
++		case Obj::RANDOM_TREASURE_ART:
++		case Obj::RANDOM_MINOR_ART:
++		case Obj::RANDOM_MAJOR_ART:
++		case Obj::RANDOM_RELIC_ART:
++		case Obj::TREASURE_CHEST:
++		case Obj::PANDORAS_BOX:
++		case Obj::CAMPFIRE:
++		case Obj::SCHOLAR:
++		case Obj::SPELL_SCROLL:
++		case Obj::PRISON:
++		case Obj::EVENT:
++		case Obj::GARRISON:
++		case Obj::GARRISON2:
++		case Obj::BORDER_GATE:
++		case Obj::BORDERGUARD:
++		case Obj::QUEST_GUARD:
++		case Obj::HERO:
++		case Obj::RANDOM_HERO:
++			return true;
++		default:
++			return false;
++	}
++}
++
++bool isRemovable(const CGObjectInstance * obj)
++{
++	return obj->removable || isRemovableType(obj->ID);
++}
++
++int directionBit(int dx, int dy)
++{
++	return (dy + 1) * 3 + (dx + 1);
++}
++
++/// Plants obstacles of the zone's biome on exactly the given tiles
++class Planter : public ObstacleProxy
++{
++public:
++	Planter(RmgMap & map, vstd::RNG & rand, const rmg::Area & tiles)
++		: map(map)
++		, rand(rand)
++		, allowed(tiles)
++	{
++		setBlockedArea(tiles);
++	}
++
++	bool isInTheMap(const int3 & tile) override
++	{
++		return map.isOnMap(tile);
++	}
++
++	bool isProhibited(const rmg::Area & objArea) const override
++	{
++		return !allowed.contains(objArea);
++	}
++
++	void placeObject(rmg::Object & object, std::set<std::shared_ptr<CGObjectInstance>> &) override
++	{
++		object.finalize(map, rand);
++		placed++;
++	}
++
++	const rmg::Area & leftover() const
++	{
++		return blockedArea;
++	}
++
++	int placed = 0;
++
++private:
++	RmgMap & map;
++	vstd::RNG & rand;
++	rmg::Area allowed;
++};
++
++}
++
++bool RmgValidator::Report::critical() const
++{
++	return isolatedPlayers > 0 || unreachableZones > 0 || brokenConnections > 0 || unreachableObjects > 0 || objectsInWater > 0;
++}
++
++std::string RmgValidator::Report::toString() const
++{
++	return boost::str(boost::format("isolated players %d, unreachable zones %d, broken connections %d, unreachable objects %d, "
++		"objects in water %d, sealed pockets %d (%d tiles), dead ends %d, unpaired gates %d; "
++		"fixes %d: removed obstacles %d, planted obstacles %d, cleared rock %d, land bridges %d")
++		% isolatedPlayers % unreachableZones % brokenConnections % unreachableObjects % objectsInWater % pockets % pocketTiles
++		% deadEnds % unpairedGates % fixes % removedObstacles % plantedObstacles % clearedRock % landBridges);
++}
++
++RmgValidator::RmgValidator(RmgMap & map, vstd::RNG & rand)
++	: map(map)
++	, cmap(*map.mapInstance)
++	, rand(rand)
++	, W(map.width())
++	, H(map.height())
++	, L(map.levels())
++{
++	// A zone the template connects to nothing is out of reach by design
++	// (unless a player starts there)
++	for(const auto & zone : map.getZones())
++	{
++		bool connected = false;
++		for(const auto & c : zone.second->getConnections())
++		{
++			auto type = c.getConnectionType();
++			if(c.getZoneA() != c.getZoneB() && type != rmg::EConnectionType::FICTIVE && type != rmg::EConnectionType::REPULSIVE)
++				connected = true;
++		}
++		if(!connected && map.getZones().size() > 1 && !zone.second->getOwner())
++			unconnectedZones.insert(zone.first);
++	}
++}
++
++RmgValidator::~RmgValidator() = default;
++
++int RmgValidator::idx(const int3 & t) const
++{
++	return (t.z * H + t.y) * W + t.x;
++}
++
++int3 RmgValidator::pos(int i) const
++{
++	return int3(i % W, (i / W) % H, i / (W * H));
++}
++
++bool RmgValidator::onMap(int x, int y, int z) const
++{
++	return x >= 0 && y >= 0 && z >= 0 && x < W && y < H && z < L;
++}
++
++bool RmgValidator::isWaterObject(const CGObjectInstance * obj) const
++{
++	return obj->appearance && obj->appearance->canBePlacedAt(ETerrainId::WATER);
++}
++
++bool RmgValidator::zoneIgnored(TRmgTemplateZoneId zoneId) const
++{
++	auto & zones = map.getZones();
++	auto it = zones.find(zoneId);
++	return it == zones.end() || it->second->getType() == ETemplateZoneType::SEALED || unconnectedZones.count(zoneId);
++}
++
++void RmgValidator::build()
++{
++	const int N = W * H * L;
++	tiles.assign(N, BLOCKED);
++	transitBlocked.assign(N, 0);
++	entryMask.assign(N, 0);
++	obstacleCost.assign(N, 0);
++	teleports.clear();
++	waterComponent.assign(N, -1);
++	waterTiles.clear();
++	boarding.clear();
++
++	for(int i = 0; i < N; i++)
++	{
++		const int3 t = pos(i);
++		const auto & tile = cmap.getTile(t);
++
++		if(tile.isWater())
++		{
++			bool obstacle = false;
++			for(const auto & id : tile.blockingObjects)
++			{
++				const auto * obj = cmap.getObject(id);
++				if(obj && !(obj->isVisitable() && obj->visitablePos() == t))
++					obstacle = true;
++			}
++			tiles[i] = obstacle ? BLOCKED : WATER;
++			continue;
++		}
++		if(!tile.getTerrain()->isPassable())
++		{
++			tiles[i] = tile.blocked() ? BLOCKED : ROCK;
++			continue;
++		}
++
++		ETile kind = OPEN;
++		bool onlyObstacles = true;
++		int obstacleSize = 0;
++		for(const auto & id : tile.blockingObjects)
++		{
++			const auto * obj = cmap.getObject(id);
++			if(!obj)
++				continue;
++			if(obj->isVisitable() && obj->visitablePos() == t)
++			{
++				// A guard or a pick-up: gone after the visit
++				if(!isRemovable(obj))
++					kind = VISIT;
++				continue;
++			}
++			if(obj->isVisitable() || !obj->getObjectHandler()->isStaticObject())
++				onlyObstacles = false;
++			else
++				obstacleSize += obj->getBlockedOffsets().size();
++			if(kind == OPEN)
++				kind = BLOCKED;
++		}
++		if(kind == BLOCKED && onlyObstacles)
++		{
++			kind = OBSTACLE;
++			// Prefer clearing small obstacles over big mountains
++			obstacleCost[i] = 6 + std::min(obstacleSize, 30) / 2;
++		}
++		if(kind == OPEN)
++		{
++			for(const auto & id : tile.visitableObjects)
++			{
++				const auto * obj = cmap.getObject(id);
++				if(obj && obj->visitablePos() == t && !isRemovable(obj))
++					kind = VISIT;
++			}
++		}
++		if(kind == VISIT)
++		{
++			for(const auto & id : tile.visitableObjects)
++			{
++				const auto * obj = cmap.getObject(id);
++				if(!obj || obj->visitablePos() != t)
++					continue;
++				if(obj->blockVisit && !isRemovable(obj))
++					transitBlocked[i] = 1;
++				for(int dy = -1; dy <= 1; dy++)
++					for(int dx = -1; dx <= 1; dx++)
++						if((dx || dy) && (!obj->appearance || obj->appearance->isVisitableFrom(dx, dy)))
++							entryMask[i] |= 1 << directionBit(dx, dy);
++			}
++		}
++		tiles[i] = kind;
++	}
++
++	// Monoliths, one-way monoliths and subterranean gates
++	std::map<std::pair<int, int>, std::vector<int>> twoWay;
++	std::map<int, std::vector<int>> entrances;
++	std::map<int, std::vector<int>> exits;
++	std::vector<int3> gates[2];
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj)
++			continue;
++		const int3 v = obj->visitablePos();
++		if(!cmap.isInTheMap(v))
++			continue;
++		if(obj->ID == Obj::MONOLITH_TWO_WAY || obj->ID == Obj::WHIRLPOOL)
++			twoWay[{obj->ID.getNum(), obj->subID}].push_back(idx(v));
++		else if(obj->ID == Obj::MONOLITH_ONE_WAY_ENTRANCE)
++			entrances[obj->subID].push_back(idx(v));
++		else if(obj->ID == Obj::MONOLITH_ONE_WAY_EXIT)
++			exits[obj->subID].push_back(idx(v));
++		else if(obj->ID == Obj::SUBTERRANEAN_GATE && v.z < 2)
++			gates[v.z].push_back(v);
++	}
++	for(const auto & group : twoWay)
++		for(int a : group.second)
++			for(int b : group.second)
++				if(a != b)
++					teleports[a].push_back(b);
++	for(const auto & group : entrances)
++		for(int a : group.second)
++			for(int b : exits[group.first])
++				teleports[a].push_back(b);
++	// The game pairs every gate with the nearest one on the other level
++	for(int level = 0; level < 2; level++)
++	{
++		for(const auto & a : gates[level])
++		{
++			int3 best(-1, -1, -1);
++			for(const auto & b : gates[1 - level])
++				if(!best.isValid() || a.dist2dSQ(b) < a.dist2dSQ(best))
++					best = b;
++			if(best.isValid())
++				teleports[idx(a)].push_back(idx(best));
++		}
++	}
++
++	// Seas, and where a hero gets a boat for them: a boat at the shore or a shipyard
++	for(int i = 0; i < N; i++)
++	{
++		if(tiles[i] != WATER || waterComponent[i] >= 0)
++			continue;
++		const int component = waterTiles.size();
++		waterTiles.emplace_back();
++		std::vector<int> queue{i};
++		waterComponent[i] = component;
++		while(!queue.empty())
++		{
++			const int c = queue.back();
++			queue.pop_back();
++			waterTiles[component].push_back(c);
++			const int3 p = pos(c);
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					if(!onMap(p.x + dx, p.y + dy, p.z))
++						continue;
++					const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++					if(tiles[n] == WATER && waterComponent[n] < 0)
++					{
++						waterComponent[n] = component;
++						queue.push_back(n);
++					}
++				}
++		}
++	}
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj || (obj->ID != Obj::BOAT && obj->ID != Obj::SHIPYARD))
++			continue;
++		const int3 v = obj->visitablePos();
++		std::set<int3> around;
++		if(obj->ID == Obj::BOAT)
++		{
++			if(waterComponent[idx(v)] < 0)
++				continue;
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++					if(onMap(v.x + dx, v.y + dy, v.z))
++						boarding[idx(int3(v.x + dx, v.y + dy, v.z))].push_back(waterComponent[idx(v)]);
++		}
++		else
++		{
++			for(const auto & b : obj->getBlockedPos())
++				for(int dy = -1; dy <= 1; dy++)
++					for(int dx = -1; dx <= 1; dx++)
++						if(onMap(b.x + dx, b.y + dy, b.z) && waterComponent[idx(int3(b.x + dx, b.y + dy, b.z))] >= 0)
++							boarding[idx(v)].push_back(waterComponent[idx(int3(b.x + dx, b.y + dy, b.z))]);
++		}
++	}
++}
++
++bool RmgValidator::canEnter(int from, int to) const
++{
++	if(tiles[to] != VISIT)
++		return true;
++	const int3 f = pos(from);
++	const int3 t = pos(to);
++	return entryMask[to] & (1 << directionBit(f.x - t.x, f.y - t.y));
++}
++
++bool RmgValidator::canLeave(int from) const
++{
++	return tiles[from] != VISIT || !transitBlocked[from];
++}
++
++std::vector<uint8_t> RmgValidator::flood(const std::vector<int> & starts, const std::function<bool(int)> & allowed) const
++{
++	std::vector<uint8_t> seen(tiles.size(), 0);
++	std::vector<uint8_t> isStart(tiles.size(), 0);
++	std::set<int> usedSeas;
++	std::deque<int> queue;
++	auto push = [&](int t)
++	{
++		if(!seen[t] && allowed(t))
++		{
++			seen[t] = 1;
++			queue.push_back(t);
++		}
++	};
++	for(int s : starts)
++	{
++		isStart[s] = 1;
++		push(s);
++	}
++	while(!queue.empty())
++	{
++		const int c = queue.front();
++		queue.pop_front();
++
++		auto tp = teleports.find(c);
++		if(tp != teleports.end())
++			for(int d : tp->second)
++				push(d);
++		auto boat = boarding.find(c);
++		if(boat != boarding.end())
++			for(int sea : boat->second)
++				if(usedSeas.insert(sea).second)
++					for(int t : waterTiles[sea])
++						push(t);
++
++		if(!isStart[c] && tp == teleports.end() && !canLeave(c))
++			continue;
++
++		const int3 p = pos(c);
++		for(int dy = -1; dy <= 1; dy++)
++			for(int dx = -1; dx <= 1; dx++)
++			{
++				if((!dx && !dy) || !onMap(p.x + dx, p.y + dy, p.z))
++					continue;
++				const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++				switch(tiles[n])
++				{
++					case OPEN:
++						push(n);
++						break;
++					case WATER:
++						if(tiles[c] == WATER)
++							push(n);
++						break;
++					case VISIT:
++						if(canEnter(c, n))
++							push(n);
++						break;
++					default:
++						break;
++				}
++			}
++	}
++	return seen;
++}
++
++std::vector<uint8_t> RmgValidator::reachAll() const
++{
++	// What any player can reach. Players that cannot reach each other are
++	// checked on their own (Report::isolatedPlayers)
++	return flood(startTiles(), [](int) { return true; });
++}
++
++std::vector<int> RmgValidator::startTiles() const
++{
++	std::vector<int> result;
++	for(const auto & player : cmap.players)
++	{
++		if(!player.hasMainTown)
++			continue;
++		// posOfMainTown is not the gate: take the town object nearest to it
++		const CGObjectInstance * town = nullptr;
++		for(const auto & obj : cmap.objects)
++		{
++			if(!obj || obj->ID != Obj::TOWN || obj->anchorPos().z != player.posOfMainTown.z)
++				continue;
++			if(!town || obj->anchorPos().dist2dSQ(player.posOfMainTown) < town->anchorPos().dist2dSQ(player.posOfMainTown))
++				town = obj.get();
++		}
++		if(town)
++			result.push_back(idx(town->visitablePos()));
++	}
++	if(result.empty())
++	{
++		for(const auto & zone : map.getZones())
++		{
++			if(zone.second->getType() == ETemplateZoneType::WATER || zoneIgnored(zone.first))
++				continue;
++			for(const auto & t : zone.second->freePaths()->getTilesVector())
++			{
++				if(tiles[idx(t)] == OPEN)
++				{
++					result.push_back(idx(t));
++					break;
++				}
++			}
++			if(!result.empty())
++				break;
++		}
++	}
++	return result;
++}
++
++RmgValidator::TPath RmgValidator::findWay(const std::vector<uint8_t> & sources, const std::vector<uint8_t> & targets, const std::function<bool(int)> & allowed, int maxCost, bool overWater) const
++{
++	const int N = tiles.size();
++	std::vector<int> cost(N, std::numeric_limits<int>::max());
++	std::vector<int> from(N, -1);
++	using Node = std::pair<int, int>;
++	std::priority_queue<Node, std::vector<Node>, std::greater<>> queue;
++
++	for(int i = 0; i < N; i++)
++	{
++		if(sources[i] && canLeave(i))
++		{
++			cost[i] = 0;
++			queue.emplace(0, i);
++		}
++	}
++
++	while(!queue.empty())
++	{
++		auto [c, t] = queue.top();
++		queue.pop();
++		if(c != cost[t])
++			continue;
++		if(targets[t] && !sources[t])
++		{
++			TPath way;
++			for(int i = t; i >= 0 && !sources[i]; i = from[i])
++				way.push_back(i);
++			std::reverse(way.begin(), way.end());
++			return way;
++		}
++		if(!sources[t] && !canLeave(t))
++			continue;
++
++		const int3 p = pos(t);
++		for(int dy = -1; dy <= 1; dy++)
++			for(int dx = -1; dx <= 1; dx++)
++			{
++				if((!dx && !dy) || !onMap(p.x + dx, p.y + dy, p.z))
++					continue;
++				const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++				if(!allowed(n))
++					continue;
++				int step;
++				switch(tiles[n])
++				{
++					case OPEN:
++						step = 1;
++						break;
++					case VISIT:
++						if(!canEnter(t, n))
++							continue;
++						step = 1;
++						break;
++					case OBSTACLE:
++						step = obstacleCost[n];
++						break;
++					case ROCK:
++						step = 10;
++						break;
++					case WATER:
++						// A land bridge: only when nothing else helps
++						if(!overWater)
++							continue;
++						step = 25;
++						break;
++					default:
++						continue;
++				}
++				// Do not cut corners of obstacles: diagonal steps cost a little more
++				if(dx && dy)
++					step += 1;
++				const int newCost = c + step;
++				if(newCost < cost[n] && newCost <= maxCost)
++				{
++					cost[n] = newCost;
++					from[n] = t;
++					queue.emplace(newCost, n);
++				}
++			}
++	}
++	return {};
++}
++
++TerrainId RmgValidator::landTerrain(TRmgTemplateZoneId zoneId) const
++{
++	const auto & zone = map.getZones().at(zoneId);
++	TerrainId terrain = zone->getTerrainType();
++	const auto * type = LIBRARY->terrainTypeHandler->getById(terrain);
++	if(zone->getType() == ETemplateZoneType::WATER || type->isWater() || !type->isPassable())
++		return zone->isUnderground() ? TerrainId(ETerrainId::SUBTERRANEAN) : TerrainId(ETerrainId::DIRT);
++	return terrain;
++}
++
++rmg::Area RmgValidator::plant(const rmg::Area & area, TRmgTemplateZoneId zoneId, Report & report)
++{
++	if(area.empty())
++		return area;
++	auto & zone = *map.getZones().at(zoneId);
++	const auto * faction = zone.getTownType().toFaction();
++
++	Planter planter(map, rand, area);
++	ObstacleSetFilter filter(ObstacleSet::EObstacleType::INVALID,
++		zone.getTerrainType(),
++		static_cast<EMapLevel>(zone.isUnderground()),
++		faction->getId(),
++		faction->alignment);
++	if(!planter.prepareBiome(filter, rand))
++		planter.collectPossibleObstacles(zone.getTerrainType());
++	planter.createObstacles(rand, cmap.cb);
++	report.plantedObstacles += planter.placed;
++	return planter.leftover();
++}
++
++void RmgValidator::openWay(const TPath & way, bool widen, Report & report, TerrainId bridgeTerrain)
++{
++	std::set<CGObjectInstance *> toRemove;
++	std::vector<int3> bridge;
++	std::set<int> keep(way.begin(), way.end());
++	std::map<TRmgTemplateZoneId, std::vector<int3>> rock;
++
++	if(widen)
++	{
++		// A passage of 2-3 tiles, not a slit
++		for(int t : way)
++		{
++			const int3 p = pos(t);
++			const int3 sides[] = {int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0), int3(0, -1, 0)};
++			for(const auto & d : sides)
++			{
++				const int3 n = p + d;
++				if(onMap(n.x, n.y, n.z) && map.getZoneID(n) == map.getZoneID(p) && (tiles[idx(n)] == OBSTACLE || tiles[idx(n)] == ROCK))
++					keep.insert(idx(n));
++			}
++		}
++	}
++
++	for(int t : keep)
++	{
++		const int3 p = pos(t);
++		if(tiles[t] == OBSTACLE)
++		{
++			for(const auto & id : cmap.getTile(p).blockingObjects)
++				if(auto * obj = cmap.getObject(id))
++					toRemove.insert(obj);
++		}
++		else if(tiles[t] == ROCK)
++			rock[map.getZoneID(p)].push_back(p);
++		else if(tiles[t] == WATER && bridgeTerrain != ETerrainId::NONE)
++			bridge.push_back(p);
++	}
++	if(!bridge.empty())
++	{
++		map.getMapProxy()->drawTerrain(rand, bridge, bridgeTerrain);
++		report.landBridges += bridge.size();
++	}
++
++	std::map<TRmgTemplateZoneId, rmg::Area> freed;
++	for(auto * obj : toRemove)
++	{
++		for(const auto & t : obj->getBlockedPos())
++			if(map.isOnMap(t) && !keep.count(idx(t)))
++				freed[map.getZoneID(t)].add(t);
++		map.getMapProxy()->removeObject(obj);
++		report.removedObstacles++;
++	}
++
++	for(auto & zoneRock : rock)
++	{
++		map.getMapProxy()->drawTerrain(rand, zoneRock.second, landTerrain(zoneRock.first));
++		report.clearedRock += zoneRock.second.size();
++	}
++
++	// Cleared ground around the passage gets obstacles again: the landscape
++	// keeps its look, only the way through is new
++	for(auto & zoneFreed : freed)
++	{
++		zoneFreed.second.erase_if([this](const int3 & t)
++		{
++			const auto & tile = cmap.getTile(t);
++			return tile.blocked() || tile.visitable() || !tile.getTerrain()->isPassable() || tile.isWater();
++		});
++		plant(zoneFreed.second, zoneFreed.first, report);
++	}
++
++	report.fixes++;
++	build();
++}
++
++void RmgValidator::fixObjectsInWater(Report & report)
++{
++	std::map<TerrainId, std::vector<int3>> toPaint;
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj || !obj->isVisitable() || isWaterObject(obj.get()))
++			continue;
++		const int3 v = obj->visitablePos();
++		if(!cmap.isInTheMap(v) || !cmap.getTile(v).isWater())
++			continue;
++
++		// Land of the object's own tiles, or the zone's
++		TerrainId terrain = ETerrainId::NONE;
++		for(const auto & t : obj->getBlockedPos())
++			if(cmap.isInTheMap(t) && cmap.getTile(t).isLand() && cmap.getTile(t).getTerrain()->isPassable())
++				terrain = cmap.getTile(t).getTerrainID();
++		if(terrain == ETerrainId::NONE)
++		{
++			auto & zone = map.getZones().at(map.getZoneID(v));
++			terrain = zone->getType() == ETemplateZoneType::WATER ? TerrainId(ETerrainId::DIRT) : zone->getTerrainType();
++		}
++		if(!LIBRARY->terrainTypeHandler->getById(terrain)->isPassable())
++			terrain = ETerrainId::DIRT;
++
++		// The entrance and the tiles in front of it
++		auto & tilesToPaint = toPaint[terrain];
++		tilesToPaint.push_back(v);
++		for(int dy = 0; dy <= 1; dy++)
++			for(int dx = -1; dx <= 1; dx++)
++			{
++				const int3 n(v.x + dx, v.y + dy, v.z);
++				if(cmap.isInTheMap(n) && cmap.getTile(n).isWater() && !cmap.getTile(n).visitable() && !cmap.getTile(n).blocked()
++					&& obj->appearance->isVisitableFrom(dx, dy))
++					tilesToPaint.push_back(n);
++			}
++		logGlobal->warn("RMG validator: %s at %s stands in water, putting land under it", obj->getObjectName(), v.toString());
++	}
++	for(auto & paint : toPaint)
++	{
++		map.getMapProxy()->drawTerrain(rand, paint.second, paint.first);
++		report.fixes++;
++	}
++	if(!toPaint.empty())
++		build();
++}
++
++void RmgValidator::fixIsolatedStarts(Report & report)
++{
++	for(int attempt = 0; attempt < 16; attempt++)
++	{
++		auto starts = startTiles();
++		if(starts.size() < 2)
++			return;
++		std::vector<std::vector<uint8_t>> seen;
++		size_t best = 0;
++		std::vector<int> count;
++		for(int s : starts)
++		{
++			seen.push_back(flood({s}, [](int) { return true; }));
++			count.push_back(std::count(seen.back().begin(), seen.back().end(), 1));
++			if(count.back() > count[best])
++				best = count.size() - 1;
++		}
++
++		// A town whose own surroundings are sealed: join them to the rest of its zone
++		bool changed = false;
++		for(size_t i = 0; i < starts.size() && !changed; i++)
++		{
++			if(seen[i][starts[best]])
++				continue;
++			const auto zoneId = map.getZoneID(pos(starts[i]));
++			std::vector<uint8_t> sources(tiles.size(), 0);
++			std::vector<uint8_t> targets(tiles.size(), 0);
++			bool anyTarget = false;
++			for(size_t t = 0; t < tiles.size(); t++)
++			{
++				if(map.getZoneID(pos(t)) != zoneId || tiles[t] == WATER)
++					continue;
++				if(seen[i][t])
++					sources[t] = 1;
++				else if(seen[best][t])
++				{
++					targets[t] = 1;
++					anyTarget = true;
++				}
++			}
++			if(!anyTarget)
++			{
++				// Nobody reaches the zone: aim at the rest of it, its connections lead on
++				for(size_t t = 0; t < tiles.size(); t++)
++					if(map.getZoneID(pos(t)) == zoneId && tiles[t] == OPEN && !seen[i][t])
++						targets[t] = 1;
++			}
++			auto way = findWay(sources, targets, [this, zoneId](int t)
++			{
++				return map.getZoneID(pos(t)) == zoneId || tiles[t] == WATER;
++			}, 400, true);
++			if(way.empty())
++			{
++				logGlobal->warn("RMG validator: the town at %s is sealed off, no way out", pos(starts[i]).toString());
++				continue;
++			}
++			logGlobal->info("RMG validator: the town at %s is sealed off, opening a way out", pos(starts[i]).toString());
++			openWay(way, true, report, landTerrain(zoneId));
++			changed = true;
++		}
++		if(!changed)
++			return;
++	}
++}
++
++void RmgValidator::fixObjectsOnRock(Report & report)
++{
++	// Underground rock painted under an object: the object gets ground again
++	std::map<TRmgTemplateZoneId, std::vector<int3>> toPaint;
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj || !obj->isVisitable() || !cmap.isInTheMap(obj->visitablePos()))
++			continue;
++		auto objectTiles = obj->getBlockedPos();
++		objectTiles.insert(obj->visitablePos());
++		bool onRock = false;
++		for(const auto & t : objectTiles)
++			if(cmap.isInTheMap(t) && !cmap.getTile(t).isWater() && !cmap.getTile(t).getTerrain()->isPassable())
++				onRock = true;
++		if(!onRock)
++			continue;
++		logGlobal->warn("RMG validator: %s at %s stands on rock", obj->getObjectName(), obj->visitablePos().toString());
++		for(const auto & t : objectTiles)
++			if(cmap.isInTheMap(t) && !cmap.getTile(t).isWater() && !cmap.getTile(t).getTerrain()->isPassable())
++				toPaint[map.getZoneID(t)].push_back(t);
++	}
++	for(auto & paint : toPaint)
++	{
++		map.getMapProxy()->drawTerrain(rand, paint.second, landTerrain(paint.first));
++		report.clearedRock += paint.second.size();
++		report.fixes++;
++	}
++	if(!toPaint.empty())
++		build();
++}
++
++void RmgValidator::fixCoveredEntrances(Report & report)
++{
++	// An obstacle placed over the entrance of an object (a guard standing
++	// in a rock): the obstacle goes
++	TPath covered;
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj || !obj->isVisitable() || !cmap.isInTheMap(obj->visitablePos()))
++			continue;
++		const int3 v = obj->visitablePos();
++		for(const auto & id : cmap.getTile(v).blockingObjects)
++		{
++			const auto * other = cmap.getObject(id);
++			if(other && other != obj.get() && !other->isVisitable() && other->getObjectHandler()->isStaticObject())
++			{
++				logGlobal->warn("RMG validator: %s at %s is covered by an obstacle", obj->getObjectName(), v.toString());
++				covered.push_back(idx(v));
++				break;
++			}
++		}
++	}
++	for(int t : covered)
++	{
++		// openWay() clears obstacles on OBSTACLE tiles: the entrance is one, but for the object on it
++		tiles[t] = OBSTACLE;
++		openWay({t}, false, report);
++	}
++}
++
++void RmgValidator::fixUnreachableObjects(Report & report)
++{
++	std::set<const CGObjectInstance *> failed;
++	std::set<TRmgTemplateZoneId> lostZones;
++	reached = reachAll();
++	for(int attempt = 0; attempt < 1000; attempt++)
++	{
++		const CGObjectInstance * target = nullptr;
++		for(const auto & obj : cmap.objects)
++		{
++			if(!obj || !obj->isVisitable() || failed.count(obj.get()))
++				continue;
++			const int3 v = obj->visitablePos();
++			if(!cmap.isInTheMap(v) || cmap.getTile(v).isWater() || zoneIgnored(map.getZoneID(v)) || lostZones.count(map.getZoneID(v)))
++				continue;
++			if(!reached[idx(v)])
++			{
++				target = obj.get();
++				break;
++			}
++		}
++		if(!target)
++			return;
++
++		const int3 v = target->visitablePos();
++		const auto zoneId = map.getZoneID(v);
++		// Land in a water zone (islands, coast) has no guards to bypass: any
++		// reached ground may lead there
++		const bool waterZone = map.getZones().at(zoneId)->getType() == ETemplateZoneType::WATER;
++		std::vector<uint8_t> sources(tiles.size(), 0);
++		bool anySource = false;
++		for(size_t i = 0; i < tiles.size(); i++)
++		{
++			if(reached[i] && (waterZone || map.getZoneID(pos(i)) == zoneId) && tiles[i] != WATER)
++			{
++				sources[i] = 1;
++				anySource = true;
++			}
++		}
++		if(!anySource)
++		{
++			// The whole zone is cut off: a matter of its connections
++			lostZones.insert(zoneId);
++			continue;
++		}
++		std::vector<uint8_t> targets(tiles.size(), 0);
++		targets[idx(v)] = 1;
++
++		// Inside the zone only: a new way across a zone border would bypass its guards
++		auto way = findWay(sources, targets, [this, zoneId](int t)
++		{
++			return map.getZoneID(pos(t)) == zoneId || tiles[t] == WATER;
++		}, 400, true);
++		if(way.empty())
++		{
++			logGlobal->warn("RMG validator: no way to %s at %s (zone %d, tile %d)", target->getObjectName(), v.toString(), zoneId, static_cast<int>(tiles[idx(v)]));
++			failed.insert(target);
++			continue;
++		}
++		logGlobal->info("RMG validator: opening a way to %s at %s (%d tiles)", target->getObjectName(), v.toString(), way.size());
++		openWay(way, true, report, landTerrain(zoneId));
++		reached = reachAll();
++		if(!reached[idx(v)])
++		{
++			// Should not happen; do not try forever
++			logGlobal->warn("RMG validator: opened a way to %s at %s, still out of reach", target->getObjectName(), v.toString());
++			failed.insert(target);
++		}
++	}
++}
++
++void RmgValidator::fixPockets(Report & report)
++{
++	std::set<int> failed;
++	for(int attempt = 0; attempt < 500; attempt++)
++	{
++		reached = reachAll();
++
++		// First pocket not handled yet
++		std::vector<int> pocket;
++		std::vector<uint8_t> inPocket(tiles.size(), 0);
++		for(size_t i = 0; i < tiles.size() && pocket.empty(); i++)
++		{
++			if(tiles[i] != OPEN || reached[i] || failed.count(i) || zoneIgnored(map.getZoneID(pos(i))))
++				continue;
++			std::vector<int> queue{static_cast<int>(i)};
++			inPocket[i] = 1;
++			while(!queue.empty())
++			{
++				const int c = queue.back();
++				queue.pop_back();
++				pocket.push_back(c);
++				const int3 p = pos(c);
++				for(int dy = -1; dy <= 1; dy++)
++					for(int dx = -1; dx <= 1; dx++)
++					{
++						if(!onMap(p.x + dx, p.y + dy, p.z))
++							continue;
++						const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++						if(tiles[n] == OPEN && !reached[n] && !inPocket[n])
++						{
++							inPocket[n] = 1;
++							queue.push_back(n);
++						}
++					}
++			}
++		}
++		if(pocket.empty())
++			return;
++		if(pocket.size() > 150)
++		{
++			// Not a pocket but a lost part of the map: a matter of connections
++			for(int t : pocket)
++				failed.insert(t);
++			logGlobal->warn("RMG validator: an area of %d tiles at %s cannot be reached", pocket.size(), pos(pocket.front()).toString());
++			continue;
++		}
++
++		const auto zoneId = map.getZoneID(pos(pocket.front()));
++		auto & zone = *map.getZones().at(zoneId);
++
++		// Big pockets are worth walking into
++		if(pocket.size() >= 9)
++		{
++			std::vector<uint8_t> sources(tiles.size(), 0);
++			for(size_t i = 0; i < tiles.size(); i++)
++				if(reached[i] && tiles[i] != WATER && map.getZoneID(pos(i)) == zoneId)
++					sources[i] = 1;
++			auto way = findWay(sources, inPocket, [this, zoneId](int t)
++			{
++				return map.getZoneID(pos(t)) == zoneId;
++			}, 60);
++			if(!way.empty())
++			{
++				logGlobal->info("RMG validator: opening a sealed area of %d tiles at %s", pocket.size(), pos(pocket.front()).toString());
++				openWay(way, true, report);
++				continue;
++			}
++		}
++
++		rmg::Area area;
++		for(int t : pocket)
++			area.add(pos(t));
++
++		// Obstacles, also underground: painting rock would change the terrain
++		// of the tiles around too, objects included
++		auto left = plant(area, zoneId, report);
++		report.fixes++;
++		build();
++		if(!left.empty())
++		{
++			// Tiles no obstacle fits: join them to the land around, if it is cheap
++			std::vector<uint8_t> sources(tiles.size(), 0);
++			std::vector<uint8_t> targets(tiles.size(), 0);
++			for(size_t i = 0; i < tiles.size(); i++)
++				if(reached[i] && tiles[i] != WATER && map.getZoneID(pos(i)) == zoneId)
++					sources[i] = 1;
++			for(const auto & t : left.getTilesVector())
++				targets[idx(t)] = 1;
++			auto way = findWay(sources, targets, [this, zoneId](int t)
++			{
++				return map.getZoneID(pos(t)) == zoneId;
++			}, 30);
++			if(!way.empty())
++				openWay(way, false, report);
++			else
++				for(const auto & t : left.getTilesVector())
++					failed.insert(idx(t));
++		}
++	}
++}
++
++std::vector<rmg::ZoneConnection> RmgValidator::realConnections() const
++{
++	std::vector<rmg::ZoneConnection> result;
++	std::set<int> seen;
++	for(const auto & zone : map.getZones())
++	{
++		for(const auto & connection : zone.second->getConnections())
++		{
++			auto type = connection.getConnectionType();
++			if(type == rmg::EConnectionType::FICTIVE || type == rmg::EConnectionType::REPULSIVE)
++				continue;
++			if(connection.getZoneA() == connection.getZoneB())
++				continue;
++			if(!map.getZones().count(connection.getZoneA()) || !map.getZones().count(connection.getZoneB()))
++				continue;
++			if(zoneIgnored(connection.getZoneA()) || zoneIgnored(connection.getZoneB()))
++				continue;
++			if(seen.insert(connection.getId()).second)
++				result.push_back(connection);
++		}
++	}
++	return result;
++}
++
++bool RmgValidator::checkConnection(const rmg::ZoneConnection & connection, std::vector<uint8_t> * fromA) const
++{
++	const auto a = connection.getZoneA();
++	const auto b = connection.getZoneB();
++	std::vector<int> starts;
++	for(size_t i = 0; i < tiles.size(); i++)
++		if(reached[i] && tiles[i] != WATER && map.getZoneID(pos(i)) == a)
++			starts.push_back(i);
++	if(starts.empty())
++		return false;
++
++	// Only through the two zones (and the sea, for connections by boat)
++	auto seen = flood(starts, [this, a, b](int t)
++	{
++		auto zone = map.getZoneID(pos(t));
++		return zone == a || zone == b || tiles[t] == WATER;
++	});
++	bool ok = false;
++	for(size_t i = 0; i < tiles.size() && !ok; i++)
++		if(seen[i] && tiles[i] != WATER && map.getZoneID(pos(i)) == b)
++			ok = true;
++	if(fromA)
++		*fromA = std::move(seen);
++	return ok;
++}
++
++std::vector<int> RmgValidator::groundOf(TRmgTemplateZoneId zoneId) const
++{
++	// Where the players walk in the zone; if nobody gets there yet, its own paths
++	std::vector<int> result;
++	for(size_t i = 0; i < tiles.size(); i++)
++		if(reached[i] && tiles[i] == OPEN && map.getZoneID(pos(i)) == zoneId)
++			result.push_back(i);
++	if(result.empty())
++	{
++		for(const auto & t : map.getZones().at(zoneId)->freePaths()->getTilesVector())
++			if(tiles[idx(t)] == OPEN)
++				result.push_back(idx(t));
++	}
++	return result;
++}
++
++bool RmgValidator::placeBoat(TRmgTemplateZoneId from, TRmgTemplateZoneId to, Report & report)
++{
++	// A sea touching the ground of both zones; the boat waits at the shore of the first
++	std::vector<uint8_t> isGround(tiles.size(), 0);
++	for(int t : groundOf(from))
++		isGround[t] = 1;
++	std::set<int> seasOfTo;
++	for(int t : groundOf(to))
++	{
++		const int3 p = pos(t);
++		for(int dy = -1; dy <= 1; dy++)
++			for(int dx = -1; dx <= 1; dx++)
++				if(onMap(p.x + dx, p.y + dy, p.z) && waterComponent[idx(int3(p.x + dx, p.y + dy, p.z))] >= 0)
++					seasOfTo.insert(waterComponent[idx(int3(p.x + dx, p.y + dy, p.z))]);
++	}
++	if(seasOfTo.empty())
++		return false;
++
++	std::vector<MapObjectSubID> sailing;
++	for(auto sub : LIBRARY->objtypeh->knownSubObjects(Obj::BOAT))
++	{
++		auto test = LIBRARY->objtypeh->getHandlerFor(Obj::BOAT, sub)->create(cmap.cb, nullptr);
++		if(auto * boat = dynamic_cast<CGBoat *>(test.get()))
++			if(boat->layer == EPathfindingLayer::SAIL)
++				sailing.push_back(sub);
++	}
++	if(sailing.empty())
++		return false;
++
++	for(size_t w = 0; w < tiles.size(); w++)
++	{
++		if(tiles[w] != WATER || !seasOfTo.count(waterComponent[w]) || cmap.getTile(pos(w)).visitable())
++			continue;
++		const int3 p = pos(w);
++		bool shore = false;
++		for(int dy = -1; dy <= 1 && !shore; dy++)
++			for(int dx = -1; dx <= 1 && !shore; dx++)
++				if(onMap(p.x + dx, p.y + dy, p.z) && isGround[idx(int3(p.x + dx, p.y + dy, p.z))])
++					shore = true;
++		if(!shore)
++			continue;
++
++		auto boat = LIBRARY->objtypeh->getHandlerFor(Obj::BOAT, *RandomGeneratorUtil::nextItem(sailing, rand))->create(cmap.cb, nullptr);
++		rmg::Object object(boat);
++		object.setTemplate(ETerrainId::WATER, rand);
++		object.setPosition(p);
++		object.setPosition(p + (p - object.getVisitablePosition()));
++		bool fits = object.getVisitablePosition() == p;
++		for(const auto & t : object.getArea().getTilesVector())
++			if(!map.isOnMap(t) || tiles[idx(t)] != WATER || cmap.getTile(t).visitable())
++				fits = false;
++		if(!fits)
++		{
++			object.clear();
++			continue;
++		}
++		object.finalize(map, rand);
++		logGlobal->info("RMG validator: a boat at %s for the way from zone %d to zone %d", p.toString(), from, to);
++		report.fixes++;
++		build();
++		return true;
++	}
++	return false;
++}
++
++bool RmgValidator::placePortals(const rmg::ZoneConnection & connection, Report & report)
++{
++	// A pair of monoliths of a kind not used on the map yet
++	std::set<MapObjectSubID> used;
++	for(const auto & obj : cmap.objects)
++		if(obj && obj->ID == Obj::MONOLITH_TWO_WAY)
++			used.insert(obj->subID);
++	std::optional<MapObjectSubID> kind;
++	for(auto sub : LIBRARY->objtypeh->knownSubObjects(Obj::MONOLITH_TWO_WAY))
++	{
++		auto handler = LIBRARY->objtypeh->getHandlerFor(Obj::MONOLITH_TWO_WAY, sub);
++		if(!used.count(sub)
++			&& !handler->getTemplates(landTerrain(connection.getZoneA())).empty()
++			&& !handler->getTemplates(landTerrain(connection.getZoneB())).empty())
++		{
++			kind = sub;
++			break;
++		}
++	}
++	if(!kind)
++		return false;
++
++	struct Spot
++	{
++		std::shared_ptr<rmg::Object> object;
++		int3 approach;
++		bool ownApproach;
++	};
++
++	// In each zone: a monolith in place of obstacles, entered from a tile
++	// of its own (which gets the guard) next to the ground of the zone
++	auto findSpot = [&](TRmgTemplateZoneId zoneId) -> std::optional<Spot>
++	{
++		auto & zone = *map.getZones().at(zoneId);
++		std::vector<uint8_t> isGround(tiles.size(), 0);
++		for(int t : groundOf(zoneId))
++			isGround[t] = 1;
++		// As far as possible from towns and other objects, like the generator's own monoliths
++		std::vector<int> distance(tiles.size(), -1);
++		std::deque<int> queue;
++		for(const auto & obj : cmap.objects)
++		{
++			if(obj && obj->isVisitable() && cmap.isInTheMap(obj->visitablePos()))
++			{
++				distance[idx(obj->visitablePos())] = 0;
++				queue.push_back(idx(obj->visitablePos()));
++			}
++		}
++		while(!queue.empty())
++		{
++			const int c = queue.front();
++			queue.pop_front();
++			const int3 p = pos(c);
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					if(!onMap(p.x + dx, p.y + dy, p.z))
++						continue;
++					const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++					if(distance[n] < 0)
++					{
++						distance[n] = distance[c] + 1;
++						queue.push_back(n);
++					}
++				}
++		}
++		auto candidates = zone.area()->getTilesVector();
++		std::stable_sort(candidates.begin(), candidates.end(), [&](const int3 & a, const int3 & b)
++		{
++			return distance[idx(a)] > distance[idx(b)];
++		});
++		auto clearable = [&](const int3 & t)
++		{
++			return map.isOnMap(t) && map.getZoneID(t) == zoneId && (tiles[idx(t)] == OBSTACLE || tiles[idx(t)] == ROCK);
++		};
++		auto touchesGround = [&](const int3 & t, const rmg::Area & except)
++		{
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					const int3 n(t.x + dx, t.y + dy, t.z);
++					if(onMap(n.x, n.y, n.z) && isGround[idx(n)] && !except.contains(n))
++						return true;
++				}
++			return false;
++		};
++
++		for(const auto & v : candidates)
++		{
++			if(!clearable(v))
++				continue;
++			auto monolith = LIBRARY->objtypeh->getHandlerFor(Obj::MONOLITH_TWO_WAY, *kind)->create(cmap.cb, nullptr);
++			auto object = std::make_shared<rmg::Object>(monolith);
++			object->setTemplate(landTerrain(zoneId), rand);
++			object->setPosition(v);
++			object->setPosition(v + (v - object->getVisitablePosition()));
++			if(object->getVisitablePosition() != v)
++				continue;
++			const auto area = object->getArea();
++			bool fits = true;
++			for(const auto & t : area.getTilesVector())
++				if(!clearable(t))
++					fits = false;
++			if(!fits)
++				continue;
++			const auto & appearance = *monolith->appearance;
++			std::optional<Spot> fallback;
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					const int3 n(v.x + dx, v.y + dy, v.z);
++					if((!dx && !dy) || !onMap(n.x, n.y, n.z) || area.contains(n) || !appearance.isVisitableFrom(dx, dy))
++						continue;
++					if(clearable(n) && touchesGround(n, area))
++						return Spot{object, n, true};
++					if(isGround[idx(n)] && !fallback)
++						fallback = Spot{object, n, false};
++				}
++			if(fallback)
++				return fallback;
++		}
++		return std::nullopt;
++	};
++
++	auto spotA = findSpot(connection.getZoneA());
++	if(!spotA)
++		return false;
++	auto spotB = findSpot(connection.getZoneB());
++	if(!spotB)
++		return false;
++
++	for(const auto & spot : {*spotA, *spotB})
++	{
++		const auto zoneId = map.getZoneID(spot.approach);
++		TPath way;
++		for(const auto & t : spot.object->getArea().getTilesVector())
++			way.push_back(idx(t));
++		if(spot.ownApproach)
++			way.push_back(idx(spot.approach));
++		openWay(way, false, report, landTerrain(zoneId));
++		spot.object->finalize(map, rand);
++
++		if(spot.ownApproach && connection.getGuardStrength() > 0)
++		{
++			auto zone = map.getZones().at(zoneId);
++			if(auto * manager = zone->getModificator<ObjectManager>())
++			{
++				if(auto monster = manager->chooseGuard(connection.getGuardStrength(), true))
++				{
++					rmg::Object guard(monster);
++					guard.setPosition(spot.approach);
++					manager->placeObject(guard, false, false);
++				}
++			}
++		}
++		logGlobal->info("RMG validator: a monolith at %s for the connection of zones %d and %d",
++			spot.object->getVisitablePosition().toString(), connection.getZoneA(), connection.getZoneB());
++	}
++	report.fixes++;
++	build();
++	return true;
++}
++
++void RmgValidator::fixConnections(Report & report)
++{
++	reached = reachAll();
++	for(const auto & connection : realConnections())
++	{
++		std::vector<uint8_t> fromA;
++		if(checkConnection(connection, &fromA))
++			continue;
++
++		const auto a = connection.getZoneA();
++		const auto b = connection.getZoneB();
++		// From the side that can be reached
++		std::vector<uint8_t> sources(tiles.size(), 0);
++		std::vector<uint8_t> targets(tiles.size(), 0);
++		bool anySource = false;
++		auto side = a;
++		auto other = b;
++		for(int pass = 0; pass < 2 && !anySource; pass++)
++		{
++			if(pass == 1)
++				std::swap(side, other);
++			for(size_t i = 0; i < tiles.size(); i++)
++			{
++				const auto zone = map.getZoneID(pos(i));
++				if(reached[i] && tiles[i] != WATER && zone == side)
++				{
++					sources[i] = 1;
++					anySource = true;
++				}
++			}
++		}
++		for(size_t i = 0; i < tiles.size(); i++)
++			if((tiles[i] == OPEN || tiles[i] == VISIT) && map.getZoneID(pos(i)) == other && !sources[i])
++				targets[i] = 1;
++
++		{
++			auto zoneA = map.getZones().at(a);
++			auto zoneB = map.getZones().at(b);
++			bool adjacent = false;
++			for(const auto & t : zoneA->area()->getBorderOutside())
++				if(map.isOnMap(t) && map.getZoneID(t) == b)
++					adjacent = true;
++			logGlobal->warn("RMG validator: zones %d (level %d) and %d (level %d) are connected in the template (type %d, guard %d), but not on the map; adjacent %d",
++				a, zoneA->getPos().z, b, zoneB->getPos().z, static_cast<int>(connection.getConnectionType()), connection.getGuardStrength(), adjacent);
++		}
++		if(!anySource)
++			continue;
++
++		auto way = findWay(sources, targets, [this, a, b](int t)
++		{
++			auto zone = map.getZoneID(pos(t));
++			return zone == a || zone == b;
++		}, 1000);
++		if(way.empty())
++		{
++			// Not neighbours on the map: by boat over a shared sea, or by monoliths
++			bool fixed = placeBoat(side, other, report) && checkConnection(connection, nullptr);
++			if(!fixed)
++				fixed = placePortals(connection, report);
++			if(fixed)
++				reached = reachAll();
++			continue;
++		}
++
++		// The new passage gets the guard the template asks for, at the border
++		int3 guardPos(-1, -1, -1);
++		for(size_t i = 0; i + 1 < way.size(); i++)
++		{
++			if(map.getZoneID(pos(way[i])) != map.getZoneID(pos(way[i + 1])))
++			{
++				guardPos = pos(way[i]);
++				break;
++			}
++		}
++		openWay(way, false, report);
++
++		if(guardPos.isValid() && connection.getConnectionType() != rmg::EConnectionType::WIDE && connection.getGuardStrength() > 0)
++		{
++			auto zone = map.getZones().at(map.getZoneID(guardPos));
++			if(auto * manager = zone->getModificator<ObjectManager>())
++			{
++				if(auto monster = manager->chooseGuard(connection.getGuardStrength(), true))
++				{
++					rmg::Object guard(monster);
++					guard.setPosition(guardPos);
++					manager->placeObject(guard, false, false);
++					build();
++				}
++			}
++		}
++		reached = reachAll();
++	}
++}
++
++std::vector<int> RmgValidator::findDeadEnds() const
++{
++	// Empty one-tile-wide spurs off the paths: tiles with a single passable
++	// neighbour, nothing to visit next to them, peeled off a few times over.
++	// Spurs that lead to something keep it reachable: they end at an object.
++	std::vector<uint8_t> peeled(tiles.size(), 0);
++	std::vector<int> result;
++	auto passable = [this, &peeled](int t)
++	{
++		return !peeled[t] && (tiles[t] == OPEN || tiles[t] == VISIT || tiles[t] == WATER);
++	};
++	for(int round = 0; round < 6; round++)
++	{
++		std::vector<int> found;
++		for(size_t i = 0; i < tiles.size(); i++)
++		{
++			if(tiles[i] != OPEN || peeled[i] || !reached[i] || zoneIgnored(map.getZoneID(pos(i))))
++				continue;
++			const int3 p = pos(i);
++			const auto & tile = cmap.getTile(p);
++			if(tile.visitable() || tile.hasRoad() || teleports.count(i) || boarding.count(i))
++				continue;
++			int open = 0;
++			bool nearObject = false;
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					if((!dx && !dy) || !onMap(p.x + dx, p.y + dy, p.z))
++						continue;
++					const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++					if(passable(n))
++						open++;
++					if(cmap.getTile(pos(n)).visitable())
++						nearObject = true;
++				}
++			if(open == 1 && !nearObject)
++				found.push_back(i);
++		}
++		if(found.empty())
++			break;
++		for(int t : found)
++		{
++			peeled[t] = 1;
++			result.push_back(t);
++		}
++	}
++	return result;
++}
++
++void RmgValidator::fixDeadEnds(Report & report)
++{
++	reached = reachAll();
++	std::map<TRmgTemplateZoneId, rmg::Area> spurs;
++	for(int t : findDeadEnds())
++		spurs[map.getZoneID(pos(t))].add(pos(t));
++	if(spurs.empty())
++		return;
++	for(auto & spur : spurs)
++	{
++		auto & zone = *map.getZones().at(spur.first);
++		if(zone.getType() == ETemplateZoneType::WATER)
++			continue;
++		plant(spur.second, spur.first, report);
++	}
++	report.fixes++;
++	build();
++}
++
++RmgValidator::Report RmgValidator::analyse(bool fix)
++{
++	Report report;
++	build();
++	if(fix)
++	{
++		// A fix may disturb what an earlier one did (terrain painting reaches
++		// the neighbouring tiles): again, while anything changes
++		for(int round = 0; round < 3; round++)
++		{
++			const int fixesBefore = report.fixes;
++			fixObjectsInWater(report);
++			fixObjectsOnRock(report);
++			fixCoveredEntrances(report);
++			fixIsolatedStarts(report);
++			fixConnections(report);
++			fixUnreachableObjects(report);
++			fixPockets(report);
++			fixUnreachableObjects(report);
++			if(round == 0)
++				fixDeadEnds(report);
++			if(report.fixes == fixesBefore)
++				break;
++		}
++	}
++
++	Report result;
++	build();
++	{
++		// Every player must be able to walk (or sail) to every other one
++		auto starts = startTiles();
++		for(int a : starts)
++		{
++			auto seen = flood({a}, [](int) { return true; });
++			int missing = 0;
++			for(int b : starts)
++				if(!seen[b])
++					missing++;
++			if(missing)
++			{
++				result.isolatedPlayers++;
++				logGlobal->warn("RMG validator: from the town at %s %d other players cannot be reached", pos(a).toString(), missing);
++			}
++		}
++	}
++	result.removedObstacles = report.removedObstacles;
++	result.plantedObstacles = report.plantedObstacles;
++	result.clearedRock = report.clearedRock;
++	result.landBridges = report.landBridges;
++	result.fixes = report.fixes;
++
++	build();
++	reached = reachAll();
++
++	for(const auto & zone : map.getZones())
++	{
++		if(zone.second->getType() == ETemplateZoneType::WATER || zoneIgnored(zone.first))
++			continue;
++		bool hasLand = false;
++		bool isReached = false;
++		for(const auto & t : zone.second->area()->getTilesVector())
++		{
++			if(tiles[idx(t)] == OPEN)
++			{
++				hasLand = true;
++				if(reached[idx(t)])
++				{
++					isReached = true;
++					break;
++				}
++			}
++		}
++		if(hasLand && !isReached)
++		{
++			result.unreachableZones++;
++			std::string connections;
++			for(const auto & c : zone.second->getConnections())
++				connections += boost::str(boost::format(" %d-%d(type %d)") % c.getZoneA() % c.getZoneB() % static_cast<int>(c.getConnectionType()));
++			logGlobal->warn("RMG validator: zone %d cannot be reached, connections:%s", zone.first, connections);
++		}
++	}
++	for(const auto & connection : realConnections())
++	{
++		if(!checkConnection(connection, nullptr))
++		{
++			result.brokenConnections++;
++			logGlobal->warn("RMG validator: no way between zones %d and %d", connection.getZoneA(), connection.getZoneB());
++		}
++	}
++	int gates[2] = {0, 0};
++	for(const auto & obj : cmap.objects)
++	{
++		if(!obj || !obj->isVisitable())
++			continue;
++		const int3 v = obj->visitablePos();
++		if(!cmap.isInTheMap(v))
++			continue;
++		if(obj->ID == Obj::SUBTERRANEAN_GATE && v.z < 2)
++			gates[v.z]++;
++		if(isWaterObject(obj.get()) || zoneIgnored(map.getZoneID(v)))
++			continue;
++		if(cmap.getTile(v).isWater())
++		{
++			result.objectsInWater++;
++			logGlobal->warn("RMG validator: %s at %s stands in water", obj->getObjectName(), v.toString());
++		}
++		else if(!reached[idx(v)])
++		{
++			result.unreachableObjects++;
++			const auto zoneId = map.getZoneID(v);
++			logGlobal->warn("RMG validator: %s at %s cannot be reached (zone %d type %d, tile %d)", obj->getObjectName(), v.toString(),
++				zoneId, static_cast<int>(map.getZones().at(zoneId)->getType()), static_cast<int>(tiles[idx(v)]));
++		}
++	}
++	result.unpairedGates = std::abs(gates[0] - gates[1]);
++
++	std::vector<uint8_t> counted(tiles.size(), 0);
++	for(size_t i = 0; i < tiles.size(); i++)
++	{
++		if(tiles[i] != OPEN || reached[i] || counted[i] || zoneIgnored(map.getZoneID(pos(i))))
++			continue;
++		result.pockets++;
++		std::vector<int> queue{static_cast<int>(i)};
++		counted[i] = 1;
++		while(!queue.empty())
++		{
++			const int c = queue.back();
++			queue.pop_back();
++			result.pocketTiles++;
++			const int3 p = pos(c);
++			for(int dy = -1; dy <= 1; dy++)
++				for(int dx = -1; dx <= 1; dx++)
++				{
++					if(!onMap(p.x + dx, p.y + dy, p.z))
++						continue;
++					const int n = idx(int3(p.x + dx, p.y + dy, p.z));
++					if(tiles[n] == OPEN && !reached[n] && !counted[n])
++					{
++						counted[n] = 1;
++						queue.push_back(n);
++					}
++				}
++		}
++	}
++	result.deadEnds = findDeadEnds().size();
++	return result;
++}
++
++RmgValidator::Report RmgValidator::check()
++{
++	return analyse(false);
++}
++
++RmgValidator::Report RmgValidator::checkAndFix()
++{
++	return analyse(true);
++}
++
++VCMI_LIB_NAMESPACE_END
+diff --git a/lib/rmg/RmgValidator.h b/lib/rmg/RmgValidator.h
+new file mode 100644
+index 0000000..4e40c1b
+--- /dev/null
++++ b/lib/rmg/RmgValidator.h
+@@ -0,0 +1,142 @@
++/*
++ * RmgValidator.h, part of VCMI engine
++ *
++ * Authors: listed in file AUTHORS in main folder
++ *
++ * License: GNU General Public License v2.0 or later
++ * Full text of license available in license.txt file, in main folder
++ *
++ */
++
++#pragma once
++
++#include "../int3.h"
++#include "RmgArea.h"
++#include "CRmgTemplate.h"
++
++VCMI_LIB_NAMESPACE_BEGIN
++
++class RmgMap;
++class CMap;
++class CGObjectInstance;
++class Zone;
++
++namespace vstd
++{
++class RNG;
++}
++
++/// Checks a generated map on what the game will see: real objects and
++/// terrain, not the generator's own bookkeeping. From the players' towns
++/// (walking, boats, monoliths, subterranean gates; guards count as passable,
++/// they are meant to be fought) every zone, every template connection and
++/// every visitable object must be reachable, and no passable land may be
++/// sealed off. Problems are fixed where possible: obstacles (or rock
++/// underground) on the cheapest way in are cleared and the cleared ground
++/// is planted again around the new passage; small sealed pockets are
++/// planted over; land objects standing in water get land under them.
++class DLL_LINKAGE RmgValidator
++{
++public:
++	struct Report
++	{
++		int isolatedPlayers = 0;
++		int unreachableZones = 0;
++		int brokenConnections = 0;
++		int unreachableObjects = 0;
++		int objectsInWater = 0;
++		int pockets = 0;
++		int pocketTiles = 0;
++		int deadEnds = 0;
++		int unpairedGates = 0;
++
++		int removedObstacles = 0;
++		int plantedObstacles = 0;
++		int clearedRock = 0;
++		int landBridges = 0;
++		int fixes = 0;
++
++		/// Whether the map is unfit to play: a part of it the template
++		/// promises cannot be reached
++		bool critical() const;
++		std::string toString() const;
++	};
++
++	RmgValidator(RmgMap & map, vstd::RNG & rand);
++	~RmgValidator();
++
++	/// Analysis only
++	Report check();
++	/// Fix what can be fixed, then check again
++	Report checkAndFix();
++
++private:
++	enum ETile : uint8_t
++	{
++		BLOCKED, // objects, map edge water rocks: never opened
++		OPEN, // passable land
++		WATER, // sailable
++		VISIT, // entrance of a visitable object that stays on the map
++		OBSTACLE, // covered only by decorative obstacles: can be cleared
++		ROCK // impassable terrain (underground rock): can be repainted
++	};
++
++	using TPath = std::vector<int>;
++
++	int idx(const int3 & t) const;
++	int3 pos(int i) const;
++	bool onMap(int x, int y, int z) const;
++
++	void build();
++	std::vector<uint8_t> flood(const std::vector<int> & starts, const std::function<bool(int)> & allowed) const;
++	std::vector<int> startTiles() const;
++	std::vector<uint8_t> reachAll() const;
++	bool canEnter(int from, int to) const;
++	bool canLeave(int from) const;
++
++	/// Cheapest way from any source tile into a target tile, through tiles
++	/// for which allowed() holds; obstacles and rock are costly to cross
++	TPath findWay(const std::vector<uint8_t> & sources, const std::vector<uint8_t> & targets, const std::function<bool(int)> & allowed, int maxCost, bool overWater = false) const;
++	/// Clears obstacles and rock along the way, plants the rest again
++	void openWay(const TPath & way, bool widen, Report & report, TerrainId bridgeTerrain = TerrainId(ETerrainId::NONE));
++	TerrainId landTerrain(TRmgTemplateZoneId zoneId) const;
++	/// Plants obstacles on the given tiles of the zone; returns what is left
++	rmg::Area plant(const rmg::Area & tiles, TRmgTemplateZoneId zoneId, Report & report);
++
++	void fixObjectsInWater(Report & report);
++	void fixIsolatedStarts(Report & report);
++	void fixObjectsOnRock(Report & report);
++	void fixCoveredEntrances(Report & report);
++	void fixUnreachableObjects(Report & report);
++	void fixPockets(Report & report);
++	void fixConnections(Report & report);
++	std::vector<int> groundOf(TRmgTemplateZoneId zoneId) const;
++	bool placeBoat(TRmgTemplateZoneId from, TRmgTemplateZoneId to, Report & report);
++	bool placePortals(const rmg::ZoneConnection & connection, Report & report);
++	void fixDeadEnds(Report & report);
++	std::vector<int> findDeadEnds() const;
++
++	Report analyse(bool fix);
++	bool checkConnection(const rmg::ZoneConnection & connection, std::vector<uint8_t> * fromA) const;
++	std::vector<rmg::ZoneConnection> realConnections() const;
++	bool zoneIgnored(TRmgTemplateZoneId zone) const;
++	bool isWaterObject(const CGObjectInstance * obj) const;
++
++	RmgMap & map;
++	CMap & cmap;
++	vstd::RNG & rand;
++	int W, H, L;
++
++	std::vector<uint8_t> tiles;
++	std::vector<uint8_t> transitBlocked;
++	std::vector<uint16_t> entryMask; // VISIT tiles: allowed directions, bit per neighbour
++	std::vector<int> obstacleCost;
++	std::map<int, std::vector<int>> teleports;
++	std::vector<int> waterComponent;
++	std::vector<std::vector<int>> waterTiles;
++	std::map<int, std::vector<int>> boarding; // land tile -> water components
++	std::vector<uint8_t> reached;
++	std::set<TRmgTemplateZoneId> unconnectedZones;
++};
++
++VCMI_LIB_NAMESPACE_END
+diff --git a/lib/rmg/modificators/ConnectionsPlacer.cpp b/lib/rmg/modificators/ConnectionsPlacer.cpp
+index c5fc4e0..b2dc523 100644
+--- a/lib/rmg/modificators/ConnectionsPlacer.cpp
++++ b/lib/rmg/modificators/ConnectionsPlacer.cpp
+@@ -158,12 +158,28 @@ void ConnectionsPlacer::selfSideDirectConnection(const rmg::ZoneConnection & con
+ 	{
+ 		if (connection.getConnectionType() == rmg::EConnectionType::WIDE)
+ 		{
+-			for (auto borderPos : directConnectionIterator->second)
++			// A wide connection is open land along the common border, not a
++			// single gap: several passages, a few tiles apart
++			const auto & commonBorder = directConnectionIterator->second;
++			const size_t maxPassages = std::clamp<size_t>(commonBorder.size() / 8, 1, 5);
++			const int passageSpacing = 6;
++			std::vector<int3> passages;
++
++			for (auto borderPos : commonBorder)
+ 			{
+ 				//TODO: Refactor common code with direct connection
+ 				int3 potentialPos = zone.areaPossible()->nearest(borderPos);
+ 				assert(borderPos != potentialPos);
+ 
++				bool tooClose = false;
++				for (const auto & passage : passages)
++				{
++					if (passage.dist2dSQ(potentialPos) < passageSpacing * passageSpacing)
++						tooClose = true;
++				}
++				if (tooClose)
++					continue;
++
+ 				auto safetyGap = rmg::Area({ potentialPos });
+ 				safetyGap.unite(safetyGap.getBorderOutside());
+ 				safetyGap.intersect(zone.areaPossible().get());
+@@ -197,7 +213,9 @@ void ConnectionsPlacer::selfSideDirectConnection(const rmg::ZoneConnection & con
+ 							otherZone->getModificator<ObjectManager>()->updateDistances(potentialPos);
+ 
+ 							success = true;
+-							break;
++							passages.push_back(potentialPos);
++							if (passages.size() >= maxPassages)
++								break;
+ 						}
+ 					}
+ 				}
+diff --git a/lib/rmg/modificators/ObjectManager.cpp b/lib/rmg/modificators/ObjectManager.cpp
+index d8e0374..5b5d61b 100644
+--- a/lib/rmg/modificators/ObjectManager.cpp
++++ b/lib/rmg/modificators/ObjectManager.cpp
+@@ -443,6 +443,7 @@ bool ObjectManager::createRequiredObjects()
+ 	logGlobal->trace("Creating required objects");
+ 	
+ 	RecursiveLock lock(externalAccessMutex); //In case someone adds more objects
++	bool allPlaced = true;
+ 	for(const auto & objInfo : requiredObjects)
+ 	{
+ 		rmg::Object rmgObject(objInfo.obj);
+@@ -454,8 +455,12 @@ bool ObjectManager::createRequiredObjects()
+ 		
+ 		if(!path.valid())
+ 		{
++			// Go on with the other required objects (the other end of a
++			// monolith pair, mines...): the map check will report what is missing
+ 			logGlobal->error("Failed to fill zone %d due to lack of space", zone.getId());
+-			return false;
++			rmgObject.clear();
++			allPlaced = false;
++			continue;
+ 		}
+ 
+ 		placeObject(rmgObject, guarded, true, objInfo.createRoad);
+@@ -505,7 +510,9 @@ bool ObjectManager::createRequiredObjects()
+ 		if(!path.valid())
+ 		{
+ 			logGlobal->error("Failed to fill zone %d due to lack of space", zone.getId());
+-			return false;
++			rmgObject.clear();
++			allPlaced = false;
++			continue;
+ 		}
+ 		
+ 		zone.connectPath(path);
+@@ -562,7 +569,7 @@ bool ObjectManager::createRequiredObjects()
+ 	nearbyObjects.clear();
+ 	instantObjects.clear();
+ 	
+-	return true;
++	return allPlaced;
+ }
+ 
+ void ObjectManager::placeObject(rmg::Object & object, bool guarded, bool updateDistance, bool createRoad/* = false*/)
+diff --git a/lib/rmg/modificators/ObstaclePlacer.cpp b/lib/rmg/modificators/ObstaclePlacer.cpp
+index 3a0f2b7..e141359 100644
+--- a/lib/rmg/modificators/ObstaclePlacer.cpp
++++ b/lib/rmg/modificators/ObstaclePlacer.cpp
+@@ -26,6 +26,7 @@
+ #include "../../mapping/ObstacleProxy.h"
+ #include "../../mapObjects/CGObjectInstance.h"
+ #include "../../mapObjects/ObstacleSetHandler.h"
++#include "../../mapObjects/ObjectTemplate.h"
+ 
+ VCMI_LIB_NAMESPACE_BEGIN
+ 
+@@ -67,9 +68,13 @@ void ObstaclePlacer::process()
+ 		areaPossible->subtract(blockedArea);
+ 
+ 		prohibitedArea = zone.freePaths() + areaUsed + manager->getVisitableArea();
++		// Roads run through open land, not through a slit in the forest
++		rmg::Area roadside;
+ 		if (auto * rp = zone.getModificator<RoadPlacer>())
+ 		{
+ 			prohibitedArea.unite(rp->getRoads());
++			roadside = rp->getRoads();
++			roadside.unite(roadside.getBorderOutside());
+ 		}
+ 
+ 		//Progressively block tiles, but make sure they don't seal any gap between blocks
+@@ -79,6 +84,9 @@ void ObstaclePlacer::process()
+ 			toBlock.clear();
+ 			for (const auto& tile : areaPossible->getTilesVector())
+ 			{
++				if (roadside.contains(tile))
++					continue;
++
+ 				rmg::Area neighbors;
+ 				rmg::Area t;
+ 				t.add(tile);
+@@ -112,6 +120,7 @@ void ObstaclePlacer::process()
+ 		prohibitedArea.unite(areaPossible.get());
+ 	}
+ 
++	measureTerrain();
+ 	auto objs = createObstacles(zone.getRand(), map.mapInstance->cb);
+ 	mapProxy->insertObjects(objs);
+ }
+@@ -147,8 +156,116 @@ std::pair<bool, bool> ObstaclePlacer::verifyCoverage(const int3 & t) const
+ 	return {map.shouldBeBlocked(t), zone.areaPossible()->contains(t)};
+ }
+ 
++void ObstaclePlacer::measureTerrain()
++{
++	// Breadth-first distances over the zone, 4-connected; -1 outside
++	const size_t size = map.width() * map.height() * map.levels();
++	placedTypes.assign(size, ObstacleSet::INVALID);
++	auto measure = [this, size](const rmg::Area & from, const rmg::Area & within, std::vector<int> & result)
++	{
++		result.assign(size, -1);
++		std::deque<int3> queue;
++		for(const auto & t : from.getTilesVector())
++		{
++			result[tileIndex(t)] = 0;
++			queue.push_back(t);
++		}
++		while(!queue.empty())
++		{
++			auto t = queue.front();
++			queue.pop_front();
++			map.foreachDirectNeighbour(t, [&](int3 & n)
++			{
++				if(result[tileIndex(n)] < 0 && within.contains(n))
++				{
++					result[tileIndex(n)] = result[tileIndex(t)] + 1;
++					queue.push_back(n);
++				}
++			});
++		}
++	};
++
++	auto area = zone.area();
++	// The zone's outer tiles, and the map's edge
++	rmg::Area edge(area->getBorder());
++	edge.unite(area->getSubarea([this](const int3 & t)
++	{
++		return t.x <= 1 || t.y <= 1 || t.x >= map.width() - 2 || t.y >= map.height() - 2;
++	}));
++	measure(edge, area.get(), borderDistance);
++
++	// Depth into the ground to be covered with obstacles
++	rmg::Area open = area->getSubarea([this](const int3 & t)
++	{
++		return !blockedArea.contains(t);
++	});
++	measure(open, blockedArea, depth);
++}
++
++size_t ObstaclePlacer::tileIndex(const int3 & t) const
++{
++	return (t.z * map.height() + t.y) * map.width() + t.x;
++}
++
++int ObstaclePlacer::obstaclePreference(const ObjectTemplate & temp, const rmg::Area & objArea) const
++{
++	if(zone.getType() == ETemplateZoneType::WATER)
++		return 0;
++
++	auto value = [this](const std::vector<int> & m, const int3 & t, int fallback)
++	{
++		int v = m.empty() ? -1 : m[tileIndex(t)];
++		return v < 0 ? fallback : v;
++	};
++
++	auto type = getObstacleType(temp);
++	const auto & tiles = objArea.getTilesVector();
++
++	if(type == ObstacleSet::MOUNTAINS)
++	{
++		// Mountains make ridges along the zone's edge, or the heart of a wide
++		// blocked mass; not a random wall in the middle of open land
++		for(const auto & t : tiles)
++		{
++			if(value(borderDistance, t, 0) > 3 && value(depth, t, 0) < 3)
++				return -1;
++		}
++	}
++
++	int preference = 0;
++	if(type == ObstacleSet::MOUNTAINS || type == ObstacleSet::TREES || type == ObstacleSet::LAKES)
++	{
++		// Like next to like: forests grow together, mountains line up
++		int alike = 0;
++		for(const auto & t : objArea.getBorderOutside())
++		{
++			if(map.isOnMap(t) && !placedTypes.empty() && placedTypes[tileIndex(t)] == type)
++				alike++;
++		}
++		preference += std::min(alike, 3);
++	}
++	if(type == ObstacleSet::TREES)
++	{
++		// Forests inside the zone rather than on its edge
++		bool inside = true;
++		for(const auto & t : tiles)
++			if(value(borderDistance, t, 0) <= 2)
++				inside = false;
++		if(inside)
++			preference += 1;
++	}
++	return preference;
++}
++
+ void ObstaclePlacer::postProcess(const rmg::Object & object)
+ {
++	{
++		auto type = getObstacleType(*object.instances().front()->object().appearance);
++		for(const auto & t : object.getArea().getTilesVector())
++			if(!placedTypes.empty() && map.isOnMap(t))
++				placedTypes[tileIndex(t)] = type;
++	}
++
+ 	//river processing
+ 	riverManager = zone.getModificator<RiverPlacer>();
+ 	if(riverManager)
+diff --git a/lib/rmg/modificators/ObstaclePlacer.h b/lib/rmg/modificators/ObstaclePlacer.h
+index 16f79d7..e9be61f 100644
+--- a/lib/rmg/modificators/ObstaclePlacer.h
++++ b/lib/rmg/modificators/ObstaclePlacer.h
+@@ -36,9 +36,18 @@ public:
+ 	void postProcess(const rmg::Object & object) override;
+ 	
+ 	bool isProhibited(const rmg::Area & objArea) const override;
++
++	int obstaclePreference(const ObjectTemplate & temp, const rmg::Area & objArea) const override;
+ 	
+ private:
++	/// Distances that shape the landscape: from the zone's edge, and into blocked ground
++	void measureTerrain();
++
+ 	rmg::Area prohibitedArea;
++	size_t tileIndex(const int3 & t) const;
++	std::vector<int> borderDistance;
++	std::vector<int> depth;
++	std::vector<ObstacleSet::EObstacleType> placedTypes;
+ 	RiverPlacer * riverManager;
+ 	ObjectManager * manager;
+ };
+diff --git a/lib/rmg/modificators/TownPlacer.cpp b/lib/rmg/modificators/TownPlacer.cpp
+index f3df308..7b3e9b3 100644
+--- a/lib/rmg/modificators/TownPlacer.cpp
++++ b/lib/rmg/modificators/TownPlacer.cpp
+@@ -177,13 +177,18 @@ int3 TownPlacer::placeMainTown(ObjectManager & manager, std::shared_ptr<CGTownIn
+ 	int3 position(-1, -1, -1);
+ 	{
+ 		Zone::Lock lock(zone.areaMutex);
+-		position = manager.findPlaceForObject(zone.areaPossible().get(), rmgObject, [this](const int3& t)
++		// The object stands at the tested position while it is weighted:
++		// put the town's gate in the centre of the zone. (Moving the town
++		// after the search could put it into water or outside the zone.)
++		position = manager.findPlaceForObject(zone.areaPossible().get(), rmgObject, [this, &rmgObject](const int3& t)
+ 			{
+-				float distance = zone.getPos().dist2dSQ(t);
++				float distance = zone.getPos().dist2dSQ(rmgObject.getVisitablePosition());
+ 				return 100000.f - distance; //some big number
+ 			}, ObjectManager::OptimizeType::WEIGHT);
+ 	}
+-	rmgObject.setPosition(position + int3(2, 2, 0)); //place visitable tile in the exact center of a zone
++	if(!position.isValid())
++		throw rmgException(boost::str(boost::format("Cannot place the main town in zone %d") % zone.getId()));
++	rmgObject.setPosition(position);
+ 	manager.placeObject(rmgObject, false, true, true);
+ 	cleanupBoundaries(rmgObject);
+ 	zone.setPos(rmgObject.getVisitablePosition()); //roads lead to main town
+diff --git a/lib/rmg/modificators/WaterProxy.cpp b/lib/rmg/modificators/WaterProxy.cpp
+index 6d8f527..35d622c 100644
+--- a/lib/rmg/modificators/WaterProxy.cpp
++++ b/lib/rmg/modificators/WaterProxy.cpp
+@@ -165,7 +165,7 @@ RouteInfo WaterProxy::waterRoute(Zone & dst)
+ 			}
+ 
+ 			//Don't place shipyard or boats on the very small lake
+-			if (lake.area.getTilesVector().size() < 25)
++			if (lake.area.getTilesVector().size() < MIN_LAKE_FOR_BOATS)
+ 			{
+ 				logGlobal->info("Skipping very small lake at zone %d", dst.getId());
+ 				continue;
+@@ -225,6 +225,10 @@ bool WaterProxy::waterKeepConnection(const rmg::ZoneConnection & connection, boo
+ 	RecursiveLock lock(externalAccessMutex);
+ 	for(auto & lake : lakes)
+ 	{
++		// waterRoute() puts no boats on small lakes: such a lake connects nothing
++		if(lake.area.getTilesVector().size() < MIN_LAKE_FOR_BOATS)
++			continue;
++
+ 		if(lake.neighbourZones.count(zoneA) && lake.neighbourZones.count(zoneB))
+ 		{
+ 			lake.keepConnections.insert(zoneA);
+diff --git a/lib/rmg/modificators/WaterProxy.h b/lib/rmg/modificators/WaterProxy.h
+index df60ffd..ad457e1 100644
+--- a/lib/rmg/modificators/WaterProxy.h
++++ b/lib/rmg/modificators/WaterProxy.h
+@@ -18,6 +18,9 @@ struct RouteInfo;
+ class WaterProxy: public Modificator
+ {
+ public:
++	/// Smaller lakes get no boats or shipyards
++	static constexpr size_t MIN_LAKE_FOR_BOATS = 25;
++
+ 	MODIFICATOR(WaterProxy);
+ 	
+ 	//subclass to store disconnected parts of water zone
