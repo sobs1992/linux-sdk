@@ -37,18 +37,18 @@ game 515 ms -> ~400 ms; opening the new game list 2.1 s -> 0.96 s, again
 Upstream: not submitted (only keeping images is specific to the SDK)
 Signed-off-by: Sobs <antohasobne@gmail.com>
 ---
- client/lobby/SelectionTab.cpp      | 105 +++++++++++++++++++++++++++--
- client/lobby/SelectionTab.h        |  12 +++-
+ client/lobby/SelectionTab.cpp      | 116 ++++++++++++++++++++++++++++-
+ client/lobby/SelectionTab.h        |  12 ++-
  client/mainmenu/CMainMenu.cpp      |   6 ++
- client/media/CSoundHandler.cpp     |  94 ++++++++++++++++++++++++--
- client/render/CAnimation.cpp       |  34 +++++++---
+ client/media/CSoundHandler.cpp     |  94 +++++++++++++++++++++--
+ client/render/CAnimation.cpp       |  34 ++++++---
  client/render/CAnimation.h         |  11 ++-
- client/renderSDL/RenderHandler.cpp |  72 +++++++++++++++++---
- client/renderSDL/RenderHandler.h   |  15 ++++-
- 8 files changed, 313 insertions(+), 36 deletions(-)
+ client/renderSDL/RenderHandler.cpp |  72 ++++++++++++++++--
+ client/renderSDL/RenderHandler.h   |  15 +++-
+ 8 files changed, 324 insertions(+), 36 deletions(-)
 
 diff --git a/client/lobby/SelectionTab.cpp b/client/lobby/SelectionTab.cpp
-index 848aff7..5d9d518 100644
+index 848aff7..5b9de1f 100644
 --- a/client/lobby/SelectionTab.cpp
 +++ b/client/lobby/SelectionTab.cpp
 @@ -38,9 +38,12 @@
@@ -76,7 +76,7 @@ index 848aff7..5d9d518 100644
  				break;
  			}
  
-@@ -1028,10 +1028,95 @@ size_t SelectionTab::getHiddenIncompatibleMapsCount() const
+@@ -1028,10 +1028,106 @@ size_t SelectionTab::getHiddenIncompatibleMapsCount() const
  	return hiddenIncompatibleMapsCount;
  }
  
@@ -87,16 +87,27 @@ index 848aff7..5d9d518 100644
 +/// game list read all of them whenever it opened, a second on the ODROID-GO
 +/// Advance. prefetchMaps() reads them in the background at the main menu.
 +/// nullptr: the map cannot be read.
-+std::map<ResourcePath, std::shared_ptr<ElementInfo>> readMaps;
-+std::future<void> mapPrefetch;
-+std::mutex readMapsMutex;
++struct ReadMaps
++{
++	std::map<ResourcePath, std::shared_ptr<ElementInfo>> maps;
++	std::future<void> prefetch;
++	std::mutex mutex;
++};
++
++/// Never destroyed: a map header takes its texts out of LIBRARY when it
++/// goes, and at exit LIBRARY goes first (the game crashed on quitting)
++ReadMaps & readMaps()
++{
++	static auto * state = new ReadMaps;
++	return *state;
++}
 +
 +std::shared_ptr<ElementInfo> readMap(const ResourcePath & file)
 +{
 +	{
-+		std::scoped_lock lock(readMapsMutex);
-+		auto found = readMaps.find(file);
-+		if(found != readMaps.end())
++		std::scoped_lock lock(readMaps().mutex);
++		auto found = readMaps().maps.find(file);
++		if(found != readMaps().maps.end())
 +			return found->second;
 +	}
 +
@@ -113,8 +124,8 @@ index 848aff7..5d9d518 100644
 +		mapInfo = nullptr;
 +	}
 +
-+	std::scoped_lock lock(readMapsMutex);
-+	readMaps[file] = mapInfo;
++	std::scoped_lock lock(readMaps().mutex);
++	readMaps().maps[file] = mapInfo;
 +	return mapInfo;
 +}
 +
@@ -122,8 +133,8 @@ index 848aff7..5d9d518 100644
 +{
 +	std::future<void> prefetch;
 +	{
-+		std::scoped_lock lock(readMapsMutex);
-+		prefetch = std::move(mapPrefetch);
++		std::scoped_lock lock(readMaps().mutex);
++		prefetch = std::move(readMaps().prefetch);
 +	}
 +	if(prefetch.valid())
 +		prefetch.wait();
@@ -135,16 +146,16 @@ index 848aff7..5d9d518 100644
 +	if(!BareAppLink::get())
 +		return;
 +	{
-+		std::scoped_lock lock(readMapsMutex);
-+		if(mapPrefetch.valid() || !readMaps.empty())
++		std::scoped_lock lock(readMaps().mutex);
++		if(readMaps().prefetch.valid() || !readMaps().maps.empty())
 +			return;
 +	}
 +
 +	// the file lists are made here, in the main thread: only the headers
 +	// are read in the background, as VCMI reads them in its network thread
 +	auto files = getNewGameMaps();
-+	std::scoped_lock lock(readMapsMutex);
-+	mapPrefetch = std::async(std::launch::async, [files = std::move(files)]()
++	std::scoped_lock lock(readMaps().mutex);
++	readMaps().prefetch = std::async(std::launch::async, [files = std::move(files)]()
 +	{
 +		setThreadName("prefetchMaps");
 +		for(const auto & file : files)
@@ -172,7 +183,7 @@ index 848aff7..5d9d518 100644
  	for(auto & file : files)
  	{
  		try
-@@ -1193,6 +1278,18 @@ void SelectionTab::parseCampaigns(const std::unordered_set<ResourcePath> & files
+@@ -1193,6 +1289,18 @@ void SelectionTab::parseCampaigns(const std::unordered_set<ResourcePath> & files
  	}
  }
  
