@@ -12,7 +12,9 @@ D-pad moves the magnifier off the cursor (once the stick moves, the cursor
 comes into view at the edge it was beyond), or in the overview scrolls
 the adventure map wherever the cursor is; the map
 scrolls at a screen border only while the stick pushes that way, since
-the stick leaves the cursor there.
+the stick leaves the cursor there. F1 and F2, held, are the keyboard's
+Ctrl and Shift (a click on a stack splits it as in HotA: one creature
+off, into equal parts); F3 cancels, F4 opens the options.
 
 The link also sets what a handheld needs: quiet logging (the default
 traces into a file on the SD card), no second stick dead zone. And it removes per-frame and per-step work that a Cortex-A35
@@ -46,17 +48,17 @@ Signed-off-by: Sobs <antohasobne@gmail.com>
  client/CMakeLists.txt                         |   8 +
  client/HeroMovementController.cpp             |  20 +-
  client/HeroMovementController.h               |   3 +
- client/adventureMap/AdventureMapInterface.cpp |  25 ++
+ client/adventureMap/AdventureMapInterface.cpp |  25 +
  client/adventureMap/CMinimap.cpp              |  19 +
- client/eventsSDL/InputHandler.cpp             |   9 +
- client/renderSDL/BareAppLink.cpp              | 441 ++++++++++++++++++++++++
- client/renderSDL/BareAppLink.h                |  83 +++++
+ client/eventsSDL/InputHandler.cpp             |  21 +
+ client/renderSDL/BareAppLink.cpp              | 445 ++++++++++++++++++
+ client/renderSDL/BareAppLink.h                |  90 ++++
  client/renderSDL/ScreenHandler.cpp            |  23 +-
  clientapp/EntryPoint.cpp                      |   8 +
  lib/GameLibrary.cpp                           |  15 +
  lib/modding/ModManager.cpp                    |   5 +
- lib/texts/TextOperations.cpp                  |  22 ++
- 13 files changed, 677 insertions(+), 4 deletions(-)
+ lib/texts/TextOperations.cpp                  |  22 +
+ 13 files changed, 700 insertions(+), 4 deletions(-)
 
 diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
 index 232538e..df3bfe6 100644
@@ -223,7 +225,7 @@ index 15ef56c..c5df6a0 100644
  	redraw();
  }
 diff --git a/client/eventsSDL/InputHandler.cpp b/client/eventsSDL/InputHandler.cpp
-index da1f40c..4e7f045 100644
+index da1f40c..ce07b50 100644
 --- a/client/eventsSDL/InputHandler.cpp
 +++ b/client/eventsSDL/InputHandler.cpp
 @@ -11,6 +11,10 @@
@@ -249,12 +251,43 @@ index da1f40c..4e7f045 100644
  	while(1 == SDL_PollEvent(&ev))
  	{
  		preprocessEvent(ev);
+@@ -395,11 +404,19 @@ void InputHandler::fetchEvents()
+ 
+ bool InputHandler::isKeyboardCmdDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get(); link && link->ctrlDown())
++		return true;
++#endif
+ 	return keyboardHandler->isKeyboardCmdDown();
+ }
+ 
+ bool InputHandler::isKeyboardCtrlDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get(); link && link->ctrlDown())
++		return true;
++#endif
+ 	return keyboardHandler->isKeyboardCtrlDown();
+ }
+ 
+@@ -410,6 +427,10 @@ bool InputHandler::isKeyboardAltDown() const
+ 
+ bool InputHandler::isKeyboardShiftDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get(); link && link->shiftDown())
++		return true;
++#endif
+ 	return keyboardHandler->isKeyboardShiftDown();
+ }
+ 
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
 new file mode 100644
-index 0000000..ec68bbc
+index 0000000..c461b3b
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.cpp
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,445 @@
 +/*
 + * BareAppLink.cpp, part of VCMI engine
 + *
@@ -620,17 +653,21 @@ index 0000000..ec68bbc
 +	// x, y: mouse left and right; a: accept, open the selected hero;
 +	// b: cancel; back: end turn; start: options; left shoulder: next hero.
 +	// The OGA has F1..F6 instead of Start and Select (F5, F6 are bare_app's);
-+	// bare_app keeps L2 and R2 for the volume.
++	// bare_app keeps L2 and R2 for the volume. F1 and F2 are held as the
++	// keyboard's Ctrl and Shift: a click on a stack then splits it as in
++	// HotA (one creature off, into equal parts).
 +	switch(button)
 +	{
 +		case GP_A:      pushButton(SDL_CONTROLLER_BUTTON_X, pressed); break;
 +		case GP_Y:      pushButton(SDL_CONTROLLER_BUTTON_Y, pressed); break;
 +		case GP_B:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
 +		case GP_SELECT:
-+		case GP_F2:     pushButton(SDL_CONTROLLER_BUTTON_B, pressed); break;
++		case GP_F3:     pushButton(SDL_CONTROLLER_BUTTON_B, pressed); break;
 +		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
 +		case GP_START:
-+		case GP_F1:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
++		case GP_F4:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
++		case GP_F1:     ctrl = pressed; break;
++		case GP_F2:     shift = pressed; break;
 +		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
 +		case GP_L1:
 +			if(pressed)
@@ -698,10 +735,10 @@ index 0000000..ec68bbc
 +}
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
 new file mode 100644
-index 0000000..11159e9
+index 0000000..5b8b975
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.h
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,90 @@
 +/*
 + * BareAppLink.h, part of VCMI engine
 + *
@@ -727,7 +764,8 @@ index 0000000..11159e9
 +/// the cursor (magnifier); L1 switches. Gamepad events come back and become
 +/// SDL game controller events, so VCMI's own controller support drives the
 +/// game. The D-pad moves the magnifier, or in the overview scrolls the
-+/// adventure map (elsewhere it swipes, as VCMI's right stick).
++/// adventure map (elsewhere it swipes, as VCMI's right stick). F1 and F2
++/// stand for the Ctrl and Shift keys while held.
 +class BareAppLink
 +{
 +public:
@@ -754,6 +792,10 @@ index 0000000..11159e9
 +	/// swiping meanwhile
 +	Point mapScrollDirection();
 +
++	/// F1 and F2 held: the keyboard's Ctrl and Shift for VCMI
++	bool ctrlDown() const { return ctrl; }
++	bool shiftDown() const { return shift; }
++
 +private:
 +	BareAppLink(game_shm * shm);
 +
@@ -779,6 +821,8 @@ index 0000000..11159e9
 +	bool swiping = false;	///< the D-pad holds VCMI's right stick
 +	uint32_t mapScrollAt = 0;	///< SDL_GetTicks() when the map last asked for the D-pad
 +	Point stick;		///< last left stick values
++	bool ctrl = false;	///< F1 held
++	bool shift = false;	///< F2 held
 +	std::vector<uint32_t> last;	///< the frame published last
 +	uint32_t framesDrawn = 0;
 +	uint32_t framesSent = 0;

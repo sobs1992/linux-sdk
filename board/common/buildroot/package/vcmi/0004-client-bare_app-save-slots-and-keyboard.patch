@@ -16,7 +16,7 @@ of saving. When bare_app runs the client (see 0001):
   numbers) opens an on-screen keyboard over the other half of the
   screen: digits, Russian (when the game is in Russian) and Latin
   letters, capitals, space. The stick's cursor or the D-pad picks a key
-  and A presses it; B is "done", Select cancels, X erases. As on mobile,
+  and A presses it; B is "done", F3 cancels, X erases. As on mobile,
   an input that gets focus by itself does not open it.
 
 Also fixed on the way, for everybody: a text input with its own
@@ -26,20 +26,20 @@ had been over it, since its deactivation dropped its clicks for good.
 Upstream: not applicable (SDK-specific)
 Signed-off-by: Sobs <antohasobne@gmail.com>
 ---
- .../vcmi/Content/config/translations/english.json |   7 +
- .../vcmi/Content/config/translations/russian.json |   7 +
- client/CMakeLists.txt                             |   3 +-
- client/CPlayerInterface.cpp                       |  11 +
- client/eventsSDL/InputHandler.cpp                 |  13 +
- client/lobby/CSavingScreen.cpp                    |  47 ++-
- client/lobby/SelectionTab.cpp                     |  85 ++++-
- client/lobby/SelectionTab.h                       |   5 +
- client/renderSDL/BareAppLink.cpp                  |  43 ++-
- client/renderSDL/BareAppLink.h                    |  15 +-
- client/widgets/CTextInput.cpp                     |  16 +
- client/widgets/CTextInput.h                       |   7 +
- client/windows/BareAppKeyboard.cpp                | 363 ++++++++++++++++++++
- client/windows/BareAppKeyboard.h                  |  69 ++++
+ .../Content/config/translations/english.json  |   7 +
+ .../Content/config/translations/russian.json  |   7 +
+ client/CMakeLists.txt                         |   3 +-
+ client/CPlayerInterface.cpp                   |  11 +
+ client/eventsSDL/InputHandler.cpp             |  13 +
+ client/lobby/CSavingScreen.cpp                |  47 ++-
+ client/lobby/SelectionTab.cpp                 |  85 +++-
+ client/lobby/SelectionTab.h                   |   5 +
+ client/renderSDL/BareAppLink.cpp              |  43 ++-
+ client/renderSDL/BareAppLink.h                |  15 +-
+ client/widgets/CTextInput.cpp                 |  16 +
+ client/widgets/CTextInput.h                   |   7 +
+ client/windows/BareAppKeyboard.cpp            | 363 ++++++++++++++++++
+ client/windows/BareAppKeyboard.h              |  69 ++++
  14 files changed, 678 insertions(+), 13 deletions(-)
 
 diff --git a/Mods/vcmi/Content/config/translations/english.json b/Mods/vcmi/Content/config/translations/english.json
@@ -122,7 +122,7 @@ index 81f2505..06d6dbb 100644
  	if(frequency > 0 && cb->getDate() % frequency == 0)
  	{
 diff --git a/client/eventsSDL/InputHandler.cpp b/client/eventsSDL/InputHandler.cpp
-index 4e7f045..8609697 100644
+index ce07b50..06770e6 100644
 --- a/client/eventsSDL/InputHandler.cpp
 +++ b/client/eventsSDL/InputHandler.cpp
 @@ -13,6 +13,7 @@
@@ -133,7 +133,7 @@ index 4e7f045..8609697 100644
  #endif
  
  #include "NotificationHandler.h"
-@@ -435,11 +436,23 @@ void InputHandler::setCursorPosition(const Point & position)
+@@ -447,11 +448,23 @@ void InputHandler::setCursorPosition(const Point & position)
  
  void InputHandler::startTextInput(const Rect & where)
  {
@@ -412,7 +412,7 @@ index de766c7..e0d3814 100644
  	std::unordered_set<ResourcePath> getFiles(std::string dirURI, EResType resType);
  
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
-index ec68bbc..687843f 100644
+index c461b3b..7b7aa4b 100644
 --- a/client/renderSDL/BareAppLink.cpp
 +++ b/client/renderSDL/BareAppLink.cpp
 @@ -15,6 +15,8 @@
@@ -474,16 +474,20 @@ index ec68bbc..687843f 100644
  
  Point BareAppLink::mapScrollDirection()
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
-index 11159e9..801033a 100644
+index 5b8b975..ca4bc86 100644
 --- a/client/renderSDL/BareAppLink.h
 +++ b/client/renderSDL/BareAppLink.h
-@@ -47,9 +47,22 @@ public:
+@@ -48,13 +48,26 @@ public:
  	Point stickDirection() const;
  	/// The D-pad's direction for the adventure map to scroll (overview
  	/// only), called while map scrolling is active: the D-pad stops
 -	/// swiping meanwhile
 +	/// swiping meanwhile. The on-screen keyboard steps with it too.
  	Point mapScrollDirection();
+ 
+ 	/// F1 and F2 held: the keyboard's Ctrl and Shift for VCMI
+ 	bool ctrlDown() const { return ctrl; }
+ 	bool shiftDown() const { return shift; }
  
 +	/// Moves VCMI's cursor, as its own controller cursor moves
 +	static void moveCursor(const Point & position);
@@ -944,7 +948,7 @@ index 0000000..0b888eb
 +}
 diff --git a/client/windows/BareAppKeyboard.h b/client/windows/BareAppKeyboard.h
 new file mode 100644
-index 0000000..de599ef
+index 0000000..60aedf1
 --- /dev/null
 +++ b/client/windows/BareAppKeyboard.h
 @@ -0,0 +1,69 @@
@@ -967,7 +971,7 @@ index 0000000..de599ef
 +/// On-screen keyboard for bare_app: the console has no keyboard. A text
 +/// input opens it when the player clicks it (InputHandler::startTextInput),
 +/// and the keys type into that input. The stick's cursor or the D-pad picks
-+/// a key, A presses it; B is "done", Select cancels, X erases.
++/// a key, A presses it; B is "done", F3 (Select) cancels, X erases.
 +class BareAppKeyboard : public CWindowObject
 +{
 +	enum class Action
