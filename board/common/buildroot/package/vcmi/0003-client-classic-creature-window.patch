@@ -1,0 +1,296 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: classic creature window
+
+Ordinary stacks get the original game's creature window (CRSTKPU):
+portrait, stats, morale/luck, three spell effect boxes in battle,
+dismiss/upgrade/OK buttons and a status bar, as in SoD and HotA.
+Commanders, several upgrades, stack experience and stack artifacts
+keep VCMI's extended window.
+---
+diff -ru a/client/windows/CCreatureWindow.cpp b/client/windows/CCreatureWindow.cpp
+--- a/client/windows/CCreatureWindow.cpp	2026-11-01 08:46:46.603017989 +0100
++++ b/client/windows/CCreatureWindow.cpp	2026-11-01 08:49:51.233029186 +0100
+@@ -777,7 +777,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CStack * stack, bool popup)
+-	: CWindowObject(BORDERED | (popup ? RCLICK_POPUP : 0)),
++	: CWindowObject(BORDERED | PLAYER_COLORED | (popup ? RCLICK_POPUP : 0)),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->stack = stack;
+@@ -790,7 +790,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CCreature * creature, bool popup)
+-	: CWindowObject(BORDERED | (popup ? RCLICK_POPUP : 0)),
++	: CWindowObject(BORDERED | PLAYER_COLORED | (popup ? RCLICK_POPUP : 0)),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->creature = creature;
+@@ -799,7 +799,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CStackInstance * stack, bool popup)
+-	: CWindowObject(BORDERED | (popup ? RCLICK_POPUP : 0)),
++	: CWindowObject(BORDERED | PLAYER_COLORED | (popup ? RCLICK_POPUP : 0)),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->stackNode = stack;
+@@ -811,7 +811,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CStackInstance * stack, std::function<void()> dismiss, const UpgradeInfo & upgradeInfo, std::function<void(CreatureID)> callback)
+-	: CWindowObject(BORDERED),
++	: CWindowObject(BORDERED | PLAYER_COLORED),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->stackNode = stack;
+@@ -831,7 +831,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CCommanderInstance * commander, bool popup)
+-	: CWindowObject(BORDERED | (popup ? RCLICK_POPUP : 0)),
++	: CWindowObject(BORDERED | PLAYER_COLORED | (popup ? RCLICK_POPUP : 0)),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->stackNode = commander;
+@@ -844,7 +844,7 @@
+ }
+ 
+ CStackWindow::CStackWindow(const CCommanderInstance * commander, std::vector<ui32> &skills, std::function<void(ui32)> callback)
+-	: CWindowObject(BORDERED),
++	: CWindowObject(BORDERED | PLAYER_COLORED),
+ 	info(std::make_unique<UnitView>())
+ {
+ 	info->stackNode = commander;
+@@ -872,8 +872,6 @@
+ {
+ 	OBJECT_CONSTRUCTION;
+ 
+-	background = std::make_shared<CFilledTexture>(ImagePath::builtin("DIBOXBCK"), pos);
+-
+ 	if(!info->stackNode)
+ 	{
+ 		//does not contain any propagated bonuses
+@@ -881,6 +879,16 @@
+ 		info->stackNode = fakeNode.get();
+ 	}
+ 
++	if(useClassicLayout())
++	{
++		initBonusesList();
++		initClassic();
++		addUsedEvents(KEYBOARD);
++		return;
++	}
++
++	background = std::make_shared<CFilledTexture>(ImagePath::builtin("DIBOXBCK"), pos);
++
+ 	selectedIcon = nullptr;
+ 	selectedSkill = -1;
+ 	if(info->levelupInfo && !info->levelupInfo->skills.empty())
+@@ -1011,6 +1019,186 @@
+ 	}
+ }
+ 
++bool CStackWindow::useClassicLayout() const
++{
++	// commanders, several upgrades, stack experience and stack artifacts need the extended window
++	if(info->commander || info->levelupInfo)
++		return false;
++	if(info->upgradeInfo && info->upgradeInfo->info.size() > 1)
++		return false;
++	if(GAME->interface())
++	{
++		const auto & gameSettings = GAME->interface()->cb->getSettings();
++		if(gameSettings.getBoolean(EGameSettings::MODULE_STACK_EXPERIENCE) || gameSettings.getBoolean(EGameSettings::MODULE_STACK_ARTIFACT))
++			return false;
++	}
++	return true;
++}
++
++void CStackWindow::initClassic()
++{
++	OBJECT_CONSTRUCTION;
++
++	// positions follow the original game's creature window
++	setBackground(ImagePath::builtin("CRSTKPU"));
++
++	const CCreature * creature = info->creature;
++	const CStack * battleStack = info->stack;
++	const CStackInstance * stackNode = info->stackNode;
++	const auto & texts = LIBRARY->generaltexth;
++
++	auto portrait = std::make_shared<CCreaturePic>(21, 48, creature);
++	if(!fakeNode)
++		portrait->setAmount(info->creatureCount);
++	classicWidgets.push_back(portrait);
++
++	std::vector<std::string> abilities;
++	for(const auto & bonus : activeBonuses)
++		abilities.push_back(bonus.description);
++
++	std::string details = creature->getDescriptionTranslated();
++	if(!abilities.empty())
++		details += (details.empty() ? "" : "\n\n") + boost::algorithm::join(abilities, "\n");
++	classicWidgets.push_back(std::make_shared<LRClickableArea>(Rect(21, 48, 100, 130), [](){}, [details]()
++	{
++		if(!details.empty())
++			CRClickPopup::createAndPush(details);
++	}));
++
++	classicWidgets.push_back(std::make_shared<CLabel>(149, 30, FONT_SMALL, ETextAlignment::CENTER, Colors::YELLOW, info->getName()));
++
++	auto addStat = [this](int row, const std::string & title, int64_t base, int64_t current, bool range)
++	{
++		std::string value = std::to_string(base);
++		if(current != base)
++			value += range ? " - " + std::to_string(current) : " (" + std::to_string(current) + ")";
++
++		classicWidgets.push_back(std::make_shared<CLabel>(155, 48 + row * 19, FONT_SMALL, ETextAlignment::TOPLEFT, Colors::WHITE, title));
++		classicWidgets.push_back(std::make_shared<CLabel>(276, 63 + row * 19, FONT_SMALL, ETextAlignment::BOTTOMRIGHT, Colors::WHITE, value));
++	};
++
++	auto morale = std::make_shared<MoraleLuckBox>(true, Rect(22, 186, 42, 42));
++	auto luck = std::make_shared<MoraleLuckBox>(false, Rect(75, 186, 42, 42));
++	classicWidgets.push_back(morale);
++	classicWidgets.push_back(luck);
++
++	if(battleStack)
++	{
++		const bool shooter = battleStack->isShooter();
++
++		int dmgMultiply = 1;
++		if(battleStack->hasBonusOfType(BonusType::SIEGE_WEAPON))
++		{
++			static const auto bonusSelector =
++				Selector::sourceTypeSel(BonusSource::ARTIFACT).Or(
++				Selector::sourceTypeSel(BonusSource::HERO_BASE_SKILL)).And(
++				Selector::typeSubtype(BonusType::PRIMARY_SKILL, BonusSubtypeID(PrimarySkill::ATTACK)));
++
++			dmgMultiply += battleStack->valOfBonuses(bonusSelector);
++		}
++
++		addStat(0, texts->primarySkillNames[0], creature->getAttack(shooter), battleStack->getAttack(shooter), false);
++		addStat(1, texts->primarySkillNames[1], creature->getDefense(shooter), battleStack->getDefense(shooter), false);
++		if(shooter)
++			addStat(2, texts->allTexts[198], battleStack->shots.total(), battleStack->shots.available(), false);
++		addStat(3, texts->allTexts[199], stackNode->getMinDamage(shooter) * dmgMultiply, battleStack->getMaxDamage(shooter) * dmgMultiply, true);
++		addStat(4, texts->allTexts[388], creature->getMaxHealth(), battleStack->getMaxHealth(), false);
++		addStat(5, texts->allTexts[200], battleStack->getFirstHPleft(), battleStack->getFirstHPleft(), false);
++		addStat(6, texts->zelp[441].first, creature->getMovementRange(), battleStack->getMovementRange(), false);
++
++		morale->set(battleStack);
++		luck->set(battleStack);
++
++		// three boxes right of luck hold the spell effects
++		int printed = 0;
++		for(SpellID effect : battleStack->activeSpells())
++		{
++			const bool hasGraphics = (effect < SpellID::THUNDERBOLT) || (effect >= SpellID::AFTER_LAST);
++			auto spellBonuses = battleStack->getBonuses(Selector::source(BonusSource::SPELL_EFFECT, BonusSourceID(effect)));
++			if(!hasGraphics || spellBonuses->empty())
++				continue;
++
++			int duration = spellBonuses->front()->turnsRemain;
++			MetaString spellText;
++			spellText.appendTextID(LIBRARY->spells()->getById(effect)->getDescriptionTextID(0));
++			spellText.appendRawString("\n");
++			spellText.appendTextID(Languages::getPluralFormTextID(texts->getPreferredLanguage(), duration, "vcmi.battleResultsWindow.spellDurationRemaining"));
++			spellText.replaceNumber(duration);
++
++			Point boxPos(127 + 52 * printed, 186);
++			classicWidgets.push_back(std::make_shared<CAnimImage>(AnimationPath::builtin("SpellInt"), effect + 1, 0, boxPos.x, boxPos.y));
++			classicWidgets.push_back(std::make_shared<LRClickableAreaWText>(Rect(boxPos, Point(48, 42)), spellText.toString(), spellText.toString()));
++			if(++printed >= 3)
++				break;
++		}
++	}
++	else
++	{
++		const bool shooter = stackNode->hasBonusOfType(BonusType::SHOOTER) && stackNode->valOfBonuses(BonusType::SHOTS);
++
++		addStat(0, texts->primarySkillNames[0], creature->getAttack(shooter), stackNode->getAttack(shooter), false);
++		addStat(1, texts->primarySkillNames[1], creature->getDefense(shooter), stackNode->getDefense(shooter), false);
++		if(shooter)
++			addStat(2, texts->allTexts[198], stackNode->valOfBonuses(BonusType::SHOTS), stackNode->valOfBonuses(BonusType::SHOTS), false);
++		addStat(3, texts->allTexts[199], stackNode->getMinDamage(shooter), stackNode->getMaxDamage(shooter), true);
++		addStat(4, texts->allTexts[388], creature->getMaxHealth(), stackNode->getMaxHealth(), false);
++		addStat(6, texts->zelp[441].first, creature->getMovementRange(), stackNode->getMovementRange(), false);
++
++		morale->set(stackNode);
++		luck->set(stackNode);
++	}
++
++	if(info->popupWindow)
++	{
++		// a popup has no buttons: their place shows the abilities
++		auto abilitiesText = std::make_shared<CMultiLineLabel>(Rect(17, 230, 264, 46), FONT_SMALL, ETextAlignment::TOPCENTER, Colors::WHITE, boost::algorithm::join(abilities, ", "));
++		classicWidgets.push_back(abilitiesText);
++		return;
++	}
++
++	if(info->dismissInfo && info->dismissInfo->callback)
++	{
++		auto onDismiss = [this]()
++		{
++			info->dismissInfo->callback();
++			close();
++		};
++		classicWidgets.push_back(std::make_shared<CButton>(Point(21, 237), AnimationPath::builtin("IVIEWCR2"), texts->zelp[445], [onDismiss]()
++		{
++			GAME->interface()->showYesNoDialog(LIBRARY->generaltexth->allTexts[12], onDismiss, nullptr);
++		}, EShortcut::HERO_DISMISS));
++	}
++
++	if(info->upgradeInfo)
++	{
++		const auto & upgradeInfo = info->upgradeInfo.value();
++		CreatureID upgradeTo = upgradeInfo.info.getAvailableUpgrades().front();
++		TResources totalCost = upgradeInfo.info.getAvailableUpgradeCosts().front() * info->creatureCount;
++		auto callback = upgradeInfo.callback;
++
++		auto onUpgrade = [this, callback, upgradeTo]()
++		{
++			callback(upgradeTo);
++			close();
++		};
++		auto onClick = [totalCost, onUpgrade]()
++		{
++			std::vector<std::shared_ptr<CComponent>> resComps;
++			for(TResources::nziterator i(totalCost); i.valid(); i++)
++				resComps.push_back(std::make_shared<CComponent>(ComponentType::RESOURCE, i->resType, i->resVal));
++			GAME->interface()->showYesNoDialog(LIBRARY->generaltexth->allTexts[207], onUpgrade, nullptr, resComps);
++		};
++		auto upgradeButton = std::make_shared<CButton>(Point(76, 237), AnimationPath::builtin("IVIEWCR"), texts->zelp[446], onClick, EShortcut::RECRUITMENT_UPGRADE);
++		upgradeButton->block(!GAME->interface()->cb->getResourceAmount().canAfford(totalCost));
++		classicWidgets.push_back(upgradeButton);
++	}
++
++	classicWidgets.push_back(std::make_shared<CButton>(Point(216, 237), AnimationPath::builtin("IOKAY"), texts->zelp[447], [this](){ close(); }, EShortcut::GLOBAL_RETURN));
++
++	auto statusbarBackground = std::make_shared<CPicture>(CWindowObject::background->getSurface(), Rect(8, pos.h - 26, pos.w - 16, 19), 8, pos.h - 26);
++	statusbar = CGStatusBar::create(statusbarBackground);
++}
++
+ void CStackWindow::initSections()
+ {
+ 	OBJECT_CONSTRUCTION;
+diff -ru a/client/windows/CCreatureWindow.h b/client/windows/CCreatureWindow.h
+--- a/client/windows/CCreatureWindow.h	2026-11-01 08:46:46.603094096 +0100
++++ b/client/windows/CCreatureWindow.h	2026-11-01 08:49:51.233119951 +0100
+@@ -199,6 +199,13 @@
+ 	void initSections();
+ 	void initBonusesList();
+ 
++	// classic layout of the original game (CRSTKPU) for ordinary stacks
++	std::vector<std::shared_ptr<CIntObject>> classicWidgets;
++	std::shared_ptr<CGStatusBar> statusbar;
++
++	bool useClassicLayout() const;
++	void initClassic();
++
+ 	void init();
+ 	void close() override;
+ 	void showStackExperienceDetailsWindow();
