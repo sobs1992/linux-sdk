@@ -7,11 +7,14 @@ client as a game in its own process, with a socket and shared memory
 window, twice the size of bare_app's video layer, stays in memory: after
 each SDL_RenderPresent its content goes to bare_app scaled down 2:1, or a
 1:1 part around the cursor (L1 switches). Gamepad messages become SDL game
-controller events, so VCMI's own controller support drives the game.
+controller events, so VCMI's own controller support drives the game. The
+D-pad moves the magnifier (back to the cursor once the stick moves), or in
+the overview scrolls the adventure map wherever the cursor is; the map
+scrolls at a screen border only while the stick pushes that way, since
+the stick leaves the cursor there.
 
 The link also sets what a handheld needs: quiet logging (the default
-traces into a file on the SD card), bare_app's language, no second stick
-dead zone. And it removes per-frame and per-step work that a Cortex-A35
+traces into a file on the SD card), no second stick dead zone. And it removes per-frame and per-step work that a Cortex-A35
 cannot afford, found by profiling on the device:
 - the screen texture has the window's format and is not cleared first,
   so presenting is a copy instead of a per-pixel blend plus a fill;
@@ -20,6 +23,18 @@ cannot afford, found by profiling on the device:
   adventure map (both ran under the interface lock and stopped the walk
   at every tile).
 
+Languages, without VCMI's launcher:
+- bare_app's language (BARE_APP_LANG) is set right after the settings
+  load, before the mods: set later, the translation mods followed it only
+  at the next start;
+- a translation for another language than the selected one stays enabled
+  (it is not loaded): VCMI turned it off for good, and only its launcher
+  turns it back on;
+- text that should be Western (CP1252) but is mostly Cyrillic letters of
+  CP1251 is read as CP1251. Maps and campaigns do not say their encoding
+  and VCMI reads them with the selected language's one, so a Russian
+  edition's maps turned into garbage in English.
+
 Built only with -DVCMI_BARE_APP_IPC=<bare_app's src directory>; the
 client finds out at run time whether bare_app started it, and behaves
 as upstream otherwise.
@@ -27,16 +42,20 @@ as upstream otherwise.
 Upstream: not applicable (SDK-specific)
 Signed-off-by: Sobs <antohasobne@gmail.com>
 ---
- client/CMakeLists.txt              |   8 +
- client/HeroMovementController.cpp  |  20 +-
- client/HeroMovementController.h    |   3 +
- client/adventureMap/CMinimap.cpp   |  19 ++
- client/eventsSDL/InputHandler.cpp  |   9 +
- client/renderSDL/BareAppLink.cpp   | 368 +++++++++++++++++++++++++++++++++++++
- client/renderSDL/BareAppLink.h     |  62 +++++++
- client/renderSDL/ScreenHandler.cpp |  23 ++-
- clientapp/EntryPoint.cpp           |   8 +
- 9 files changed, 516 insertions(+), 4 deletions(-)
+ client/CMakeLists.txt                         |   8 +
+ client/HeroMovementController.cpp             |  20 +-
+ client/HeroMovementController.h               |   3 +
+ client/adventureMap/AdventureMapInterface.cpp |  25 ++
+ client/adventureMap/CMinimap.cpp              |  19 ++
+ client/eventsSDL/InputHandler.cpp             |   9 +
+ client/renderSDL/BareAppLink.cpp              | 428 ++++++++++++++++++++++++++
+ client/renderSDL/BareAppLink.h                |  82 +++++
+ client/renderSDL/ScreenHandler.cpp            |  23 +-
+ clientapp/EntryPoint.cpp                      |   8 +
+ lib/GameLibrary.cpp                           |  15 +
+ lib/modding/ModManager.cpp                    |   5 +
+ lib/texts/TextOperations.cpp                  |  22 ++
+ 13 files changed, 663 insertions(+), 4 deletions(-)
 
 diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
 index 232538e..df3bfe6 100644
@@ -123,6 +142,49 @@ index badd1d1..850f629 100644
  	const CGHeroInstance * currentlyMovingHero = nullptr;
  	AudioPath currentMovementSoundName;
  	int currentMovementSoundChannel = -1;
+diff --git a/client/adventureMap/AdventureMapInterface.cpp b/client/adventureMap/AdventureMapInterface.cpp
+index d8037f0..95fbeed 100644
+--- a/client/adventureMap/AdventureMapInterface.cpp
++++ b/client/adventureMap/AdventureMapInterface.cpp
+@@ -34,6 +34,9 @@
+ #include "../render/IImage.h"
+ #include "../render/IRenderHandler.h"
+ #include "../render/IScreenHandler.h"
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
+ #include "../PlayerLocalState.h"
+ #include "../CPlayerInterface.h"
+ 
+@@ -229,6 +232,28 @@ void AdventureMapInterface::handleMapScrollingUpdate(uint32_t timePassed)
+ 	if (cursorPosition.y > ENGINE->screenDimensions().y - borderScrollWidth)
+ 		scrollDirection.y = +1;
+ 
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++	{
++		// The stick leaves the cursor at the border: scroll only while it
++		// still pushes that way
++		const Point push = link->stickDirection();
++		if(scrollDirection.x != push.x)
++			scrollDirection.x = 0;
++		if(scrollDirection.y != push.y)
++			scrollDirection.y = 0;
++
++		// The D-pad scrolls the map wherever the cursor is, slower
++		if(shortcuts->optionMapScrollingActive())
++		{
++			const Point dpad = link->mapScrollDirection();
++			const auto dpadDistance = static_cast<int32_t>(scrollSpeedPixels * BareAppLink::dpadScrollShare * timePassed / 1000);
++			if(dpad != Point(0, 0))
++				widget->getMapView()->onMapScrolled(dpad * std::max(dpadDistance, 1));
++		}
++	}
++#endif
++
+ 	Point scrollDelta = scrollDirection * scrollDistance;
+ 
+ 	bool cursorInScrollArea = scrollDelta != Point(0,0);
 diff --git a/client/adventureMap/CMinimap.cpp b/client/adventureMap/CMinimap.cpp
 index 15ef56c..c5df6a0 100644
 --- a/client/adventureMap/CMinimap.cpp
@@ -188,10 +250,10 @@ index da1f40c..4e7f045 100644
  		preprocessEvent(ev);
 diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
 new file mode 100644
-index 0000000..fb4e74e
+index 0000000..8b35d08
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.cpp
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,428 @@
 +/*
 + * BareAppLink.cpp, part of VCMI engine
 + *
@@ -206,7 +268,6 @@ index 0000000..fb4e74e
 +
 +#include "../GameEngine.h"
 +#include "../../lib/CConfigHandler.h"
-+#include "../../lib/texts/Languages.h"
 +
 +#include <SDL.h>
 +#include <sys/mman.h>
@@ -224,6 +285,14 @@ index 0000000..fb4e74e
 +constexpr int magnifierMargin = 48;
 +/// Cursor images are smaller than this, hot spot included
 +constexpr int cursorReach = 64;
++/// D-pad: the magnifier's speed, window pixels per second
++constexpr int magnifierSpeed = 480;
++/// D-pad: VCMI's right stick held this far (it squares that: ~0.3 of full speed)
++constexpr int dpadSwipe = SDL_JOYSTICK_AXIS_MAX * 55 / 100;
++/// The adventure map asked for the D-pad this recently: it is on screen
++constexpr uint32_t mapScrollHoldMs = 200;
++/// The stick is pushed (for border scrolling) past this
++constexpr int stickPush = SDL_JOYSTICK_AXIS_MAX / 4;
 +constexpr uint32_t statsPeriodMs = 10000;
 +
 +constexpr uint32_t dpadBits = GP_BIT(GP_UP) | GP_BIT(GP_DOWN) | GP_BIT(GP_LEFT) | GP_BIT(GP_RIGHT);
@@ -287,19 +356,6 @@ index 0000000..fb4e74e
 +		}
 +	}
 +
-+	// bare_app's language ("ru"): VCMI's and its mods' texts
-+	if(const char * lang = std::getenv("BARE_APP_LANG"))
-+	{
-+		for(const auto & language : Languages::getLanguageList())
-+		{
-+			if(language.tagIETF == lang && language.selectable)
-+			{
-+				Settings general = settings.write["general"];
-+				general["language"].String() = language.identifier;
-+			}
-+		}
-+	}
-+
 +	Settings resolution = settings.write["video"]["resolution"];
 +	resolution["width"].Float() = 2 * shm->width;
 +	resolution["height"].Float() = 2 * shm->height;
@@ -324,16 +380,27 @@ index 0000000..fb4e74e
 +
 +	if(magnifier)
 +	{
-+		// Keep the cursor inside, a margin from the edges
++		moveMagnifier();
 +		const Point & cursor = ENGINE->getCursorPosition();
-+		if(cursor.x < viewport.x + magnifierMargin)
-+			viewport.x = cursor.x - magnifierMargin;
-+		if(cursor.x > viewport.x + w - magnifierMargin)
-+			viewport.x = cursor.x - w + magnifierMargin;
-+		if(cursor.y < viewport.y + magnifierMargin)
-+			viewport.y = cursor.y - magnifierMargin;
-+		if(cursor.y > viewport.y + h - magnifierMargin)
-+			viewport.y = cursor.y - h + magnifierMargin;
++		if(rejoin)
++		{
++			// Back to the cursor: around it, unless it is in view already
++			rejoin = false;
++			if(cursor.x < viewport.x || cursor.x >= viewport.x + w || cursor.y < viewport.y || cursor.y >= viewport.y + h)
++				viewport = cursor - Point(w / 2, h / 2);
++		}
++		if(!detached)
++		{
++			// Keep the cursor inside, a margin from the edges
++			if(cursor.x < viewport.x + magnifierMargin)
++				viewport.x = cursor.x - magnifierMargin;
++			if(cursor.x > viewport.x + w - magnifierMargin)
++				viewport.x = cursor.x - w + magnifierMargin;
++			if(cursor.y < viewport.y + magnifierMargin)
++				viewport.y = cursor.y - magnifierMargin;
++			if(cursor.y > viewport.y + h - magnifierMargin)
++				viewport.y = cursor.y - h + magnifierMargin;
++		}
 +		viewport.x = std::clamp(viewport.x, 0, std::max(srcW - w, 0));
 +		viewport.y = std::clamp(viewport.y, 0, std::max(srcH - h, 0));
 +
@@ -472,14 +539,53 @@ index 0000000..fb4e74e
 +	SDL_PushEvent(&event);
 +}
 +
-+/// The D-pad scrolls the map: VCMI does that with the right stick, which
-+/// the OGA does not have
++Point BareAppLink::dpadDirection() const
++{
++	return Point(!!(dpad & GP_BIT(GP_RIGHT)) - !!(dpad & GP_BIT(GP_LEFT)),
++		!!(dpad & GP_BIT(GP_DOWN)) - !!(dpad & GP_BIT(GP_UP)));
++}
++
++/// Outside the adventure map the D-pad swipes (lists, sliders): VCMI does
++/// that with the right stick, which the OGA does not have. The magnifier
++/// and the adventure map move with the D-pad by themselves.
 +void BareAppLink::updateDpad()
 +{
-+	const int x = !!(dpad & GP_BIT(GP_RIGHT)) - !!(dpad & GP_BIT(GP_LEFT));
-+	const int y = !!(dpad & GP_BIT(GP_DOWN)) - !!(dpad & GP_BIT(GP_UP));
-+	pushAxis(SDL_CONTROLLER_AXIS_RIGHTX, x * SDL_JOYSTICK_AXIS_MAX);
-+	pushAxis(SDL_CONTROLLER_AXIS_RIGHTY, y * SDL_JOYSTICK_AXIS_MAX);
++	const bool swipe = dpad && !magnifier && SDL_GetTicks() - mapScrollAt > mapScrollHoldMs;
++	if(!swipe && !swiping)
++		return;
++	const Point direction = swipe ? dpadDirection() : Point(0, 0);
++	pushAxis(SDL_CONTROLLER_AXIS_RIGHTX, direction.x * dpadSwipe);
++	pushAxis(SDL_CONTROLLER_AXIS_RIGHTY, direction.y * dpadSwipe);
++	swiping = swipe;
++}
++
++/// The magnifier follows the D-pad and leaves the cursor until the stick moves
++void BareAppLink::moveMagnifier()
++{
++	const uint32_t now = SDL_GetTicks();
++	// after a pause (the overview) no more than a frame's step
++	const uint32_t passed = std::min<uint32_t>(now - movedAt, 50);
++	movedAt = now;
++
++	const Point direction = dpadDirection();
++	if(direction == Point(0, 0))
++		return;
++	detached = true;
++	viewport += direction * std::max<int>(magnifierSpeed * passed / 1000, 1);
++}
++
++Point BareAppLink::mapScrollDirection()
++{
++	mapScrollAt = SDL_GetTicks();
++	if(swiping)
++		updateDpad();	// the map has come back while the D-pad swiped: it scrolls by itself now
++	return magnifier ? Point(0, 0) : dpadDirection();
++}
++
++Point BareAppLink::stickDirection() const
++{
++	const auto sign = [](int value) { return value > stickPush ? 1 : value < -stickPush ? -1 : 0; };
++	return Point(sign(stick.x), sign(stick.y));
 +}
 +
 +void BareAppLink::onButton(int button, bool pressed, bool fromStick)
@@ -498,25 +604,28 @@ index 0000000..fb4e74e
 +
 +	// As in VCMI's controller bindings (config/keyBindingsConfig.json):
 +	// x, y: mouse left and right; a: accept, open the selected hero;
-+	// b: cancel; back: end turn; start: options; shoulders and triggers.
-+	// The OGA has F1..F6 instead of Start and Select (F5, F6 are bare_app's).
++	// b: cancel; back: end turn; start: options; left shoulder: next hero.
++	// The OGA has F1..F6 instead of Start and Select (F5, F6 are bare_app's);
++	// bare_app keeps L2 and R2 for the volume.
 +	switch(button)
 +	{
 +		case GP_A:      pushButton(SDL_CONTROLLER_BUTTON_X, pressed); break;
-+		case GP_B:      pushButton(SDL_CONTROLLER_BUTTON_Y, pressed); break;
-+		case GP_Y:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
++		case GP_Y:      pushButton(SDL_CONTROLLER_BUTTON_Y, pressed); break;
++		case GP_B:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
 +		case GP_SELECT:
 +		case GP_F2:     pushButton(SDL_CONTROLLER_BUTTON_B, pressed); break;
 +		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
 +		case GP_START:
 +		case GP_F1:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
 +		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
-+		case GP_L2:     pushAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT, pressed ? SDL_JOYSTICK_AXIS_MAX : 0); break;
-+		case GP_R2:     pushAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, pressed ? SDL_JOYSTICK_AXIS_MAX : 0); break;
 +		case GP_L1:
 +			if(pressed)
 +			{
 +				magnifier = !magnifier;
++				// a magnifier opens around the cursor
++				detached = false;
++				rejoin = magnifier;
++				updateDpad();
 +				// the cursor is redrawn every frame, so the new view comes with the next one
 +				logGlobal->debug("bare_app link: %s", magnifier ? "magnifier" : "overview");
 +			}
@@ -528,11 +637,24 @@ index 0000000..fb4e74e
 +
 +void BareAppLink::onAxis(int axis, int value)
 +{
-+	// The left stick moves the cursor
++	// The left stick moves the cursor, and the magnifier comes back to it
++	if(axis != GP_AXIS_LX && axis != GP_AXIS_LY)
++		return;
++	if(value && detached)
++	{
++		detached = false;
++		rejoin = true;
++	}
 +	if(axis == GP_AXIS_LX)
++	{
++		stick.x = value;
 +		pushAxis(SDL_CONTROLLER_AXIS_LEFTX, value);
-+	else if(axis == GP_AXIS_LY)
++	}
++	else
++	{
++		stick.y = value;
 +		pushAxis(SDL_CONTROLLER_AXIS_LEFTY, value);
++	}
 +}
 +
 +void BareAppLink::poll()
@@ -562,10 +684,10 @@ index 0000000..fb4e74e
 +}
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
 new file mode 100644
-index 0000000..8416617
+index 0000000..b968a66
 --- /dev/null
 +++ b/client/renderSDL/BareAppLink.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,82 @@
 +/*
 + * BareAppLink.h, part of VCMI engine
 + *
@@ -590,21 +712,33 @@ index 0000000..8416617
 +/// frames go to bare_app scaled down 2:1 (overview) or as a 1:1 part around
 +/// the cursor (magnifier); L1 switches. Gamepad events come back and become
 +/// SDL game controller events, so VCMI's own controller support drives the
-+/// game.
++/// game. The D-pad moves the magnifier, or in the overview scrolls the
++/// adventure map (elsewhere it swipes, as VCMI's right stick).
 +class BareAppLink
 +{
 +public:
++	/// D-pad map scrolling, a share of the border scrolling speed
++	static constexpr double dpadScrollShare = 0.375;
++
 +	/// nullptr unless started by bare_app
 +	static BareAppLink * get();
 +
 +	/// Settings the link needs (window size, software rendering and cursor,
-+	/// quiet logging, bare_app's language); before logging is configured
++	/// quiet logging); before logging is configured. bare_app's language is
++	/// set earlier, by GameLibrary, before the mods load.
 +	void configure();
 +	/// Publish the window's content (after SDL_RenderPresent); screen is
 +	/// the same picture before the cursor was drawn over it
 +	void present(SDL_Window * window, SDL_Surface * screen);
 +	/// Gamepad messages into SDL events (main thread, before SDL_PollEvent)
 +	void poll();
++
++	/// -1, 0 or +1 on each axis: where the stick is pushed
++	Point stickDirection() const;
++	/// The D-pad's direction for the adventure map to scroll (overview
++	/// only), called while map scrolling is active: the D-pad stops
++	/// swiping meanwhile
++	Point mapScrollDirection();
 +
 +private:
 +	BareAppLink(game_shm * shm);
@@ -613,7 +747,9 @@ index 0000000..8416617
 +	void onAxis(int axis, int value);
 +	void pushButton(int sdlButton, bool pressed);
 +	void pushAxis(int sdlAxis, int value);
++	Point dpadDirection() const;
 +	void updateDpad();
++	void moveMagnifier();
 +	void compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst);
 +	void drawCursor(const SDL_Surface * window, const SDL_Surface * screen, uint32_t * dst);
 +
@@ -621,7 +757,13 @@ index 0000000..8416617
 +	unsigned back = 0;	///< buffer being drawn
 +	bool magnifier = false;
 +	Point viewport;		///< top left of the magnified part, in window pixels
++	bool detached = false;	///< the D-pad has moved the magnifier off the cursor
++	bool rejoin = false;	///< the stick has moved since: back to the cursor
++	uint32_t movedAt = 0;	///< SDL_GetTicks() of the last magnifier move check
 +	uint32_t dpad = 0;	///< D-pad directions held, gp_button bits
++	bool swiping = false;	///< the D-pad holds VCMI's right stick
++	uint32_t mapScrollAt = 0;	///< SDL_GetTicks() when the map last asked for the D-pad
++	Point stick;		///< last left stick values
 +	std::vector<uint32_t> last;	///< the frame published last
 +	uint32_t framesDrawn = 0;
 +	uint32_t framesSent = 0;
@@ -705,3 +847,88 @@ index 6adc6de..bb57196 100644
  	// Initialize logging based on settings
  	logConfigurator.configure();
  	logGlobal->debug("settings = %s", settings.toJsonNode().toString());
+diff --git a/lib/GameLibrary.cpp b/lib/GameLibrary.cpp
+index 35af7c4..e45eebd 100644
+--- a/lib/GameLibrary.cpp
++++ b/lib/GameLibrary.cpp
+@@ -28,6 +28,7 @@
+ #include "entities/hero/CHeroHandler.h"
+ #include "entities/ResourceTypeHandler.h"
+ #include "texts/CGeneralTextHandler.h"
++#include "texts/Languages.h"
+ #include "campaign/CampaignRegionsHandler.h"
+ #include "mapping/MapFormatSettings.h"
+ #include "modding/CModHandler.h"
+@@ -165,6 +166,20 @@ void GameLibrary::initializeFilesystem(bool extractArchives)
+ {
+ 	loadFilesystem(extractArchives);
+ 	settings.init("config/settings.json", "vcmi:settings");
++	// The language of bare_app, the launcher that started the client (an IETF
++	// tag, "ru"). Before the mods are loaded: which translation loads depends
++	// on it, so set later it would only take effect at the next start.
++	if(const char * tag = std::getenv("BARE_APP_LANG"))
++	{
++		for(const auto & language : Languages::getLanguageList())
++		{
++			if(language.tagIETF == tag && language.selectable)
++			{
++				Settings general = settings.write["general"];
++				general["language"].String() = language.identifier;
++			}
++		}
++	}
+ 	persistentStorage.init("config/persistentStorage.json", "");
+ 	keyBindingsConfig.init("config/keyBindingsConfig.json", "");
+ 	loadModFilesystem();
+diff --git a/lib/modding/ModManager.cpp b/lib/modding/ModManager.cpp
+index 1a12ae5..986a631 100644
+--- a/lib/modding/ModManager.cpp
++++ b/lib/modding/ModManager.cpp
+@@ -744,6 +744,11 @@ void ModManager::updatePreset(const ModDependenciesResolver & testResolver)
+ 	for (const auto & modID : newBrokenMods)
+ 	{
+ 		const auto & mod = getModDescription(modID);
++		// A translation is "broken" while another language is selected: keep
++		// it enabled, so it loads again once its language is chosen (without
++		// the launcher, that otherwise turns it back on)
++		if (mod.isTranslation() && CGeneralTextHandler::getPreferredLanguage() != mod.getBaseLanguage())
++			continue;
+ 		if (mod.getTopParentID().empty() || vstd::contains(newActiveMods, mod.getTopParentID()))
+ 			modsPreset->setModActive(modID, false);
+ 	}
+diff --git a/lib/texts/TextOperations.cpp b/lib/texts/TextOperations.cpp
+index 15ba831..a68e822 100644
+--- a/lib/texts/TextOperations.cpp
++++ b/lib/texts/TextOperations.cpp
+@@ -160,9 +160,31 @@ uint32_t TextOperations::getUnicodeCodepoint(char data, const std::string & enco
+ 	return getUnicodeCodepoint(stringUnicode.data(), stringUnicode.size());
+ }
+ 
++/// Heroes III maps and campaigns do not say their encoding: VCMI reads those
++/// in Maps/ with the selected language's one. A Russian edition's maps (CP1251)
++/// shown in English (CP1252) would turn into accented Latin garbage. In CP1252
++/// Cyrillic letters are bytes 0xC0..0xFF, accented Latin letters: real Western
++/// text never has them as most of its letters.
++static bool looksLikeCyrillic(const std::string & text)
++{
++	size_t letters = 0;
++	size_t high = 0;
++
++	for(unsigned char c : text)
++	{
++		if(c >= 0xC0)
++			high++;
++		else if((c | 0x20) >= 'a' && (c | 0x20) <= 'z')
++			letters++;
++	}
++	return high >= 2 && high > letters;
++}
++
+ std::string TextOperations::toUnicode(const std::string &text, const std::string &encoding)
+ {
+ 	try {
++		if(encoding == "CP1252" && looksLikeCyrillic(text))
++			return boost::locale::conv::to_utf<char>(text, "CP1251");
+ 		return boost::locale::conv::to_utf<char>(text, encoding);
+ 	}
+ 	catch (const boost::locale::conv::conversion_error &)

@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# Suspend to RAM; returns once the device is awake again. bare_app runs it
+# when the screen has been off for a while; the power key wakes the device
+# up (the rk817 power key is a wakeup source).
+#
+# The LEDs would keep their state (the blue one lit, half way through its
+# heartbeat): they are switched off for the sleep, then each one gets its
+# trigger, or without one its level, back.
+#
+# The ESP8089 Wi-Fi chip loses its firmware in sleep and its driver does not
+# load it again on resume: wlan0 stays up but never authenticates. The
+# driver has to stay loaded during the sleep (without it the SDIO card is
+# powered down and does not answer afterwards), so it is reloaded after
+# waking up, in the background, with the Wi-Fi service (wpa_supplicant,
+# DHCP, wpa_cli) restarted around it: wpa_cli misses the reconnection of a
+# wlan0 that went away, and DHCP would not start again. Should wlan0 not come
+# back, the SDIO host is re-attached, which brings the card up from scratch.
+
+leds=
+for led in /sys/class/leds/*; do
+	[ -e "$led/brightness" ] || continue
+	trigger=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$led/trigger")
+	leds="$leds $led|${trigger:-none}|$(cat "$led/brightness")"
+	echo none > "$led/trigger"
+	echo 0 > "$led/brightness"
+done
+
+sync
+echo mem > /sys/power/state
+rc=$?
+
+for saved in $leds; do
+	led=${saved%%|*}
+	rest=${saved#*|}
+	trigger=${rest%%|*}
+	if [ "$trigger" = none ]; then
+		echo "${rest#*|}" > "$led/brightness"
+	else
+		echo "$trigger" > "$led/trigger"
+	fi
+done
+
+if grep -q '^esp8089 ' /proc/modules; then
+	(
+		/etc/init.d/S41wifi stop
+		rmmod esp8089
+		modprobe esp8089
+		n=0
+		while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 6 ]; do
+			sleep 1
+			n=$((n + 1))
+		done
+		if [ ! -e /sys/class/net/wlan0 ]; then
+			host=$(basename "$(readlink -f /sys/class/mmc_host/mmc1/device)")
+			rmmod esp8089
+			echo "$host" > /sys/bus/platform/drivers/dwmmc_rockchip/unbind
+			echo "$host" > /sys/bus/platform/drivers/dwmmc_rockchip/bind
+			sleep 2
+			modprobe esp8089
+		fi
+		/etc/init.d/S41wifi start
+	) </dev/null >/dev/null 2>&1 &
+fi
+
+exit $rc
