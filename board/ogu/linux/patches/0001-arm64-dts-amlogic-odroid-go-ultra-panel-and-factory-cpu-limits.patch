@@ -1,5 +1,5 @@
 From: OdroidLinux SDK
-Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: add the DSI panel, factory voltages and CPU limits
+Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: add the panel, battery, factory voltages and CPU limits
 
 The board dts has no display: add the MIPI-DSI host and D-PHYs, the
 KD50T048A panel (ST7701) of the ODROID-GO Ultra, its PWM backlight on
@@ -21,6 +21,10 @@ output quality" (ROCKNIX 0026), without its other changes.
 Sticks: the Y axes were declared inverted (abs-range <3150 950>), but
 the left stick then read upside down: the ADC reads less for up, so up is
 the minimum without inverting. Same for the right stick.
+
+Battery: the 4000 mAh Li-Po and the RK818 charger with its 10 mOhm sense
+resistor, for the rk818_battery driver (patches 0007-0013), as in ROCKNIX's
+"arm64: meson: odroid-go-ultra: add battery and charger" (John Williams).
 
 The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
 1800 MHz: turn off 1896 and 1992 MHz.
@@ -47,7 +51,37 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  			abs-fuzz = <32>;
  			abs-flat = <64>;
  		};
-@@ -196,6 +198,14 @@
+@@ -71,6 +73,29 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
++	/* 3.7 V 4000 mAh Li-Po, charged by the RK818 */
++	bat: battery {
++		compatible = "simple-battery";
++		voltage-min-design-microvolt = <3500000>;
++		voltage-max-design-microvolt = <4200000>;
++		energy-full-design-microwatt-hours = <14800000>;
++		charge-full-design-microamp-hours = <4000000>;
++		precharge-current-microamp = <120000>;
++		charge-term-current-microamp = <200000>;
++		constant-charge-current-max-microamp = <2000000>;
++		constant-charge-voltage-max-microvolt = <4200000>;
++		factory-internal-resistance-micro-ohms = <180000>;
++		resistance-temp-table = <20 180>;
++		ocv-capacity-celsius = <20>;
++		ocv-capacity-table-0 =
++			<4146950 100>, <4001920 95>, <3967900 90>, <3919950 85>,
++			<3888450 80>, <3861850 75>, <3831540 70>, <3799130 65>,
++			<3768190 60>, <3745650 55>, <3726610 50>, <3711630 45>,
++			<3696720 40>, <3685660 35>, <3674950 30>, <3663050 25>,
++			<3649470 20>, <3635260 15>, <3616920 10>, <3592440 5>,
++			<3574170 0>;
++	};
++
+ 	codec_clk: codec-clk {
+ 		compatible = "fixed-clock";
+ 		clock-frequency = <12288000>;
+@@ -196,6 +221,14 @@
  		reset-gpios = <&gpio BOOT_12 GPIO_ACTIVE_LOW>;
  	};
  
@@ -62,7 +96,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  	leds {
  		compatible = "gpio-leds";
  
-@@ -320,11 +330,14 @@
+@@ -320,11 +353,14 @@
  	opp-1704000000 {
  		opp-microvolt = <862500>;
  	};
@@ -77,7 +111,21 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  	};
  };
  
-@@ -397,7 +410,7 @@
+@@ -378,6 +414,13 @@
+ 		vcc9-supply = <&vddao_3v3>;
+ 		boost-supply = <&vdd_sys>;
+ 
++		charger {
++			compatible = "rockchip,rk818-charger";
++			monitored-battery = <&bat>;
++
++			rockchip,sense-resistor-micro-ohms = <10000>;
++		};
++
+ 		regulators {
+ 			vddcpu_a: DCDC_REG1 {
+ 				regulator-name = "vddcpu_a";
+@@ -397,7 +440,7 @@
  				regulator-always-on;
  				regulator-boot-on;
  				regulator-min-microvolt = <875000>;
@@ -86,7 +134,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  				regulator-ramp-delay = <6001>;
  				regulator-state-mem {
  					regulator-on-in-suspend;
-@@ -417,12 +430,12 @@
+@@ -417,12 +460,12 @@
  			vddao_3v3: DCDC_REG4 {
  				regulator-always-on;
  				regulator-boot-on;
@@ -102,7 +150,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  				};
  			};
  
-@@ -477,8 +490,6 @@
+@@ -477,8 +520,6 @@
  				regulator-name = "vcc_sd";
  				regulator-always-on;
  				regulator-boot-on;
@@ -111,7 +159,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  				regulator-state-mem {
  					regulator-on-in-suspend;
  				};
-@@ -561,8 +572,10 @@
+@@ -561,8 +602,10 @@
  			};
  
  			vcc_lcd: LDO_REG8 {
@@ -124,7 +172,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  				regulator-name = "vcc_lcd";
  				regulator-state-mem {
  					regulator-off-in-suspend;
-@@ -604,6 +617,60 @@
+@@ -604,6 +647,60 @@
  	status = "okay";
  };
  
@@ -185,7 +233,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  &periphs_pinctrl {
  	keypad_gpio_pins: keypad-gpio-state {
  		mux {
-@@ -619,6 +686,12 @@
+@@ -619,6 +716,12 @@
  	};
  };
  
@@ -198,7 +246,7 @@ The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
  &saradc {
  	status = "okay";
  	vref-supply = <&vddio_ao1v8>;
-@@ -662,16 +735,20 @@
+@@ -662,16 +765,20 @@
  };
  
  

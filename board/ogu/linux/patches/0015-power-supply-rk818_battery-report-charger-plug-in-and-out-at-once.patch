@@ -1,0 +1,102 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: supply: rk818_battery: report charger plug-in and plug-out at once
+
+power_supply_changed() was only called when the state of charge moved, so
+userspace learnt that a charger came or went seconds to minutes later
+(bare_app polls every 30 s when it gets uevents). Take the RK818's
+PLUG_IN and PLUG_OUT interrupts like VB_LO: notify both supplies and
+re-read the gauge half a second later. The status property comes from
+chrg_status, which only the work refreshes: the work now also reports a
+change of chrg_status or of the charger being there, not only of the
+state of charge.
+
+--- a/drivers/power/supply/rk818_battery.c
++++ b/drivers/power/supply/rk818_battery.c
+@@ -240,6 +240,7 @@
+ 	/* Power supplies */
+ 	struct power_supply		*usb_psy;
+ 	struct power_supply		*charger_psy;
++	bool				charger_online;	/* at the last work run */
+ 
+ 	/* USB input current limit state */
+ 	bool	apply_ilim;
+@@ -1334,6 +1335,8 @@
+ 	struct rk818_battery *di =
+ 		container_of(work, struct rk818_battery, work.work);
+ 	int prev_dsoc = di->dsoc;
++	int prev_chrg_status = di->chrg_status;
++	bool prev_online = di->charger_online;
+ 	bool is_charging;
+ 	ktime_t now = ktime_get_boottime();
+ 
+@@ -1348,6 +1351,7 @@
+ 	di->voltage_ocv_mv = rk818_read_vol(di, RK818_BAT_OCV_REGH);
+ 	di->current_avg_ma = rk818_read_cur(di, RK818_BAT_CUR_AVG_REGH);
+ 	di->chrg_status    = rk818_get_chrg_status(di);
++	di->charger_online = rk818_charger_online(di);
+ 	rk818_update_temperature(di);
+ 
+ 	/*
+@@ -1400,9 +1404,12 @@
+ 	rk818_save_dsoc(di);
+ 	rk818_save_remain_cap(di);
+ 
++	/* the status property follows chrg_status: report its changes too */
++	if (di->charger_psy && (di->dsoc != prev_dsoc ||
++				di->chrg_status != prev_chrg_status ||
++				di->charger_online != prev_online))
++		power_supply_changed(di->charger_psy);
+ 	if (di->dsoc != prev_dsoc) {
+-		if (di->charger_psy)
+-			power_supply_changed(di->charger_psy);
+ 		dev_info(di->dev,
+ 			 "dsoc %d -> %d (rsoc=%d v=%d mV i=%d mA cap=%d mAh fcc=%d mAh)\n",
+ 			 prev_dsoc, di->dsoc, di->rsoc,
+@@ -1573,6 +1580,37 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++static irqreturn_t rk818_plug_irq(int irq, void *data)
++{
++	struct rk818_battery *di = data;
++
++	/*
++	 * A charger came or went. The status is read from the registers on
++	 * every query, so userspace only needs to hear of it now rather
++	 * than at the next change of the state of charge; the gauge catches
++	 * up shortly after.
++	 */
++	power_supply_changed(di->usb_psy);
++	power_supply_changed(di->charger_psy);
++	mod_delayed_work(di->wq, &di->work, msecs_to_jiffies(500));
++
++	return IRQ_HANDLED;
++}
++
++static void rk818_request_plug_irq(struct rk818_battery *di,
++				   struct rk808 *rk818, int hwirq,
++				   const char *name)
++{
++	int irq = regmap_irq_get_virq(rk818->irq_data, hwirq);
++	int ret = irq < 0 ? irq :
++		  devm_request_threaded_irq(di->dev, irq, NULL, rk818_plug_irq,
++					    IRQF_ONESHOT, name, di);
++
++	if (ret)
++		dev_warn(di->dev, "no %s IRQ (%d): charger changes are seen late\n",
++			 name, ret);
++}
++
+ /* =========================================================================
+  * USB supply
+  * ========================================================================= */
+@@ -2639,6 +2677,9 @@
+ 
+ 	enable_irq_wake(vb_lo_irq);
+ 
++	rk818_request_plug_irq(di, rk818, RK818_IRQ_PLUG_IN, "rk818_plug_in");
++	rk818_request_plug_irq(di, rk818, RK818_IRQ_PLUG_OUT, "rk818_plug_out");
++
+ 	queue_delayed_work(di->wq, &di->work, msecs_to_jiffies(di->monitor_ms));
+ 
+ 	dev_info(di->dev, "ready: dsoc=%d%% fcc=%d mAh sense=%u mOhm\n",

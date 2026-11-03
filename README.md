@@ -416,7 +416,9 @@ saveenv
 `adc-joystick`) и частоты A53 не выше заводских. Звуковая карта meson axg играет
 только с выставленным маршрутом DPCM: его при загрузке ставит
 `/etc/init.d/S30audio` (`alsactl` из `/etc/asound-route.state`). bare_app с Doom и
-Heroes III запускается сам, как на OGA; батарея (RK818) пока не подключена.
+Heroes III запускается сам, как на OGA. Батарея — драйвер `rk818_battery` из ROCKNIX
+(Ondrej Jirman) с их исправлениями, плюс наш патч: подключение и отключение
+зарядки видно сразу (`/sys/class/power_supply/rk818-battery`, `rk818-usb`).
 
 Сеть по USB-C: `/etc/init.d/S42usbnet` делает из порта сетевую карту (гаджет NCM),
 приставка — `192.168.7.2`, компьютер получает `192.168.7.1` по DHCP (без шлюза:
