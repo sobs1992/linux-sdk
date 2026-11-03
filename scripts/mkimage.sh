@@ -109,7 +109,7 @@ fi
 ROOT_DIR=$WORK_DIR/rootfs
 ROOT_IMG=$WORK_DIR/rootfs.ext4
 fakeroot -- bash -euo pipefail -c '
-	root=$1 tar=$2 mods=$3 free_mb=$4 img=$5 data_part=$6
+	root=$1 tar=$2 mods=$3 free_mb=$4 img=$5 data_part=$6 disk_id=$7
 	mkdir -p "$root"
 	tar -xpf "$tar" -C "$root"
 	if [ -d "$mods/lib/modules" ]; then
@@ -117,16 +117,20 @@ fakeroot -- bash -euo pipefail -c '
 		cp -r "$mods/lib/modules/." "$root/lib/modules/"
 		chown -R 0:0 "$root/lib/modules"
 	fi
-	# BOOT partition on /boot, by label: the mmcblk number differs per board
+	# BOOT partition on /boot, by the FAT volume id (= the disk id, see
+	# mkfs.vfat below): the mmcblk number differs per board, the label is
+	# not unique (the ODROID-GO Ultra eMMC has its own "BOOT" partition) and
+	# busybox mount does not know PARTUUID=
+	vol_id=$(echo "$disk_id" | tr a-f A-F | sed "s/^\(....\)/\1-/")
 	mkdir -p "$root/boot"
 	sed -i "/[[:space:]]\/boot[[:space:]]/d" "$root/etc/fstab"
-	printf "LABEL=BOOT\t/boot\tvfat\tdefaults,noatime\t0\t0\n" >> "$root/etc/fstab"
+	printf "UUID=%s\t/boot\tvfat\tdefaults,noatime\t0\t0\n" "$vol_id" >> "$root/etc/fstab"
 	rm -f "$root/etc/data-partition"
 	[ -z "$data_part" ] || echo "$data_part" > "$root/etc/data-partition"
 	size_mb=$(( $(du -sm "$root" | cut -f1) * 11 / 10 + free_mb ))
 	mke2fs -q -F -t ext4 -L rootfs -d "$root" -E root_owner=0:0 "$img" "${size_mb}M"
 ' _ "$ROOT_DIR" "$ROOTFS_TAR" "$LINUX_DIR/modules" "$ROOTFS_FREE_MB" "$ROOT_IMG" \
-	"$data_part"
+	"$data_part" "$disk_id"
 rm -rf "$ROOT_DIR"
 
 # --- disk ---

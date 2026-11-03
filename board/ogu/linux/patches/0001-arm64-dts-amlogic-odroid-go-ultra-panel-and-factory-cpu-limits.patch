@@ -1,0 +1,172 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: add the DSI panel, factory voltages and CPU limits
+
+The board dts has no display: add the MIPI-DSI host and D-PHYs, the
+KD50T048A panel (ST7701) of the ODROID-GO Ultra, its PWM backlight on
+PWM_F (GPIOH_5) and keep vcc_lcd on. Taken from ROCKNIX's "arm64: meson:
+odroid-go-ultra: add DSI panel" (spycat88). The panel compatible is
+ROCKNIX's "odroid,go-ultra-panel" (patch 0002): the mainline
+"elida,kd50t048a" entry is the ODROID-GO Super's init sequence and
+timing, and leaves the Ultra's panel dark.
+
+Rails as Hardkernel sets them (ROCKNIX "arm64: meson: odroid-go-ultra:
+correct voltages", Mauro Ribeiro): vcc_lcd and vddao_3v3 at 3.0 V, vdd_ee
+up to 0.9 V, no voltage on the vcc_sd switch. Its vddcpu_b limit raise
+(for over-clocking) is left out.
+
+The A53 cluster table goes up to 1992 MHz, the factory firmware stops at
+1800 MHz: turn off 1896 and 1992 MHz.
+
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -196,6 +196,14 @@
+ 		reset-gpios = <&gpio BOOT_12 GPIO_ACTIVE_LOW>;
+ 	};
+ 
++	panel_backlight: backlight {
++		compatible = "pwm-backlight";
++		pwms = <&pwm_ef 1 40000 0>;
++		brightness-levels = <0 255>;
++		num-interpolated-steps = <255>;
++		default-brightness-level = <255>;
++	};
++
+ 	leds {
+ 		compatible = "gpio-leds";
+ 
+@@ -320,11 +328,14 @@
+ 	opp-1704000000 {
+ 		opp-microvolt = <862500>;
+ 	};
++	/* Above the factory limit for the A53 cluster (1800 MHz) */
+ 	opp-1896000000 {
+ 		opp-microvolt = <987500>;
++		status = "disabled";
+ 	};
+ 	opp-1992000000 {
+ 		opp-microvolt = <1012500>;
++		status = "disabled";
+ 	};
+ };
+ 
+@@ -397,7 +408,7 @@
+ 				regulator-always-on;
+ 				regulator-boot-on;
+ 				regulator-min-microvolt = <875000>;
+-				regulator-max-microvolt = <1250000>;
++				regulator-max-microvolt = <900000>;
+ 				regulator-ramp-delay = <6001>;
+ 				regulator-state-mem {
+ 					regulator-on-in-suspend;
+@@ -417,12 +428,12 @@
+ 			vddao_3v3: DCDC_REG4 {
+ 				regulator-always-on;
+ 				regulator-boot-on;
+-				regulator-min-microvolt = <3300000>;
+-				regulator-max-microvolt = <3300000>;
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
+ 				regulator-name = "vddao_3v3";
+ 				regulator-state-mem {
+ 					regulator-on-in-suspend;
+-					regulator-suspend-microvolt = <3300000>;
++					regulator-suspend-microvolt = <3000000>;
+ 				};
+ 			};
+ 
+@@ -477,8 +488,6 @@
+ 				regulator-name = "vcc_sd";
+ 				regulator-always-on;
+ 				regulator-boot-on;
+-				regulator-min-microvolt = <3300000>;
+-				regulator-max-microvolt = <3300000>;
+ 				regulator-state-mem {
+ 					regulator-on-in-suspend;
+ 				};
+@@ -561,8 +570,10 @@
+ 			};
+ 
+ 			vcc_lcd: LDO_REG8 {
+-				regulator-min-microvolt = <3300000>;
+-				regulator-max-microvolt = <3300000>;
++				regulator-always-on;
++				regulator-boot-on;
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
+ 				regulator-name = "vcc_lcd";
+ 				regulator-state-mem {
+ 					regulator-off-in-suspend;
+@@ -604,6 +615,60 @@
+ 	status = "okay";
+ };
+ 
++&mipi_analog_dphy {
++	status = "okay";
++};
++
++&mipi_dphy {
++	status = "okay";
++};
++
++/*
++ * GP0 PLL at the lane bit rate: 29.17 MHz pixel clock x 24 bpp / 2 lanes
++ * = 350.04 MHz, the pixel clock is GP0 / 12.
++ */
++&mipi_dsi {
++	status = "okay";
++
++	assigned-clocks = <&clkc CLKID_GP0_PLL>,
++			  <&clkc CLKID_MIPI_DSI_PXCLK_SEL>,
++			  <&clkc CLKID_MIPI_DSI_PXCLK>,
++			  <&clkc CLKID_CTS_ENCL_SEL>,
++			  <&clkc CLKID_VCLK2_SEL>;
++	assigned-clock-parents = <0>,
++				 <&clkc CLKID_GP0_PLL>,
++				 <0>,
++				 <&clkc CLKID_VCLK2_DIV1>,
++				 <&clkc CLKID_GP0_PLL>;
++	assigned-clock-rates = <350040000>,
++			       <0>,
++			       <350040000>,
++			       <0>,
++			       <0>;
++
++	panel@0 {
++		compatible = "odroid,go-ultra-panel", "sitronix,st7701";
++		reg = <0>;
++		reset-gpios = <&gpio GPIOH_4 GPIO_ACTIVE_HIGH>;
++		IOVCC-supply = <&vcc_lcd>;
++		VCC-supply = <&vcc_lcd>;
++		backlight = <&panel_backlight>;
++		rotation = <270>;
++
++		port {
++			mipi_in_panel: endpoint {
++				remote-endpoint = <&mipi_out_panel>;
++			};
++		};
++	};
++};
++
++&mipi_dsi_panel_port {
++	mipi_out_panel: endpoint {
++		remote-endpoint = <&mipi_in_panel>;
++	};
++};
++
+ &periphs_pinctrl {
+ 	keypad_gpio_pins: keypad-gpio-state {
+ 		mux {
+@@ -619,6 +684,12 @@
+ 	};
+ };
+ 
++&pwm_ef {
++	status = "okay";
++	pinctrl-0 = <&pwm_f_h_pins>;
++	pinctrl-names = "default";
++};
++
+ &saradc {
+ 	status = "okay";
+ 	vref-supply = <&vddio_ao1v8>;

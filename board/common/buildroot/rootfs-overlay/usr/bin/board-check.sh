@@ -36,7 +36,7 @@ if grep -q ' /boot ' /proc/mounts; then
 	[ -r /boot/extlinux/extlinux.conf ] && ok "/boot/extlinux/extlinux.conf readable" ||
 		fail "/boot/extlinux/extlinux.conf missing"
 else
-	fail "/boot not mounted (fstab: LABEL=BOOT)"
+	fail "/boot not mounted (fstab: UUID=<FAT volume id>)"
 fi
 if dd if=/dev/zero of=/root/.board-check bs=1024 count=4096 2>/dev/null && sync &&
    [ "$(wc -c < /root/.board-check)" -eq 4194304 ]; then

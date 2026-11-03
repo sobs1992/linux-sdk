@@ -1,0 +1,52 @@
+# Firmware: ODROID-GO Ultra (Amlogic S922X: 4x A73 + 2x A53, arm64).
+# The factory bootloader on the eMMC (Amlogic BL2/BL31 + Hardkernel U-Boot
+# 2015.01) stays as it is: it sources boot.ini from the first card that has
+# one, in the order of its ${mmc_list} env (mmc 0 = eMMC, mmc 1 = SD card).
+# The boot.ini on this image chainloads mainline U-Boot (u-boot.bin), which
+# boots extlinux.conf from the SD card. For the card to win over the eMMC,
+# the factory U-Boot needs "setenv mmc_list 1 0; saveenv" once (UART).
+#
+# See configs/oga_defconfig for the meaning of the variables.
+
+BOARD_DIR     := board/ogu
+CROSS_COMPILE := aarch64-linux-gnu-
+
+# --- U-Boot ---
+UBOOT_SRC       := src/u-boot
+UBOOT_DEFCONFIG := odroid-go-ultra_defconfig
+UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/ogu.config
+UBOOT_IMAGES    := u-boot.bin
+
+# --- Linux ---
+LINUX_SRC       := src/linux
+LINUX_ARCH      := arm64
+LINUX_IMAGE     := Image
+LINUX_DEFCONFIG := defconfig
+LINUX_FRAGMENTS := $(BOARD_DIR)/linux/ogu.config
+# Kernel patches (*.patch, in name order), applied to a copy of LINUX_SRC
+LINUX_PATCHES   := $(BOARD_DIR)/linux/patches
+LINUX_DTBS      := amlogic/meson-g12b-odroid-go-ultra.dtb
+# The CPU clusters stay within the factory limits (A73 1908 MHz, A53 1800
+# MHz): the dts patch turns off the A53 points above that.
+LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0
+
+# --- Root filesystem (Buildroot) ---
+BUILDROOT_SRC       := src/buildroot
+BUILDROOT_EXTERNAL  := board/common/buildroot
+BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+
+# --- Applications (apps/, see "make apps-list"): APPS, APPS_AUTOSTART, APPS_CONFIG ---
+APPS :=
+
+# --- SD card image ---
+# Layout: [MBR][p1 FAT32 BOOT @16M: boot.ini, u-boot.bin, Image, dtbs,
+#          extlinux][p2 ext4 rootfs]. Nothing below 16M: the SoC boots the
+# factory bootloader from the eMMC.
+IMAGE_NAME := ogu
+IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
+# U-Boot builds fdtfile as amlogic/<name>.dtb
+IMAGE_DTB_LAYOUT := tree
+IMAGE_BOOT_SIZE_MB   := 128
+IMAGE_ROOTFS_FREE_MB := 256
+# MBR disk identifier; root= is passed as PARTUUID=<id>-02
+IMAGE_DISK_ID := 0x4f475531
