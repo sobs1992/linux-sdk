@@ -35,8 +35,16 @@ BUILDROOT_SRC       := src/buildroot
 BUILDROOT_EXTERNAL  := board/common/buildroot
 BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
 
-# --- Applications (apps/, see "make apps-list"): APPS, APPS_AUTOSTART, APPS_CONFIG ---
-APPS :=
+# --- Applications (apps/, see "make apps-list") ---
+# Built into the rootfs; the board's Buildroot defconfig does not list them
+APPS           := bare-app
+# Started at boot (from APPS). bare-app takes over the screen; F6 held for
+# 2 s quits it to the console, Quit in its menu turns the device off.
+APPS_AUTOSTART := bare-app
+# bare_app's own Kconfig defconfig (platform ogu), the shareware doom1.wad,
+# the Heroes III engine VCMI (game data on /games, see README)
+APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
+                  bare-app.HOMM3=y
 
 # --- SD card image ---
 # Layout: [MBR][p1 FAT32 BOOT @16M: boot.ini, u-boot.bin, Image, dtbs,
@@ -48,5 +56,10 @@ IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
 IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB   := 128
 IMAGE_ROOTFS_FREE_MB := 256
+# Data partitions, made on the first boot as on the OGA: p3 ext4 "data" on
+# /data, p4 FAT32 "GAMES" on /games to the end of the card. The rootfs
+# must end before p3.
+IMAGE_DATA_START_MB := 4096
+IMAGE_DATA_SIZE_MB  := 1024
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f475531

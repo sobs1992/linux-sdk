@@ -1,0 +1,44 @@
+From: OdroidLinux SDK
+Subject: [PATCH] Input: adc-joystick - invert with the range of the axis, not of the channel index
+
+adc_joystick_invert() took the min/max of the input axis numbered like the
+channel (0, 1, ...) instead of the axis' event code. An inverted axis then
+got another axis' range: on the ODROID-GO Ultra the left stick's ABS_Y
+(channel 0) was mirrored around ABS_X's range (700..2900 instead of
+950..3150), and the right stick's ABS_RY, whose device has no ABS_X,
+around 0..0: it reported -raw, always below its minimum.
+
+--- a/drivers/input/joystick/adc-joystick.c
++++ b/drivers/input/joystick/adc-joystick.c
+@@ -27,10 +27,10 @@
+ };
+ 
+ static int adc_joystick_invert(struct input_dev *dev,
+-			       unsigned int axis, int val)
++			       unsigned int code, int val)
+ {
+-	int min = input_abs_get_min(dev, axis);
+-	int max = input_abs_get_max(dev, axis);
++	int min = input_abs_get_min(dev, code);
++	int max = input_abs_get_max(dev, code);
+ 
+ 	return (max + min) - val;
+ }
+@@ -45,7 +45,7 @@
+ 		if (ret < 0)
+ 			return;
+ 		if (joy->axes[i].inverted)
+-			val = adc_joystick_invert(input, i, val);
++			val = adc_joystick_invert(input, joy->axes[i].code, val);
+ 		input_report_abs(input, joy->axes[i].code, val);
+ 	}
+ 	input_sync(input);
+@@ -95,7 +95,7 @@
+ 		else
+ 			val &= GENMASK(msb, 0);
+ 		if (joy->axes[i].inverted)
+-			val = adc_joystick_invert(joy->input, i, val);
++			val = adc_joystick_invert(joy->input, joy->axes[i].code, val);
+ 		input_report_abs(joy->input, joy->axes[i].code, val);
+ 	}
+ 

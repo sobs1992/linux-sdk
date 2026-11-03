@@ -1,2 +1,5 @@
-# fstab mounts the BOOT partition by label (the mmcblk number differs per board)
+# fstab mounts the BOOT partition by its FAT volume id, UUID= (the mmcblk
+# number differs per board, the label is not unique)
 CONFIG_FEATURE_MOUNT_LABEL=y
+CONFIG_VOLUMEID=y
+CONFIG_FEATURE_VOLUMEID_FAT=y

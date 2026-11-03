@@ -1,0 +1,15 @@
+# ODROID-GO Ultra: the meson axg card plays only once its DPCM route is set
+# (FRDDR_A -> OUT 1 -> TDMOUT_B IN 0, see the board dts): restored by
+# /etc/init.d/S30audio with "alsactl -f this-file restore"
+state.Ultra {
+	control.1 {
+		iface MIXER
+		name 'FRDDR_A SRC 1 EN Switch'
+		value true
+	}
+	control.2 {
+		iface MIXER
+		name 'FRDDR_A SINK 1 SEL'
+		value 'OUT 1'
+	}
+}

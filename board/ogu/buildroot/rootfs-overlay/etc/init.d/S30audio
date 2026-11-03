@@ -1,0 +1,25 @@
+#!/bin/sh
+# ODROID-GO Ultra: set the DPCM route of the meson axg sound card, without
+# which every playback fails with EINVAL (/etc/asound-route.state). Only
+# those controls: -I keeps alsactl from initialising the others.
+
+case "$1" in
+start)
+	i=0
+	while [ ! -e /dev/snd/controlC0 ] && [ $i -lt 50 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	printf "Setting the audio route: "
+	if alsactl -I -f /etc/asound-route.state restore 2>/dev/null; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac
