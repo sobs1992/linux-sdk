@@ -1,0 +1,2 @@
+# ODROID-GO Ultra: DHCP server for the network over USB (/etc/init.d/S42usbnet)
+CONFIG_UDHCPD=y

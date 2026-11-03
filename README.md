@@ -418,6 +418,12 @@ saveenv
 `/etc/init.d/S30audio` (`alsactl` из `/etc/asound-route.state`). bare_app с Doom и
 Heroes III запускается сам, как на OGA; батарея (RK818) пока не подключена.
 
+Сеть по USB-C: `/etc/init.d/S42usbnet` делает из порта сетевую карту (гаджет NCM),
+приставка — `192.168.7.2`, компьютер получает `192.168.7.1` по DHCP (без шлюза:
+свой маршрут по умолчанию не меняется), интерфейс `enx024f47550001`. Дальше
+`ssh root@192.168.7.2` по ключам из `board/common/buildroot/authorized_keys`, около
+7 МБ/с. Ключ хоста dropbear создаётся заново после каждой записи образа.
+
 ## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`

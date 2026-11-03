@@ -1,0 +1,62 @@
+#!/bin/sh
+#
+# Network over the USB-C port: a configfs gadget with one NCM function
+# (CDC network, built into Linux, macOS and Windows 11). The board is
+# 192.168.7.2 on usb0, the PC gets 192.168.7.1 from udhcpd; then
+# "ssh root@192.168.7.2" (dropbear, keys from authorized_keys).
+# Fixed MAC addresses, so the PC names its interface the same every time
+# (enx024f47550001).
+
+G=/sys/kernel/config/usb_gadget/ogu
+ADDR=192.168.7.2
+
+start() {
+	modprobe libcomposite 2>/dev/null
+	modprobe usb_f_ncm 2>/dev/null
+	mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	[ -n "$udc" ] || { echo "no USB device controller"; return 1; }
+	if [ ! -d $G ]; then
+		mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409 $G/functions/ncm.usb0 || return 1
+		echo 0x1d6b > $G/idVendor	# Linux Foundation
+		echo 0x0104 > $G/idProduct	# multifunction composite gadget
+		echo 0x0100 > $G/bcdDevice
+		echo 0x0200 > $G/bcdUSB
+		echo Hardkernel > $G/strings/0x409/manufacturer
+		echo "ODROID-GO Ultra" > $G/strings/0x409/product
+		echo OdroidLinux > $G/strings/0x409/serialnumber
+		echo NCM > $G/configs/c.1/strings/0x409/configuration
+		echo 250 > $G/configs/c.1/MaxPower
+		echo 02:4f:47:55:00:02 > $G/functions/ncm.usb0/dev_addr
+		echo 02:4f:47:55:00:01 > $G/functions/ncm.usb0/host_addr
+		ln -s $G/functions/ncm.usb0 $G/configs/c.1/
+	fi
+	echo "$udc" > $G/UDC || return 1
+	ifconfig usb0 $ADDR netmask 255.255.255.0 up || return 1
+	udhcpd /etc/udhcpd.usb0.conf
+}
+
+stop() {
+	killall udhcpd 2>/dev/null
+	ifconfig usb0 down 2>/dev/null
+	[ -e $G/UDC ] && echo "" > $G/UDC
+	return 0
+}
+
+case "$1" in
+start)
+	printf "Starting the network over USB: "
+	start && echo "OK ($ADDR)" || echo "FAIL"
+	;;
+stop)
+	printf "Stopping the network over USB: "
+	stop && echo "OK" || echo "FAIL"
+	;;
+restart|reload)
+	stop
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
