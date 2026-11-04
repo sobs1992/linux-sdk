@@ -1,0 +1,28 @@
+From: OdroidLinux SDK
+Subject: [PATCH] client: under bare_app the window size is not cut to the dummy display
+
+In windowed mode validateSettings() cuts the resolution down to the
+desktop mode, and SDL's dummy video driver reports 1024x768. The link asks
+for twice the frame (960x640 for the ODROID-GO Advance fits, 1708x960 for
+the GO Ultra does not): VCMI then drew 1024x768 and the link scaled that
+4:3 screen into a 16:9 frame. The window is never shown, so there is
+nothing to fit on.
+
+--- a/client/renderSDL/ScreenHandler.cpp
++++ b/client/renderSDL/ScreenHandler.cpp
+@@ -540,7 +540,14 @@
+ 		}
+ 	}
+ 
+-	if (getPreferredWindowMode() == EWindowMode::WINDOWED)
++	if (getPreferredWindowMode() == EWindowMode::WINDOWED
++#ifdef VCMI_BARE_APP
++		// bare_app sets the size from its frame: the dummy video driver's
++		// "desktop" (1024x768) would cut a wide one down, and the frame
++		// would come out stretched
++		&& !BareAppLink::get()
++#endif
++		)
+ 	{
+ 		//we only check that our desired window size fits on screen
+ 		int displayIndex = getPreferredDisplayIndex();

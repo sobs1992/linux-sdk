@@ -1,0 +1,96 @@
+From: OdroidLinux SDK
+Subject: [PATCH] client: bare_app: native size, the view following the cursor (BARE_APP_VCMI_NATIVE)
+
+The link draws VCMI at twice the frame and takes it 2:1 (or a 1:1
+magnifier): text at half its size, hard to read on a 5" screen. With
+BARE_APP_VCMI_NATIVE=1 (set by bare_app per board) the screen is the
+frame's size at 1:1, but no smaller than the 800x600 VCMI's windows need,
+and the frame is the part of it the cursor's position points at: the top
+when the cursor is at the top, the bottom at the bottom. On the ODROID-GO
+Ultra (854x480) the screen is 854x600: the whole width and 480 of 600
+rows in view, the rest comes in as the cursor goes there. L1 does nothing
+then: no overview needed.
+
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -123,10 +123,17 @@
+ 		}
+ 	}
+ 
++	// Twice the frame, taken 2:1 or as a 1:1 magnifier; native: the frame
++	// at 1:1, the screen no smaller than the 800x600 VCMI's windows need
++	// (the ODROID-GO Ultra's 854x480: 854x600, 120 rows out of view)
++	const char * env = std::getenv("BARE_APP_VCMI_NATIVE");
++	native = env && !std::strcmp(env, "1");
+ 	Settings resolution = settings.write["video"]["resolution"];
+-	resolution["width"].Float() = 2 * shm->width;
+-	resolution["height"].Float() = 2 * shm->height;
++	resolution["width"].Float() = native ? std::max<int>(shm->width, 800) : 2 * shm->width;
++	resolution["height"].Float() = native ? std::max<int>(shm->height, 600) : 2 * shm->height;
+ 	resolution["scaling"].Float() = 100;
++	logGlobal->info("Window %dx%d%s", resolution["width"].Integer(), resolution["height"].Integer(),
++		native ? ", the view follows the cursor" : "");
+ 
+ 	// bare_app already cuts the stick's dead zone and rescales the rest:
+ 	// a second one would swallow small deflections
+@@ -148,6 +155,20 @@
+ 	const int h = shm->height;
+ 	const int dstPitch = shm->stride / 4;
+ 
++	if(native)
++	{
++		// The part of the screen at the cursor's position: the top at the
++		// top, the bottom at the bottom, the cursor never at an edge it
++		// cannot get past
++		const Point & cursor = ENGINE->getCursorPosition();
++		viewport.x = srcW > w ? std::clamp(cursor.x, 0, srcW - 1) * (srcW - w) / (srcW - 1) : 0;
++		viewport.y = srcH > h ? std::clamp(cursor.y, 0, srcH - 1) * (srcH - h) / (srcH - 1) : 0;
++		const int cw = std::min(w, srcW);
++		for(int y = 0; y < std::min(h, srcH); y++)
++			std::memcpy(dst + y * dstPitch, src + (viewport.y + y) * srcPitch + viewport.x, cw * 4);
++		return;
++	}
++
+ 	if(magnifier)
+ 	{
+ 		moveMagnifier();
+@@ -228,7 +249,7 @@
+ 	const int w = shm->width;
+ 	const int h = shm->height;
+ 	const int dstPitch = shm->stride / 4;
+-	const Point origin = magnifier
++	const Point origin = magnifier || native
+ 		? cursorPosition - cursorHotSpot - viewport
+ 		: Point(cursorPosition.x * w / screenSize.x, cursorPosition.y * h / screenSize.y) - cursorHotSpot;
+ 
+@@ -483,7 +504,7 @@
+ 		case GP_F2:     shift = pressed; break;
+ 		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
+ 		case GP_L1:
+-			if(pressed)
++			if(pressed && !native)	// native: no overview, the whole width is in view
+ 			{
+ 				magnifier = !magnifier;
+ 				// a magnifier opens around the cursor
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -20,7 +20,10 @@
+ /// (bare_app's src/games/game_ipc.h) and runs SDL's dummy video driver: the
+ /// screen, twice the size of bare_app's video layer, stays in memory. Its
+ /// frames go to bare_app scaled down 2:1 (overview) or as a 1:1 part around
+-/// the cursor (magnifier), the cursor drawn over them; L1 switches. Gamepad events come back and become
++/// the cursor (magnifier), the cursor drawn over them; L1 switches. With
++/// BARE_APP_VCMI_NATIVE=1 the screen is the frame's size instead (at least
++/// 800x600), at 1:1, and the frame is the part of it the cursor's position
++/// points at (native). Gamepad events come back and become
+ /// SDL game controller events, so VCMI's own controller support drives the
+ /// game. The D-pad moves the magnifier, or in the overview scrolls the
+ /// adventure map (elsewhere it swipes, as VCMI's right stick). F1 and F2
+@@ -93,6 +96,7 @@
+ 	game_shm * shm;
+ 	unsigned back = 0;	///< buffer being drawn
+ 	bool magnifier = false;
++	bool native = false;	///< BARE_APP_VCMI_NATIVE: 1:1, the view follows the cursor
+ 	Point viewport;		///< top left of the magnified part, in window pixels
+ 	bool detached = false;	///< the D-pad has moved the magnifier off the cursor
+ 	bool rejoin = false;	///< the magnifier has opened: around the cursor

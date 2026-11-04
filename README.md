@@ -426,6 +426,21 @@ Heroes III запускается сам, как на OGA. Батарея — д
 `ssh root@192.168.7.2` по ключам из `board/common/buildroot/authorized_keys`, около
 7 МБ/с. Ключ хоста dropbear создаётся заново после каждой записи образа.
 
+`scripts/ogu-ctl.py` управляет bare_app по этой сети, без UART:
+
+```sh
+scripts/ogu-ctl.py shot:screen.png              # снимок всех слоёв (SIGUSR1)
+scripts/ogu-ctl.py a wait:2000 down a           # кнопки, NAME:MS — удержание
+scripts/ogu-ctl.py stick:1,0.5,800 shot:s.png   # левый стик X,Y на 800 мс, затем снимок
+```
+
+Для стиков нужен `scripts/ogu-hold.c` на плате: скрипт сам собирает его тулчейном
+`ogu` и копирует в `/tmp`. Ключ хоста не проверяется и не запоминается: он меняется
+с каждым образом, а соединение — кабель между двумя машинами.
+
+Heroes III на 854×480 идёт 1:1 (`homm3_native` у платформы bare_app, патчи VCMI
+0007–0008): окно VCMI 854×600, на экране его часть по положению курсора.
+
 ## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`
