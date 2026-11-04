@@ -1,0 +1,193 @@
+From: OdroidLinux SDK
+Subject: [PATCH] client: bare_app: ODROID-GO Ultra keys, the right stick as the D-pad
+
+The GO Ultra has a row of six F keys under the screen and a second stick.
+With BARE_APP_VCMI_KEYS=ogu (set by bare_app per board) its F keys go
+their own way: F1 (minimise) and F6 (quit) stay bare_app's, F2 and F3
+are held as Ctrl and Shift (split one creature off, split evenly), F4
+accepts, F5 ends the turn when the adventure map can, elsewhere it is
+the keyboard's Escape: cancel, and back in the main menu's pages, where
+the controller's cancel does nothing. Without the variable the keys stay
+as on the OGA. The right stick does what the D-pad does, past half its
+travel (the OGA has none).
+
+--- a/client/renderSDL/BareAppLink.cpp
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -13,6 +13,8 @@
+ #include "../../lib/Rect.h"
+ #include "../../lib/constants/Enumerations.h"
+ 
++#include "../adventureMap/AdventureMapInterface.h"
++#include "../adventureMap/AdventureMapShortcuts.h"
+ #include "../GameEngine.h"
+ #include "../eventsSDL/InputHandler.h"
+ #include "../gui/CursorHandler.h"
+@@ -46,6 +48,9 @@ constexpr int dpadSwipe = SDL_JOYSTICK_AXIS_MAX * 55 / 100;
+ constexpr uint32_t mapScrollHoldMs = 200;
+ /// The stick is pushed (for border scrolling) past this
+ constexpr int stickPush = SDL_JOYSTICK_AXIS_MAX / 4;
++/// The right stick as the D-pad: a direction pressed past this, let go under the second
++constexpr int stickDpadPress = GAME_AXIS_MAX / 2;
++constexpr int stickDpadRelease = GAME_AXIS_MAX * 35 / 100;
+ constexpr uint32_t statsPeriodMs = 10000;
+ 
+ constexpr uint32_t dpadBits = GP_BIT(GP_UP) | GP_BIT(GP_DOWN) | GP_BIT(GP_LEFT) | GP_BIT(GP_RIGHT);
+@@ -523,6 +528,17 @@ void BareAppLink::pushButton(int sdlButton, bool pressed)
+ 	SDL_PushEvent(&event);
+ }
+ 
++void BareAppLink::pushKey(int scancode, bool pressed)
++{
++	SDL_Event event = {};
++	event.type = pressed ? SDL_KEYDOWN : SDL_KEYUP;
++	event.key.timestamp = SDL_GetTicks();
++	event.key.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++	event.key.keysym.scancode = static_cast<SDL_Scancode>(scancode);
++	event.key.keysym.sym = SDL_GetKeyFromScancode(event.key.keysym.scancode);
++	SDL_PushEvent(&event);
++}
++
+ void BareAppLink::pushAxis(int sdlAxis, int value)
+ {
+ 	SDL_Event event = {};
+@@ -535,8 +551,9 @@ void BareAppLink::pushAxis(int sdlAxis, int value)
+ 
+ Point BareAppLink::dpadDirection() const
+ {
+-	return Point(!!(dpad & GP_BIT(GP_RIGHT)) - !!(dpad & GP_BIT(GP_LEFT)),
+-		!!(dpad & GP_BIT(GP_DOWN)) - !!(dpad & GP_BIT(GP_UP)));
++	const uint32_t held = dpad | stickDpad;
++	return Point(!!(held & GP_BIT(GP_RIGHT)) - !!(held & GP_BIT(GP_LEFT)),
++		!!(held & GP_BIT(GP_DOWN)) - !!(held & GP_BIT(GP_UP)));
+ }
+ 
+ /// Outside the adventure map the D-pad swipes (lists, sliders): VCMI does
+@@ -544,7 +561,7 @@ Point BareAppLink::dpadDirection() const
+ /// and the adventure map move with the D-pad by themselves.
+ void BareAppLink::updateDpad()
+ {
+-	const bool swipe = dpad && !magnifier && SDL_GetTicks() - mapScrollAt > mapScrollHoldMs;
++	const bool swipe = (dpad | stickDpad) && !magnifier && SDL_GetTicks() - mapScrollAt > mapScrollHoldMs;
+ 	if(!swipe && !swiping)
+ 		return;
+ 	const Point direction = swipe ? dpadDirection() : Point(0, 0);
+@@ -656,6 +673,8 @@ void BareAppLink::onButton(int button, bool pressed, bool fromStick)
+ 	// bare_app keeps L2 and R2 for the volume. F1 and F2 are held as the
+ 	// keyboard's Ctrl and Shift: a click on a stack then splits it as in
+ 	// HotA (one creature off, into equal parts).
++	if(ultraKeys && onUltraButton(button, pressed))
++		return;
+ 	switch(button)
+ 	{
+ 		case GP_A:      pushButton(SDL_CONTROLLER_BUTTON_X, pressed); break;
+@@ -686,8 +705,74 @@ void BareAppLink::onButton(int button, bool pressed, bool fromStick)
+ 	}
+ }
+ 
++/// BARE_APP_VCMI_KEYS=ogu (bare_app on the ODROID-GO Ultra)
++bool BareAppLink::ultraKeysSet()
++{
++	const char * keys = std::getenv("BARE_APP_VCMI_KEYS");
++	return keys && !std::strcmp(keys, "ogu");
++}
++
++/// The ODROID-GO Ultra's row of F1..F6: F1 (minimise) and F6 (quit) are
++/// bare_app's, F2 and F3 are held as Ctrl and Shift, F4 accepts, F5 ends
++/// the turn on the adventure map, elsewhere it is Escape: cancel, also
++/// back in the main menu's pages (the controller's b is not). The options
++/// stay on the map's own button. false: as on the OGA.
++bool BareAppLink::onUltraButton(int button, bool pressed)
++{
++	switch(button)
++	{
++		case GP_F1:
++		case GP_F6:
++			return true;
++		case GP_F2:
++			ctrl = pressed;
++			return true;
++		case GP_F3:
++			shift = pressed;
++			return true;
++		case GP_F4:
++			pushButton(SDL_CONTROLLER_BUTTON_A, pressed);
++			return true;
++		case GP_F5:
++			// the release goes to what the press was, also if the map has gone meanwhile
++			if(pressed)
++				f5EndsTurn = adventureInt && adventureInt->isActive()
++					&& adventureInt->getAdventureShortcuts().optionCanEndTurn();
++			if(f5EndsTurn)
++				pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed);
++			else
++				pushKey(SDL_SCANCODE_ESCAPE, pressed);
++			return true;
++		default:
++			return false;
++	}
++}
++
++/// The right stick (the GO Ultra has one) does what the D-pad does
++void BareAppLink::onRightStick(int axis, int value)
++{
++	const uint32_t negative = GP_BIT(axis == GP_AXIS_RX ? GP_LEFT : GP_UP);
++	const uint32_t positive = GP_BIT(axis == GP_AXIS_RX ? GP_RIGHT : GP_DOWN);
++	const uint32_t held = stickDpad & (negative | positive);
++	uint32_t now = 0;
++
++	if(value >= stickDpadPress || ((held & positive) && value > stickDpadRelease))
++		now = positive;
++	else if(value <= -stickDpadPress || ((held & negative) && value < -stickDpadRelease))
++		now = negative;
++	if(now == held)
++		return;
++	stickDpad = (stickDpad & ~(negative | positive)) | now;
++	updateDpad();
++}
++
+ void BareAppLink::onAxis(int axis, int value)
+ {
++	if(axis == GP_AXIS_RX || axis == GP_AXIS_RY)
++	{
++		onRightStick(axis, value);
++		return;
++	}
+ 	// The left stick moves the cursor, from inside the magnifier
+ 	if(axis != GP_AXIS_LX && axis != GP_AXIS_LY)
+ 		return;
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -72,7 +72,8 @@ public:
+ 	/// swiping meanwhile. The on-screen keyboard steps with it too.
+ 	Point mapScrollDirection();
+ 
+-	/// F1 and F2 held: the keyboard's Ctrl and Shift for VCMI
++	/// F1 and F2 held (GO Ultra keys: F2 and F3): the keyboard's Ctrl and
++	/// Shift for VCMI
+ 	bool ctrlDown() const { return ctrl; }
+ 	bool shiftDown() const { return shift; }
+ 
+@@ -97,7 +98,11 @@ private:
+ 
+ 	void onButton(int button, bool pressed, bool fromStick);
+ 	void onAxis(int axis, int value);
++	static bool ultraKeysSet();
++	bool onUltraButton(int button, bool pressed);
++	void onRightStick(int axis, int value);
+ 	void pushButton(int sdlButton, bool pressed);
++	void pushKey(int scancode, bool pressed);
+ 	void pushAxis(int sdlAxis, int value);
+ 	Point dpadDirection() const;
+ 	void updateDpad();
+@@ -124,6 +129,10 @@ private:
+ 	Point stick;		///< last left stick values
+ 	bool ctrl = false;	///< F1 held
+ 	bool shift = false;	///< F2 held
++	/// BARE_APP_VCMI_KEYS=ogu: the ODROID-GO Ultra's F keys (onUltraButton)
++	const bool ultraKeys = ultraKeysSet();
++	bool f5EndsTurn = false;	///< GO Ultra keys: F5 was pressed as end turn, not Escape
++	uint32_t stickDpad = 0;	///< D-pad directions the right stick holds, gp_button bits
+ 	Point captured;		///< the screen's size when taken, (0, 0): nothing new to present
+ 	const SDL_Surface * cursorImage = nullptr;	///< set for each frame, none: hidden
+ 	Point cursorPosition;	///< in screen pixels
