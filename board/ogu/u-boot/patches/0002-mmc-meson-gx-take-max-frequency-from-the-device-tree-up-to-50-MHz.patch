@@ -1,0 +1,35 @@
+From: OdroidLinux SDK
+Subject: [PATCH] mmc: meson-gx: take max-frequency from the device tree, up to 50 MHz
+
+The driver runs every card at 40 MHz at most (1 GHz / 25), with fixed
+phases and no tuning. On the ODROID-GO Ultra that clock sits in a bad
+spot for the SD card once the SoC is warm, as after a reboot from Linux
+under load: the partition table and small reads still work, the first
+large read (the kernel image) fails with a data error, and from then on
+nothing reads until a rescan. Tried by hand on a warm board, writing
+the CLOCK register before "load": 1 GHz / 24 and / 25 (41.7, 40 MHz)
+fail every time, / 26 (38.5 MHz), / 21 (47.6 MHz) and / 20 (50 MHz)
+load the 42 MB kernel every time. Linux runs the card at 50 MHz with
+the same phases.
+
+Take "max-frequency" from the device tree when it is given (50 MHz for
+the GO Ultra SD card in the upstream dts), but no more than 50 MHz:
+SD High Speed and eMMC HS52 are the fastest modes this driver sets up.
+
+--- a/drivers/mmc/meson_gx_mmc.c
++++ b/drivers/mmc/meson_gx_mmc.c
+@@ -349,6 +349,14 @@
+ 			MMC_MODE_HS_52MHz | MMC_MODE_HS;
+ 	cfg->f_min = DIV_ROUND_UP(SD_EMMC_CLKSRC_24M, CLK_MAX_DIV);
+ 	cfg->f_max = 40000000; /* 40 MHz */
++	/*
++	 * A device tree "max-frequency" may raise this, up to 50 MHz (SD High
++	 * Speed, eMMC HS 52), the bus clock Linux uses with the same fixed
++	 * phases. On the ODROID-GO Ultra the SD card fails reads at
++	 * 40-42 MHz once the SoC is warm, at 38 and 47-50 MHz it does not.
++	 */
++	cfg->f_max = min_t(u32, dev_read_u32_default(dev, "max-frequency", cfg->f_max),
++			   50000000);
+ 	cfg->b_max = 511; /* max 512 - 1 blocks */
+ 	cfg->name = dev->name;
+ 

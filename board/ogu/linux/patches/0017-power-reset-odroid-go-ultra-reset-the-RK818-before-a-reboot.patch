@@ -1,0 +1,152 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: reset: odroid-go-ultra: reset the RK818 before a reboot
+
+After a reboot (PSCI SYSTEM_RESET) mainline U-Boot could not read the
+SD card for minutes: "No partition table", 128-block reads failing,
+while the card still identified itself. A power-on never had this, and
+a reset from U-Boot itself did not clear it either. BL2 shows the
+difference too: its DDR delay line count (bdlr_100_average) is 349-357
+after every power-on and 420 after every reboot from Linux.
+
+The SoC reset does not touch the PMICs, so the board came back up with
+the supply voltages Linux left (cpufreq's lowest: vddcpu_a 775-800 mV,
+vddcpu_b 737.5 mV, against 1100 mV after power-on).
+
+Before the reboot, set DEV_OFF_RST on the RK818 as the vendor kernel
+does (Hardkernel odroidgoU-4.9.y, rk818_shutdown() for SYSTEM_RESTART),
+with the RK817 SLEEP pin set as for power off. On this board that does
+not cut the power, but the next boot finds the RK818 at its power-on
+values (vddcpu_a 1.1 V, vddao_3v3 3.3 V), BL2 counts 349 again and
+U-Boot reads the card. Done from a RESTART_PREPARE handler, where the
+I2C writes may sleep; the SoC reset follows 50 ms later.
+
+Also set poweroff_data->dev, which was never set: the messages were
+printed for "(NULL device *)".
+
+--- a/drivers/power/reset/odroid-go-ultra-poweroff.c
++++ b/drivers/power/reset/odroid-go-ultra-poweroff.c
+@@ -11,6 +11,7 @@
+ #include <linux/module.h>
+ #include <linux/reboot.h>
+ #include <linux/i2c.h>
++#include <linux/delay.h>
+ 
+ /*
+  * The Odroid Go Ultra has 2 PMICs:
+@@ -32,6 +33,17 @@
+  *
+  * The polarity is set together with the function: changing the polarity of a
+  * pin that is already in its active state would trigger the function at once.
++ *
++ * A reset of the SoC alone (PSCI) does not touch the PMICs: the board comes
++ * back up with the supply voltages Linux left, cpufreq's lowest ones. After
++ * that the boot loader cannot read the SD card for minutes (read errors at
++ * 40 MHz), and BL2 measures 20% slower DDR delay lines than after a power-on.
++ * Before a reboot, set DEV_OFF_RST on the RK818 as the vendor kernel does
++ * (rk818_shutdown() for SYSTEM_RESTART). On this board that does not cut the
++ * power, but it brings the RK818 registers back to their power-on values
++ * (vddcpu_a 1.1 V, vddao_3v3 3.3 V seen by the next boot); the RK817 SLEEP
++ * pin is set as for power off in case it does power the board down. The SoC
++ * reset follows as usual.
+  */
+ 
+ struct odroid_go_ultra_poweroff_data {
+@@ -40,9 +52,10 @@
+ 	struct device *rk818;
+ };
+ 
+-static int odroid_go_ultra_poweroff_prepare(struct sys_off_data *data)
++/* DEV_OFF (power off) or DEV_OFF_RST (reset to power-on values) on the RK818 */
++static int odroid_go_ultra_pmics_off(struct odroid_go_ultra_poweroff_data *poweroff_data,
++				     unsigned int rk818_bit, const char *what)
+ {
+-	struct odroid_go_ultra_poweroff_data *poweroff_data = data->cb_data;
+ 	struct regmap *rk817, *rk818;
+ 	int ret;
+ 
+@@ -50,17 +63,17 @@
+ 	rk817 = dev_get_regmap(poweroff_data->rk817, NULL);
+ 	if (!rk817) {
+ 		dev_err(poweroff_data->dev, "failed to get rk817 regmap\n");
+-		return notifier_from_errno(-EINVAL);
++		return -EINVAL;
+ 	}
+ 
+ 	/* RK818 Regmap */
+ 	rk818 = dev_get_regmap(poweroff_data->rk818, NULL);
+ 	if (!rk818) {
+ 		dev_err(poweroff_data->dev, "failed to get rk818 regmap\n");
+-		return notifier_from_errno(-EINVAL);
++		return -EINVAL;
+ 	}
+ 
+-	dev_info(poweroff_data->dev, "Setting PMICs for power off");
++	dev_info(poweroff_data->dev, "Setting PMICs for %s", what);
+ 
+ 	/* RK817: power down on its SLEEP pin going high */
+ 	ret = regmap_update_bits(rk817, RK817_SYS_CFG(3),
+@@ -68,17 +81,33 @@
+ 				 SLPPIN_DN_FUN | RK817_SLPPOL_H);
+ 	if (ret) {
+ 		dev_err(poweroff_data->dev, "failed to set the rk817 sleep pin\n");
+-		return notifier_from_errno(ret);
++		return ret;
+ 	}
+ 
+ 	/* RK818 */
+-	ret = regmap_update_bits(rk818, RK818_DEVCTRL_REG, DEV_OFF, DEV_OFF);
++	ret = regmap_update_bits(rk818, RK818_DEVCTRL_REG, rk818_bit, rk818_bit);
+ 	if (ret) {
+-		dev_err(poweroff_data->dev, "failed to poweroff rk818\n");
+-		return notifier_from_errno(ret);
++		dev_err(poweroff_data->dev, "failed to set rk818 DEVCTRL for %s\n", what);
++		return ret;
+ 	}
+ 
+-	return NOTIFY_OK;
++	return 0;
++}
++
++static int odroid_go_ultra_poweroff_prepare(struct sys_off_data *data)
++{
++	return notifier_from_errno(odroid_go_ultra_pmics_off(data->cb_data, DEV_OFF,
++							     "power off"));
++}
++
++static int odroid_go_ultra_restart_prepare(struct sys_off_data *data)
++{
++	struct odroid_go_ultra_poweroff_data *poweroff_data = data->cb_data;
++
++	/* Then the SoC reset (PSCI); give the RK818 time first, as the vendor does */
++	if (!odroid_go_ultra_pmics_off(poweroff_data, DEV_OFF_RST, "restart"))
++		msleep(50);
++	return NOTIFY_DONE;
+ }
+ 
+ static void odroid_go_ultra_poweroff_put_pmic_device(void *data)
+@@ -117,6 +146,7 @@
+ 	if (!poweroff_data)
+ 		return -ENOMEM;
+ 
++	poweroff_data->dev = &pdev->dev;
+ 	dev_set_drvdata(&pdev->dev, poweroff_data);
+ 
+ 	/* RK818 PMIC Device */
+@@ -140,7 +170,16 @@
+ 	if (ret)
+ 		return dev_err_probe(&pdev->dev, ret, "failed to register sys-off handler\n");
+ 
+-	dev_info(&pdev->dev, "Registered Power-Off handler\n");
++	/* Restart: the same, sleepable too, before the SoC reset handlers */
++	ret = devm_register_sys_off_handler(&pdev->dev,
++					    SYS_OFF_MODE_RESTART_PREPARE,
++					    SYS_OFF_PRIO_DEFAULT,
++					    odroid_go_ultra_restart_prepare,
++					    poweroff_data);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "failed to register restart handler\n");
++
++	dev_info(&pdev->dev, "Registered Power-Off and Restart handlers\n");
+ 
+ 	return 0;
+ }
