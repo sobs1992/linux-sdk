@@ -1,7 +1,8 @@
 #!/bin/bash
 # Glue separately built components into an SD card image.
 #
-#   sector 0        MBR (disk id DISK_ID)
+#   sector 0        MBR (disk id DISK_ID); MBR_CODE, if set, is a file with
+#                   up to 440 bytes of boot code for its start
 #   RAW             raw bootloader blobs ("file@sector ..."), below 16 MiB
 #   16M             p1 FAT32 "BOOT" (bootable): kernel, dtbs, extlinux.conf,
 #                   BOOT_FILES ("src[:name] ...", e.g. MLO, RPi firmware)
@@ -24,6 +25,7 @@ OUT_IMG=$1
 : "${KERNEL:?}" "${LINUX_DIR:?}" "${ROOTFS_TAR:?}" "${CMDLINE:?}"
 : "${BOOT_SIZE_MB:?}" "${ROOTFS_FREE_MB:?}" "${DISK_ID:?}" "${WORK_DIR:?}"
 RAW=${RAW:-}
+MBR_CODE=${MBR_CODE:-}
 BOOT_FILES=${BOOT_FILES:-}
 DTB_LAYOUT=${DTB_LAYOUT:-tree}
 DATA_START_MB=${DATA_START_MB:-}
@@ -42,7 +44,7 @@ need mcopy mtools
 need mke2fs e2fsprogs
 need fakeroot fakeroot
 
-for f in "$KERNEL" "$ROOTFS_TAR"; do
+for f in "$KERNEL" "$ROOTFS_TAR" ${MBR_CODE:+"$MBR_CODE"}; do
 	[ -e "$f" ] || die "missing $f: build the component first"
 done
 
@@ -152,6 +154,10 @@ start=$P1_START, size=$boot_sectors, type=c, bootable
 start=$p2_start, size=$root_sectors, type=83
 EOT
 
+if [ -n "$MBR_CODE" ]; then
+	[ "$(stat -c %s "$MBR_CODE")" -le 440 ] || die "$MBR_CODE is larger than 440 bytes"
+	dd if="$MBR_CODE" of="$TMP_IMG" conv=notrunc status=none
+fi
 put() { dd if="$1" of="$TMP_IMG" bs=1M seek=$(( $2 * 512 )) oflag=seek_bytes conv=notrunc status=none; }
 while read -r sector file; do
 	if [ -n "$sector" ]; then put "$file" "$sector"; fi

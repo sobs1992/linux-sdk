@@ -70,6 +70,7 @@ UBOOT_FRAGMENTS     := $(foreach f,$(UBOOT_FRAGMENTS),$(call sdkpath,$(f)))
 LINUX_FRAGMENTS     := $(foreach f,$(LINUX_FRAGMENTS),$(call sdkpath,$(f)))
 LINUX_EXT_MODULES   := $(foreach m,$(LINUX_EXT_MODULES),$(call sdkpath,$(m)))
 LINUX_PATCHES       := $(if $(strip $(LINUX_PATCHES)),$(call sdkpath,$(strip $(LINUX_PATCHES))))
+UBOOT_PATCHES       := $(if $(strip $(UBOOT_PATCHES)),$(call sdkpath,$(strip $(UBOOT_PATCHES))))
 
 # ----------------------------------------------------------------------------
 # Kconfig helpers (U-Boot and Linux)
@@ -126,10 +127,49 @@ tfa-clean: check-fw
 	rm -rf $(TFA_OUT)
 
 # ----------------------------------------------------------------------------
+# Patched source trees
+#
+# With <COMP>_PATCHES (a directory of *.patch, applied in name order) a
+# component is built from $(OUT)/<comp>-src: the committed state of its
+# source (git archive) with the patches applied, made again when the commit
+# or a patch changes. The source stays as checked out; edits not committed
+# there are not built then: make them patches. git archive gives every file
+# the commit's time, so the files the old and the new patches touch get a
+# new one: their objects are rebuilt when a patch changes or goes away.
+#
+# $(call patched-tree,<label>,<source>,<tree>,<patch files>)
+define patched-tree
+	@id="$$(git -C $(2) rev-parse HEAD) $$(cat $(4) /dev/null | sha1sum | cut -d' ' -f1)"; \
+	if [ "$$(cat $(3)/.sdk-tree 2>/dev/null)" != "$$id" ]; then \
+		echo ">>> $(1) tree $(3): $(2) $$(git -C $(2) describe --always) + $(words $(4)) patch(es)"; \
+		old="$$(cat $(3)/.sdk-files 2>/dev/null)"; \
+		rm -rf $(3) && mkdir -p $(3) && \
+		git -C $(2) archive HEAD | tar -x -C $(3) && \
+		for p in $(4); do \
+			echo "Applying $$(basename $$p)"; \
+			patch -d $(3) -p1 -s --no-backup-if-mismatch -i $$p || exit 1; \
+		done && \
+		new="$$(cat $(4) /dev/null | sed -n 's|^+++ b/||p' | sort -u)" && \
+		for f in $$old $$new; do [ ! -e $(3)/$$f ] || touch $(3)/$$f; done && \
+		echo "$$new" > $(3)/.sdk-files && \
+		echo "$$id" > $(3)/.sdk-tree; \
+	fi
+endef
+
+# ----------------------------------------------------------------------------
 # U-Boot
 
 UBOOT_OUT := $(OUT)/u-boot
-UBOOT_MAKE = $(MAKE) -C $(UBOOT_SRC) O=$(UBOOT_OUT) CROSS_COMPILE=$(CROSS_COMPILE) $(UBOOT_MAKE_ARGS)
+
+# U-Boot patches: see "Patched source trees" above
+ifneq ($(UBOOT_PATCHES),)
+UBOOT_TREE := $(OUT)/u-boot-src
+UBOOT_PATCH_FILES := $(sort $(wildcard $(UBOOT_PATCHES)/*.patch))
+else
+UBOOT_TREE := $(UBOOT_SRC)
+endif
+
+UBOOT_MAKE = $(MAKE) -C $(UBOOT_TREE) O=$(UBOOT_OUT) CROSS_COMPILE=$(CROSS_COMPILE) $(UBOOT_MAKE_ARGS)
 
 ifeq ($(UBOOT_BL31),tf-a)
 UBOOT_BL31_FILE := $(TFA_BL31)
@@ -145,20 +185,38 @@ RK_TRUST_BL31 := $(call sdkpath,$(RK_TRUST_BL31))
 RK_LEGACY_IMAGES := $(IMAGES_DIR)/uboot.img $(IMAGES_DIR)/trust.img
 endif
 
+# Amlogic FIP: U-Boot as BL33 packed with Amlogic's BL2/BL30/BL31 blobs,
+# fetched from AML_FIP_URL/<file> and checked against AML_FIP_HASH
+ifneq ($(strip $(AML_FIP_FILES)),)
+AML_FIP_BLOBS  := $(OUT)/fip-blobs
+AML_FIP_IMAGES := $(IMAGES_DIR)/u-boot-fip.bin $(IMAGES_DIR)/u-boot-fip-mbr.bin
+endif
+
 ifneq ($(FW),)
 $(call inputs-stamp,$(UBOOT_OUT),$(UBOOT_DEFCONFIG) $(UBOOT_FRAGMENTS))
 endif
 
-$(UBOOT_OUT)/.config: $(UBOOT_OUT)/.sdk-inputs $(filter /%,$(UBOOT_DEFCONFIG)) $(UBOOT_FRAGMENTS)
-	$(call kconfig-configure,$(UBOOT_MAKE),$(UBOOT_OUT),$(UBOOT_DEFCONFIG),$(UBOOT_FRAGMENTS),$(UBOOT_SRC))
+$(UBOOT_OUT)/.config: $(UBOOT_OUT)/.sdk-inputs $(filter /%,$(UBOOT_DEFCONFIG)) $(UBOOT_FRAGMENTS) | uboot-tree
+	$(call kconfig-configure,$(UBOOT_MAKE),$(UBOOT_OUT),$(UBOOT_DEFCONFIG),$(UBOOT_FRAGMENTS),$(UBOOT_TREE))
+
+.PHONY: uboot-tree
+uboot-tree: check-fw
+ifneq ($(UBOOT_PATCHES),)
+	$(call patched-tree,U-Boot,$(UBOOT_SRC),$(UBOOT_TREE),$(UBOOT_PATCH_FILES))
+endif
 
 .PHONY: uboot uboot-configure uboot-menuconfig uboot-savedefconfig uboot-clean
-uboot: check-cc $(UBOOT_DEPS) $(UBOOT_OUT)/.config
+uboot: check-cc uboot-tree $(UBOOT_DEPS) $(UBOOT_OUT)/.config
 	$(UBOOT_MAKE) -j$(JOBS) $(if $(UBOOT_BL31_FILE),BL31=$(UBOOT_BL31_FILE))
 	@mkdir -p $(IMAGES_DIR)
 	cp $(addprefix $(UBOOT_OUT)/,$(UBOOT_IMAGES)) $(IMAGES_DIR)/
 ifeq ($(RK_LEGACY),y)
 	$(SDK_DIR)/scripts/rk-legacy-pack.sh $(RKBIN_DIR) $(UBOOT_OUT) $(RK_TRUST_BL31) $(IMAGES_DIR)
+endif
+ifneq ($(strip $(AML_FIP_FILES)),)
+	$(SDK_DIR)/scripts/fetch-files.sh $(AML_FIP_URL) $(DL_DIR)/$(AML_FIP_NAME) \
+		$(call sdkpath,$(AML_FIP_HASH)) $(AML_FIP_BLOBS) $(AML_FIP_FILES)
+	$(SDK_DIR)/scripts/amlogic-fip.sh $(AML_FIP_BLOBS) $(UBOOT_OUT)/u-boot.bin $(IMAGES_DIR)
 endif
 
 uboot-configure: check-cc $(UBOOT_OUT)/.config
@@ -170,7 +228,8 @@ uboot-savedefconfig: check-cc $(UBOOT_OUT)/.config
 	$(call kconfig-savedefconfig,$(UBOOT_MAKE),$(UBOOT_OUT),$(UBOOT_DEFCONFIG))
 
 uboot-clean: check-fw
-	rm -rf $(UBOOT_OUT) $(addprefix $(IMAGES_DIR)/,$(notdir $(UBOOT_IMAGES))) $(RK_LEGACY_IMAGES)
+	rm -rf $(UBOOT_OUT) $(addprefix $(IMAGES_DIR)/,$(notdir $(UBOOT_IMAGES))) $(RK_LEGACY_IMAGES) \
+		$(AML_FIP_IMAGES) $(AML_FIP_BLOBS) $(if $(UBOOT_PATCHES),$(UBOOT_TREE))
 
 # ----------------------------------------------------------------------------
 # Boot firmware blobs (e.g. Raspberry Pi GPU firmware), fetched by URL and
@@ -194,11 +253,7 @@ bootfw-clean: check-fw
 
 LINUX_OUT := $(OUT)/linux
 
-# The tree the kernel is built from. With LINUX_PATCHES (a directory of
-# *.patch, applied in name order) it is $(OUT)/linux-src: the committed state
-# of LINUX_SRC (git archive) with the patches applied, made again when the
-# commit or a patch changes. LINUX_SRC stays as checked out; edits not
-# committed there are not built then: make them patches.
+# Kernel patches: see "Patched source trees" above
 ifneq ($(LINUX_PATCHES),)
 LINUX_TREE := $(OUT)/linux-src
 LINUX_PATCH_FILES := $(sort $(wildcard $(LINUX_PATCHES)/*.patch))
@@ -215,27 +270,10 @@ endif
 $(LINUX_OUT)/.config: $(LINUX_OUT)/.sdk-inputs $(filter /%,$(LINUX_DEFCONFIG)) $(LINUX_FRAGMENTS) | linux-tree
 	$(call kconfig-configure,$(LINUX_MAKE),$(LINUX_OUT),$(LINUX_DEFCONFIG),$(LINUX_FRAGMENTS),$(LINUX_TREE))
 
-# The patched tree. git archive gives every file the commit's time, so the
-# files the old and the new patches touch get a new one: their objects are
-# rebuilt when a patch changes or goes away.
 .PHONY: linux-tree
 linux-tree: check-fw
 ifneq ($(LINUX_PATCHES),)
-	@id="$$(git -C $(LINUX_SRC) rev-parse HEAD) $$(cat $(LINUX_PATCH_FILES) /dev/null | sha1sum | cut -d' ' -f1)"; \
-	if [ "$$(cat $(LINUX_TREE)/.sdk-tree 2>/dev/null)" != "$$id" ]; then \
-		echo ">>> Kernel tree $(LINUX_TREE): $(LINUX_SRC) $$(git -C $(LINUX_SRC) describe --always) + $(words $(LINUX_PATCH_FILES)) patch(es)"; \
-		old="$$(cat $(LINUX_TREE)/.sdk-files 2>/dev/null)"; \
-		rm -rf $(LINUX_TREE) && mkdir -p $(LINUX_TREE) && \
-		git -C $(LINUX_SRC) archive HEAD | tar -x -C $(LINUX_TREE) && \
-		for p in $(LINUX_PATCH_FILES); do \
-			echo "Applying $$(basename $$p)"; \
-			patch -d $(LINUX_TREE) -p1 -s --no-backup-if-mismatch -i $$p || exit 1; \
-		done && \
-		new="$$(cat $(LINUX_PATCH_FILES) /dev/null | sed -n 's|^+++ b/||p' | sort -u)" && \
-		for f in $$old $$new; do [ ! -e $(LINUX_TREE)/$$f ] || touch $(LINUX_TREE)/$$f; done && \
-		echo "$$new" > $(LINUX_TREE)/.sdk-files && \
-		echo "$$id" > $(LINUX_TREE)/.sdk-tree; \
-	fi
+	$(call patched-tree,Kernel,$(LINUX_SRC),$(LINUX_TREE),$(LINUX_PATCH_FILES))
 endif
 
 .PHONY: linux linux-configure linux-menuconfig linux-savedefconfig linux-clean
@@ -348,6 +386,7 @@ image: check-fw
 	LINUX_DIR=$(LINUX_INSTALL) \
 	DTB_LAYOUT=$(IMAGE_DTB_LAYOUT) \
 	RAW="$(call sdkpath-pairs,$(IMAGE_RAW),@)" \
+	MBR_CODE=$(if $(IMAGE_MBR_CODE),$(call sdkpath,$(IMAGE_MBR_CODE))) \
 	BOOT_FILES="$(call sdkpath-pairs,$(IMAGE_BOOT_FILES),:)" \
 	ROOTFS_TAR=$(IMAGES_DIR)/rootfs.tar \
 	CMDLINE="$(LINUX_CMDLINE)" \
@@ -385,7 +424,9 @@ info: check-fw
 	@echo "Compiler:  $(CROSS_COMPILE)gcc"
 	@$(if $(TFA_PLAT),echo "TF-A:      $(TFA_SRC) $(call gitdesc,$(TFA_SRC)) PLAT=$(TFA_PLAT)",true)
 	@echo "U-Boot:    $(UBOOT_SRC) $(call gitdesc,$(UBOOT_SRC)) $(UBOOT_DEFCONFIG) $(notdir $(UBOOT_FRAGMENTS))"
+	@$(if $(UBOOT_PATCHES),echo "           + $(words $(UBOOT_PATCH_FILES)) patch(es) from $(UBOOT_PATCHES) -> $(UBOOT_TREE)",true)
 	@$(if $(UBOOT_BL31_FILE),echo "BL31:      $(UBOOT_BL31_FILE)",true)
+	@$(if $(strip $(AML_FIP_FILES)),echo "FIP:       $(AML_FIP_NAME) -> u-boot-fip.bin",true)
 	@$(if $(strip $(BOOTFW_FILES)),echo "Boot FW:   $(BOOTFW_NAME): $(BOOTFW_FILES)",true)
 	@echo "Linux:     $(LINUX_SRC) $(call gitdesc,$(LINUX_SRC)) ARCH=$(LINUX_ARCH) $(LINUX_DEFCONFIG) $(notdir $(LINUX_FRAGMENTS))"
 	@$(if $(LINUX_PATCHES),echo "           + $(words $(LINUX_PATCH_FILES)) patch(es) from $(LINUX_PATCHES) -> $(LINUX_TREE)",true)

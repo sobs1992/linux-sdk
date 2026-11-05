@@ -1,0 +1,59 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: reset: odroid-go-ultra: power off the RK817 by its SLEEP pin
+
+The driver set DEV_OFF on the RK817 and then on the RK818. Powered off
+that way, the RK817 only comes back on with the power key, and not
+reliably when USB power is present: the RK818 then powers up on its own
+(ON_SOURCE plug-in), the RK817 that feeds the boot CPU stays off, and the
+SoC hangs half powered (a few garbage bytes on the UART) until the
+battery is cut by holding the power key with USB unplugged.
+
+Do what the vendor kernel does (Hardkernel odroidgoU-4.9.y,
+rk817_shutdown_prepare() and rk818_shutdown()): set the RK817 SLEEP pin
+function to "power down", active high, and DEV_OFF on the RK818 only.
+The SoC holds the SLEEP pin low while it runs; when the RK818 cuts its
+power the pin goes high and the RK817 powers down, and it comes back on
+with the RK818. Tested: power off, plug USB in, the board wakes up and
+boots cleanly (ON_SOURCE plug-in), as with the factory system.
+
+--- a/drivers/power/reset/odroid-go-ultra-poweroff.c
++++ b/drivers/power/reset/odroid-go-ultra-poweroff.c
+@@ -17,7 +17,21 @@
+  * - RK818 (manages the battery and USB-C power supply)
+  * - RK817
+  * Both PMICs feeds power to the S922X SoC, so they must be powered-off in sequence.
+- * Vendor does power-off the RK817 first, then the RK818 so here we follow this sequence.
++ *
++ * The vendor kernel (Hardkernel odroidgoU-4.9.y, rk817_shutdown_prepare() and
++ * rk818_shutdown()) sets DEV_OFF on the RK818 only. Before that the RK817
++ * SLEEP pin is set to the "power down" function, active high: the pin is low
++ * while the SoC runs and goes high once the RK818 has cut the SoC's power,
++ * which then powers the RK817 down. Turned off this way, the RK817 comes back
++ * on by itself whenever the RK818 does (power key or USB plug-in).
++ *
++ * Setting DEV_OFF on the RK817 instead leaves it waiting for the power key
++ * alone: with USB power present the RK818 then comes up without it, and the
++ * SoC is left half powered and dead until the battery is disconnected or the
++ * power key is held down long enough with USB unplugged.
++ *
++ * The polarity is set together with the function: changing the polarity of a
++ * pin that is already in its active state would trigger the function at once.
+  */
+ 
+ struct odroid_go_ultra_poweroff_data {
+@@ -48,10 +62,12 @@
+ 
+ 	dev_info(poweroff_data->dev, "Setting PMICs for power off");
+ 
+-	/* RK817 */
+-	ret = regmap_update_bits(rk817, RK817_SYS_CFG(3), DEV_OFF, DEV_OFF);
++	/* RK817: power down on its SLEEP pin going high */
++	ret = regmap_update_bits(rk817, RK817_SYS_CFG(3),
++				 RK817_SLPPIN_FUNC_MSK | RK817_SLPPOL_MSK,
++				 SLPPIN_DN_FUN | RK817_SLPPOL_H);
+ 	if (ret) {
+-		dev_err(poweroff_data->dev, "failed to poweroff rk817\n");
++		dev_err(poweroff_data->dev, "failed to set the rk817 sleep pin\n");
+ 		return notifier_from_errno(ret);
+ 	}
+ 

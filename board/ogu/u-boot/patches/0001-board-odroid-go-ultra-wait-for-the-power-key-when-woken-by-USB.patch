@@ -1,0 +1,133 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: wait for the power key when woken by USB power
+
+Powered off as the vendor kernel does (DEV_OFF on the RK818 only, the
+RK817 by its SLEEP pin; Linux patch 0016 of the SDK), the board powers
+up again by itself when USB power is plugged in, or right away when it
+was still present at power-off.
+
+Do as the factory U-Boot does, without its charging pictures: stay here
+while the battery charges, start when the power key is pressed (RK817
+PWRON_FALL interrupt status), power off again the same way when USB
+power goes away. A key on the serial console stops the wait and the
+autoboot.
+
+A power up by USB is told by the RK818 ON_SOURCE "plug-in" bit together
+with a pending RK818 PLUG_IN interrupt. ON_SOURCE alone keeps its value
+over a reboot, and the RK817 ON_SOURCE says "power key" also when the
+RK817 came up behind the RK818 on USB power. Linux clears the interrupt,
+and so does this code before it goes on.
+
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -3,13 +3,110 @@
+  * Copyright (C) 2023 Neil Armstrong <neil.armstrong@linaro.org>
+  */
+ 
++#include <console.h>
++#include <dm.h>
++#include <env.h>
+ #include <log.h>
+ #include <asm/arch/boot.h>
++#include <linux/bitops.h>
++#include <linux/delay.h>
++#include <power/pmic.h>
+ #include <power/regulator.h>
+ 
++/*
++ * The GO Ultra has two PMICs: the RK818 (battery, charger, USB-C power and
++ * most of the SoC's supplies) and the RK817 (the boot CPU cluster, audio).
++ * The power key is wired to the RK817.
++ *
++ * Linux powers the board off as the vendor kernel does: DEV_OFF on the
++ * RK818 only, the RK817 then goes off by its SLEEP pin. Off like this, the
++ * RK818 powers up again by itself when USB power comes (plug-in, or still
++ * present at power-off), and the RK817 follows it. Plugging in a charger
++ * must not start the system: wait here, charging, until the power key is
++ * pressed, and power off again when USB power goes away.
++ */
++#define RK818_SUP_STS		0xa0
++#define RK818_SUP_STS_USB_EXS	BIT(1)
++#define RK818_DEVCTRL		0x4b
++#define RK818_INT_STS2		0x4e
++#define RK818_INT_PLUG_IN	BIT(0)
++#define RK818_ON_SOURCE		0xae
++#define RK8XX_ON_PLUG_IN	BIT(6)
++#define RK817_SYS_CFG3		0xf4
++#define RK817_SLPPIN_FUNC_MSK	(0x3 << 3)
++#define RK817_SLPPIN_DN_FUN	(0x2 << 3)
++#define RK817_SLPPOL_H		BIT(5)
++#define RK817_INT_STS0		0xf8
++#define RK817_INT_PWRON_FALL	BIT(0)	/* power key pressed */
++#define DEV_OFF			BIT(0)
++
+ int mmc_get_env_dev(void)
+ {
+ 	if (meson_get_boot_device() == BOOT_DEVICE_EMMC)
+ 		return 1;
+ 	return 0;
+ }
++
++static void ogu_power_off(struct udevice *rk817, struct udevice *rk818)
++{
++	printf("Power off\n");
++	mdelay(10);
++	pmic_clrsetbits(rk817, RK817_SYS_CFG3,
++			RK817_SLPPIN_FUNC_MSK | RK817_SLPPOL_H,
++			RK817_SLPPIN_DN_FUN | RK817_SLPPOL_H);
++	pmic_clrsetbits(rk818, RK818_DEVCTRL, 0, DEV_OFF);
++	mdelay(1000);
++	printf("Still powered\n");
++}
++
++int meson_board_late_init(void)
++{
++	struct udevice *rk817, *rk818;
++	int on818, irq818, sts;
++
++	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@20", &rk817) ||
++	    uclass_get_device_by_name(UCLASS_PMIC, "pmic@1c", &rk818))
++		return 0;
++
++	/*
++	 * ON_SOURCE keeps its value over a reboot, and the RK817 one says
++	 * "power key" also when it came up with the RK818 on USB power. A
++	 * PLUG_IN interrupt still pending tells a power up by USB: Linux
++	 * clears it once it runs.
++	 */
++	on818 = pmic_reg_read(rk818, RK818_ON_SOURCE);
++	irq818 = pmic_reg_read(rk818, RK818_INT_STS2);
++	if (on818 < 0 || irq818 < 0 || !(on818 & RK8XX_ON_PLUG_IN) ||
++	    !(irq818 & RK818_INT_PLUG_IN))
++		return 0;
++
++	printf("Woken by USB power: charging, press the power key to start\n");
++	pmic_reg_write(rk817, RK817_INT_STS0, RK817_INT_PWRON_FALL);
++	for (;;) {
++		if (tstc()) {
++			getchar();
++			printf("Key on the console: stopping here\n");
++			env_set("bootdelay", "-1");
++			break;
++		}
++		sts = pmic_reg_read(rk817, RK817_INT_STS0);
++		if (sts > 0 && (sts & RK817_INT_PWRON_FALL)) {
++			pmic_reg_write(rk817, RK817_INT_STS0, RK817_INT_PWRON_FALL);
++			printf("Power key: starting\n");
++			break;
++		}
++		/* USB gone: twice in a row, 100 ms apart */
++		sts = pmic_reg_read(rk818, RK818_SUP_STS);
++		if (sts >= 0 && !(sts & RK818_SUP_STS_USB_EXS)) {
++			mdelay(100);
++			sts = pmic_reg_read(rk818, RK818_SUP_STS);
++			if (sts >= 0 && !(sts & RK818_SUP_STS_USB_EXS))
++				ogu_power_off(rk817, rk818);
++		}
++		mdelay(50);
++	}
++
++	/* A reset from here on must not wait again */
++	pmic_reg_write(rk818, RK818_INT_STS2, RK818_INT_PLUG_IN);
++	return 0;
++}

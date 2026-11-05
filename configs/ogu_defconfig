@@ -1,10 +1,15 @@
 # Firmware: ODROID-GO Ultra (Amlogic S922X: 4x A73 + 2x A53, arm64).
-# The factory bootloader on the eMMC (Amlogic BL2/BL31 + Hardkernel U-Boot
-# 2015.01) stays as it is: it sources boot.ini from the first card that has
-# one, in the order of its ${mmc_list} env (mmc 0 = eMMC, mmc 1 = SD card).
-# The boot.ini on this image chainloads mainline U-Boot (u-boot.bin), which
-# boots extlinux.conf from the SD card. For the card to win over the eMMC,
-# the factory U-Boot needs "setenv mmc_list 1 0; saveenv" once (UART).
+# The BootROM loads the bootloader from sector 1 of the eMMC, or of the SD
+# card if the eMMC holds none. This image carries both ways to boot:
+#  - our own: mainline U-Boot packed as BL33 with Amlogic's BL2/BL30/BL31
+#    (the FIP, u-boot-fip.bin at sector 1), used once the factory
+#    bootloader on the eMMC is erased;
+#  - the factory bootloader on the eMMC (Amlogic BL2/BL31 + Hardkernel
+#    U-Boot 2015.01) sources boot.ini from the first card that has one, in
+#    the order of its ${mmc_list} env (mmc 0 = eMMC, mmc 1 = SD card), and
+#    boot.ini chainloads mainline U-Boot (u-boot.bin). For the card to win
+#    over the eMMC it needs "setenv mmc_list 1 0; saveenv" once (UART).
+# Either way mainline U-Boot boots extlinux.conf from the SD card.
 #
 # See configs/oga_defconfig for the meaning of the variables.
 
@@ -15,7 +20,22 @@ CROSS_COMPILE := aarch64-linux-gnu-
 UBOOT_SRC       := src/u-boot
 UBOOT_DEFCONFIG := odroid-go-ultra_defconfig
 UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/ogu.config
+# U-Boot patches (*.patch, in name order), applied to a copy of UBOOT_SRC:
+# woken by USB power, wait for the power key while charging
+UBOOT_PATCHES   := $(BOARD_DIR)/u-boot/patches
 UBOOT_IMAGES    := u-boot.bin
+
+# --- Amlogic FIP (LibreELEC amlogic-boot-fip, odroid-go-ultra) ---
+# Hardkernel's blobs: the same BL2 / BL31 builds and DDR settings (acs.bin)
+# as the factory bootloader. Amlogic's licence forbids redistributing them,
+# so they are fetched at build time and checked against AML_FIP_HASH.
+AML_FIP_COMMIT := b6600f2857fdf81d11f18ea7a2e44aa989e7bcc4
+AML_FIP_NAME   := amlogic-boot-fip-$(AML_FIP_COMMIT)-odroid-go-ultra
+AML_FIP_URL    := https://github.com/LibreELEC/amlogic-boot-fip/raw/$(AML_FIP_COMMIT)/odroid-go-ultra
+AML_FIP_FILES  := aml_encrypt_g12b bl2.bin acs.bin bl30.bin bl301.bin bl31.img \
+                  ddr4_1d.fw ddr4_2d.fw ddr3_1d.fw piei.fw lpddr4_1d.fw \
+                  lpddr4_2d.fw diag_lpddr4.fw aml_ddr.fw
+AML_FIP_HASH   := $(BOARD_DIR)/fip/amlogic-boot-fip.sha256
 
 # --- Linux ---
 LINUX_SRC       := src/linux
@@ -47,10 +67,11 @@ APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y
 
 # --- SD card image ---
-# Layout: [MBR][p1 FAT32 BOOT @16M: boot.ini, u-boot.bin, Image, dtbs,
-#          extlinux][p2 ext4 rootfs]. Nothing below 16M: the SoC boots the
-# factory bootloader from the eMMC.
+# Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,
+#          u-boot.bin, Image, dtbs, extlinux][p2 ext4 rootfs]
 IMAGE_NAME := ogu
+IMAGE_RAW      := $(IMAGES_DIR)/u-boot-fip.bin@1
+IMAGE_MBR_CODE := $(IMAGES_DIR)/u-boot-fip-mbr.bin
 IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
 # U-Boot builds fdtfile as amlogic/<name>.dtb
 IMAGE_DTB_LAYOUT := tree

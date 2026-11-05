@@ -18,7 +18,7 @@ SDK для ARM-плат на mainline-компонентах:
 | Прошивка | Плата | SoC | Загрузка |
 |---|---|---|---|
 | `oga` | ODROID-GO Advance / Black Edition / Super | RK3326, A35, arm64 | idbloader + u-boot.itb (+ RK legacy для SPI) |
-| `ogu` | ODROID-GO Ultra | S922X, A73 + A53, arm64 | заводской U-Boot с eMMC → boot.ini → u-boot.bin с FAT |
+| `ogu` | ODROID-GO Ultra | S922X, A73 + A53, arm64 | FIP (BL2/BL31 Amlogic + mainline U-Boot) с сектора 1 SD |
 | `bbb` | BeagleBone Black / Green (+ Wireless) | AM335x, A8, armhf | ROM → MLO → u-boot.img с FAT |
 | `rpi1` | Raspberry Pi 1 A/A+/B/B+, Zero, Zero W, CM1 | BCM2835, ARM1176, armhf | GPU firmware → U-Boot |
 | `rpi4` | Raspberry Pi 4 B, Raspberry Pi 400, CM4 | BCM2711, A72, arm64 | EEPROM + GPU firmware → U-Boot |
@@ -393,21 +393,38 @@ VCMI остаются в `/data/config/vcmi`.
 
 ## ODROID-GO Ultra (`ogu`)
 
-Заводской загрузчик на eMMC (BL2/BL31 Amlogic + U-Boot 2015.01 Hardkernel) не
-трогается: на SD нет ничего ниже 16M. Заводской U-Boot исполняет `boot.ini` с
-первой карты из `${mmc_list}` (`mmc 0` — eMMC, `mmc 1` — SD), наш `boot.ini`
-запускает с той же карты mainline U-Boot (`u-boot.bin`), дальше extlinux как везде.
-С завода `mmc_list=0 1`, и SD не грузится никогда, поэтому один раз через UART
-(консоль заводского U-Boot `odroidgou#`, autoboot 1 с — жать пробел при включении):
+BootROM ищет загрузчик с сектора 1 сначала на eMMC, потом на SD. Образ несёт свой
+FIP: mainline U-Boot как BL33 вместе с BL2/BL30/BL31 Amlogic (`u-boot-fip.bin` с
+сектора 1, 440 байт загрузочного кода в секторе 0). Блобы берутся из
+`amlogic-boot-fip` LibreELEC (`odroid-go-ultra`, коммит в `configs/ogu_defconfig`,
+sha256 в `board/ogu/fip`): те же сборки BL2/BL31 и настройки DDR, что у заводского
+загрузчика. Распространять их лицензия Amlogic запрещает, поэтому `make uboot` их
+скачивает, а `scripts/amlogic-fip.sh` собирает FIP (`aml_encrypt_g12b` — x86-64).
+
+Чтобы BootROM дошёл до SD, заводской загрузчик на eMMC нужно стереть (байты
+0x200–0xF0000; заводская Ubuntu и её разделы остаются):
 
 ```
-setenv mmc_list 1 0
-saveenv
+dd if=/dev/zero of=/dev/mmcblk1 bs=512 seek=1 count=1919 conv=fsync   # mmcblk1 — eMMC, проверить!
 ```
 
-После этого с вставленной картой грузится SDK, без неё — заводская Ubuntu с eMMC.
-Откат: `setenv mmc_list 0 1; saveenv`. Окружение лежит на eMMC по смещению 0xF0000
-(64 КиБ); перед `saveenv` стоит снять первые 16 МиБ eMMC.
+Перед этим снять первые 16 МиБ eMMC: из них заводской загрузчик и возвращается.
+Пока он на месте, образ грузится и через него: заводской U-Boot исполняет
+`boot.ini` с первой карты из `${mmc_list}` (`mmc 0` — eMMC, `mmc 1` — SD; нужен
+`setenv mmc_list 1 0; saveenv`), а `boot.ini` запускает mainline `u-boot.bin` с FAT.
+
+Питание: два PMIC, RK818 (аккумулятор, USB-C, почти всё питание SoC) и RK817
+(загрузочный кластер CPU, звук; на нём кнопка питания). Linux выключает плату как
+ядро Hardkernel (патч 0016): `DEV_OFF` только у RK818, RK817 гаснет по своему
+выводу SLEEP. Тогда плата сама включается при подключении USB, в том числе сразу,
+если USB был подключён при выключении. U-Boot в этом случае (патч
+`board/ogu/u-boot/patches/0001`) ждёт, пока идёт зарядка: кнопка питания —
+загрузка, USB отключили — выключение. Экран при этом не горит.
+
+Известная проблема: после перезагрузки (`reboot`) из Linux U-Boot может минутами
+не читать SD-карту (`No partition table - mmc 0`) и остаётся в своей консоли.
+Холодный старт читает карту нормально. Пока: выключать (`poweroff`), а не
+перезагружать.
 
 Консоль `ttyAML0`, 115200 с самого BL2. Патчи ядра в
 `board/ogu/linux/patches`: экран (DSI, панель ST7701 и исправления DSI-энкодера
