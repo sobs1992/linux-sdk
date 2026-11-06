@@ -1,0 +1,22 @@
+From: OdroidLinux SDK
+Subject: [PATCH] clk: meson: g12a: add the MIPI DSI host and PHY gates
+
+The D-PHY and the DSI host take them as their "pclk": without them
+clk_enable() is a silent no-op and the blocks are left gated.
+---
+ drivers/clk/meson/g12a.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/clk/meson/g12a.c b/drivers/clk/meson/g12a.c
+index f33938e1419..4030c5c326e 100644
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -125,6 +125,8 @@ static struct meson_gate gates[NUM_CLKS] = {
+ 	MESON_GATE(CLKID_HTX_PCLK, HHI_GCLK_MPEG2, 4),
+ 	MESON_GATE(CLKID_USB1_DDR_BRIDGE, HHI_GCLK_MPEG2, 8),
+ 	MESON_GATE(CLKID_VPU_INTR, HHI_GCLK_MPEG2, 25),
++	MESON_GATE(CLKID_MIPI_DSI_HOST, HHI_GCLK_MPEG0, 3),
++	MESON_GATE(CLKID_MIPI_DSI_PHY, HHI_GCLK_MPEG0, 20),
+ 
+ 	/* Peripheral Gates */
+ 	MESON_GATE(CLKID_FCLK_DIV2, HHI_FIX_PLL_CNTL1, 24),

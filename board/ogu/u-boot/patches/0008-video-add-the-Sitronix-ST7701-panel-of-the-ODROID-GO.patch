@@ -1,0 +1,337 @@
+From: OdroidLinux SDK
+Subject: [PATCH] video: add the Sitronix ST7701 panel of the ODROID-GO Ultra
+
+The ODROID-GO Ultra's KD50T048A panel: 480x854, 2 DSI lanes, RGB888,
+timing and init sequence as in Linux with ROCKNIX's "odroid,go-ultra-panel"
+entry (spycat88). Probe powers it up and releases the reset (120 + 150 ms
+as Linux); enable_backlight sends the init sequence; set_backlight
+starts the PWM backlight, which pwm_backlight only does from
+backlight_enable().
+---
+ drivers/video/Kconfig           |   9 +
+ drivers/video/Makefile          |   1 +
+ drivers/video/sitronix-st7701.c | 283 ++++++++++++++++++++++++++++++++
+ 3 files changed, 293 insertions(+)
+ create mode 100644 drivers/video/sitronix-st7701.c
+
+diff --git a/drivers/video/Kconfig b/drivers/video/Kconfig
+index c2acc13139c..1bfecf90778 100644
+--- a/drivers/video/Kconfig
++++ b/drivers/video/Kconfig
+@@ -552,6 +552,15 @@ config VIDEO_LCD_HIMAX_HX8394
+ 	Say Y here if you want to enable support for Himax HX8394
+ 	dsi 4dl panel.
+ 
++config VIDEO_LCD_SITRONIX_ST7701
++	bool "Sitronix ST7701 DSI LCD panels"
++	depends on PANEL && BACKLIGHT && DM_GPIO
++	select VIDEO_MIPI_DSI
++	help
++	  Say Y here to enable support for MIPI DSI panels with the
++	  Sitronix ST7701 controller. Supported: the panel of the
++	  ODROID-GO Ultra.
++
+ config VIDEO_LCD_ILITEK_ILI9806E
+ 	bool "Ilitek ILI9806E-based panels"
+ 	depends on PANEL && BACKLIGHT
+diff --git a/drivers/video/Makefile b/drivers/video/Makefile
+index 082b8967982..6188057ea4c 100644
+--- a/drivers/video/Makefile
++++ b/drivers/video/Makefile
+@@ -59,6 +59,7 @@ obj-$(CONFIG_VIDEO_IVYBRIDGE_IGD) += ivybridge_igd.o
+ obj-$(CONFIG_VIDEO_LCD_PANEL_EDP_4_LANE_1620M_VIA_ANX9804) += anx9804.o
+ obj-$(CONFIG_VIDEO_LCD_ENDEAVORU) += endeavoru-panel.o
+ obj-$(CONFIG_VIDEO_LCD_HIMAX_HX8394) += himax-hx8394.o
++obj-$(CONFIG_VIDEO_LCD_SITRONIX_ST7701) += sitronix-st7701.o
+ obj-$(CONFIG_VIDEO_LCD_HITACHI_TX10D07VM0BAA) += hitachi-tx10d07vm0baa.o
+ obj-$(CONFIG_VIDEO_LCD_HITACHI_TX18D42VM) += hitachi_tx18d42vm_lcd.o
+ obj-$(CONFIG_VIDEO_LCD_ILITEK_ILI9806E) += ilitek-ili9806e.o
+diff --git a/drivers/video/sitronix-st7701.c b/drivers/video/sitronix-st7701.c
+new file mode 100644
+index 00000000000..5be135f25cc
+--- /dev/null
++++ b/drivers/video/sitronix-st7701.c
+@@ -0,0 +1,283 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Sitronix ST7701 MIPI DSI panels
++ *
++ * Only the ODROID-GO Ultra panel for now: its timing and the vendor init
++ * sequence, as in Linux drivers/gpu/drm/panel/panel-sitronix-st7701.c
++ * with ROCKNIX's "odroid,go-ultra-panel" support (spycat88).
++ * That sequence starts with a software reset and sets everything itself,
++ * so the generic ST7701 setup that Linux sends before it is left out.
++ */
++
++#include <backlight.h>
++#include <dm.h>
++#include <log.h>
++#include <mipi_display.h>
++#include <mipi_dsi.h>
++#include <panel.h>
++#include <asm/gpio.h>
++#include <dm/device_compat.h>
++#include <linux/delay.h>
++#include <power/regulator.h>
++
++struct st7701_desc {
++	const struct display_timing *timing;
++	unsigned int lanes;
++	enum mipi_dsi_pixel_format format;
++	int (*init)(struct mipi_dsi_device *dsi);
++};
++
++struct st7701_priv {
++	const struct st7701_desc *desc;
++	struct udevice *vcc;
++	struct udevice *iovcc;
++	struct udevice *backlight;
++	struct gpio_desc reset;
++};
++
++#define st7701_write(dsi, cmd, seq...) do {				\
++		static const u8 d[] = { seq };				\
++		int ret;						\
++									\
++		ret = mipi_dsi_dcs_write(dsi, cmd, d, ARRAY_SIZE(d));	\
++		if (ret < 0)						\
++			return ret;					\
++	} while (0)
++
++static int go_ultra_init(struct mipi_dsi_device *dsi)
++{
++	st7701_write(dsi, 0x01);
++	mdelay(5);
++	st7701_write(dsi, 0x11);
++	mdelay(120);
++
++	st7701_write(dsi, 0xFF, 0x77, 0x01, 0x00, 0x00, 0x10);
++	st7701_write(dsi, 0xC0, 0xE9, 0x03);
++	st7701_write(dsi, 0xC1, 0x11, 0x02);
++	st7701_write(dsi, 0xC2, 0x31, 0x08);
++	st7701_write(dsi, 0xCC, 0x10);
++	st7701_write(dsi, 0xB0, 0x00, 0x0D, 0x14, 0x0D, 0x10, 0x05, 0x02, 0x08,
++		     0x08, 0x1E, 0x05, 0x13, 0x11, 0xA3, 0x29, 0x18);
++	st7701_write(dsi, 0xB1, 0x00, 0x0C, 0x14, 0x0C, 0x10, 0x05, 0x03, 0x08,
++		     0x07, 0x20, 0x05, 0x13, 0x11, 0xA4, 0x29, 0x18);
++	st7701_write(dsi, 0xFF, 0x77, 0x01, 0x00, 0x00, 0x11);
++	st7701_write(dsi, 0xB0, 0x6C);
++	st7701_write(dsi, 0xB1, 0x43);
++	st7701_write(dsi, 0xB2, 0x07);
++	st7701_write(dsi, 0xB3, 0x80);
++	st7701_write(dsi, 0xB5, 0x47);
++	st7701_write(dsi, 0xB7, 0x85);
++	st7701_write(dsi, 0xB8, 0x20);
++	st7701_write(dsi, 0xB9, 0x10);
++	st7701_write(dsi, 0xC1, 0x78);
++	st7701_write(dsi, 0xC3, 0x78);
++	st7701_write(dsi, 0xD0, 0x88);
++	mdelay(120);
++
++	st7701_write(dsi, 0xE0, 0x00, 0x00, 0x02);
++	st7701_write(dsi, 0xE1, 0x08, 0x00, 0x0A, 0x00, 0x07, 0x00, 0x09,
++		     0x00, 0x00, 0x33, 0x33);
++	st7701_write(dsi, 0xE2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		     0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
++	st7701_write(dsi, 0xE3, 0x00, 0x00, 0x33, 0x33);
++	st7701_write(dsi, 0xE4, 0x44, 0x44);
++	st7701_write(dsi, 0xE5, 0x0E, 0x60, 0xA0, 0xA0, 0x10, 0x60, 0xA0,
++		     0xA0, 0x0A, 0x60, 0xA0, 0xA0, 0x0C, 0x60, 0xA0, 0xA0);
++	st7701_write(dsi, 0xE6, 0x00, 0x00, 0x33, 0x33);
++	st7701_write(dsi, 0xE7, 0x44, 0x44);
++	st7701_write(dsi, 0xE8, 0x0D, 0x60, 0xA0, 0xA0, 0x0F, 0x60, 0xA0,
++		     0xA0, 0x09, 0x60, 0xA0, 0xA0, 0x0B, 0x60, 0xA0, 0xA0);
++	st7701_write(dsi, 0xEB, 0x02, 0x01, 0xE4, 0xE4, 0x44, 0x00, 0x40);
++	st7701_write(dsi, 0xEC, 0x02, 0x01);
++	st7701_write(dsi, 0xED, 0xAB, 0x89, 0x76, 0x54, 0x01, 0xFF, 0xFF,
++		     0xFF, 0xFF, 0xFF, 0xFF, 0x10, 0x45, 0x67, 0x98, 0xBA);
++	st7701_write(dsi, 0xFF, 0x77, 0x01, 0x00, 0x00, 0x00);
++	st7701_write(dsi, 0x3A, 0x70);
++	st7701_write(dsi, 0x53, 0xEC);
++	st7701_write(dsi, 0x55, 0xB3);
++	st7701_write(dsi, 0x5E, 0xFF);
++	st7701_write(dsi, 0x29);
++	mdelay(50);
++
++	return 0;
++}
++
++static const struct display_timing go_ultra_timing = {
++	.pixelclock.typ		= 29170000,
++	.hactive.typ		= 480,
++	.hfront_porch.typ	= 12,
++	.hsync_len.typ		= 12,
++	.hback_porch.typ	= 38,
++	.vactive.typ		= 854,
++	.vfront_porch.typ	= 2,
++	.vsync_len.typ		= 19,
++	.vback_porch.typ	= 22,
++};
++
++static const struct st7701_desc go_ultra_desc = {
++	.timing = &go_ultra_timing,
++	.lanes = 2,
++	.format = MIPI_DSI_FMT_RGB888,
++	.init = go_ultra_init,
++};
++
++/* Init sequence and display on; the backlight comes with set_backlight */
++static int st7701_enable_backlight(struct udevice *dev)
++{
++	struct mipi_dsi_panel_plat *plat = dev_get_plat(dev);
++	struct st7701_priv *priv = dev_get_priv(dev);
++	struct mipi_dsi_device *dsi = plat->device;
++	int ret;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0)
++		return ret;
++
++	ret = priv->desc->init(dsi);
++	if (ret < 0) {
++		dev_err(dev, "init sequence failed (%d)\n", ret);
++		return ret;
++	}
++
++	st7701_write(dsi, MIPI_DCS_SET_DISPLAY_ON, 0x00);
++
++	return 0;
++}
++
++static int st7701_set_backlight(struct udevice *dev, int percent)
++{
++	struct st7701_priv *priv = dev_get_priv(dev);
++	int ret;
++
++	if (!priv->backlight)
++		return -ENOSYS;
++
++	if (percent == BACKLIGHT_OFF)
++		return backlight_set_brightness(priv->backlight, percent);
++
++	/* Starts the PWM, at the default level */
++	ret = backlight_enable(priv->backlight);
++	if (ret || percent == BACKLIGHT_DEFAULT)
++		return ret;
++
++	return backlight_set_brightness(priv->backlight, percent);
++}
++
++static int st7701_get_display_timing(struct udevice *dev,
++				     struct display_timing *timing)
++{
++	struct st7701_priv *priv = dev_get_priv(dev);
++
++	*timing = *priv->desc->timing;
++
++	return 0;
++}
++
++static int st7701_of_to_plat(struct udevice *dev)
++{
++	struct st7701_priv *priv = dev_get_priv(dev);
++	int ret;
++
++	priv->desc = (const struct st7701_desc *)dev_get_driver_data(dev);
++
++	if (CONFIG_IS_ENABLED(DM_REGULATOR)) {
++		ret = device_get_supply_regulator(dev, "VCC-supply",
++						  &priv->vcc);
++		if (ret && ret != -ENOENT)
++			return ret;
++		ret = device_get_supply_regulator(dev, "IOVCC-supply",
++						  &priv->iovcc);
++		if (ret && ret != -ENOENT)
++			return ret;
++	}
++
++	ret = uclass_get_device_by_phandle(UCLASS_PANEL_BACKLIGHT, dev,
++					   "backlight", &priv->backlight);
++	if (ret) {
++		dev_warn(dev, "no backlight (%d)\n", ret);
++		priv->backlight = NULL;
++	}
++
++	/* Low: in reset (the reset line is described active high) */
++	ret = gpio_request_by_name(dev, "reset-gpios", 0, &priv->reset,
++				   GPIOD_IS_OUT);
++	if (ret && ret != -ENOENT)
++		return ret;
++
++	return 0;
++}
++
++static int st7701_supply_on(struct udevice *reg)
++{
++	struct dm_regulator_uclass_plat *uc;
++	int ret;
++
++	if (!reg)
++		return 0;
++
++	/* The fixed voltage from the device tree (min == max) */
++	uc = dev_get_uclass_plat(reg);
++	if (uc->min_uV > 0 && uc->min_uV == uc->max_uV &&
++	    regulator_get_value(reg) != uc->min_uV) {
++		ret = regulator_set_value(reg, uc->min_uV);
++		if (ret)
++			return ret;
++	}
++
++	ret = regulator_set_enable_if_allowed(reg, true);
++	if (ret && ret != -EALREADY && ret != -ENOSYS)
++		return ret;
++
++	return 0;
++}
++
++/* Power up and reset, as Linux st7701_prepare() */
++static int st7701_probe(struct udevice *dev)
++{
++	struct mipi_dsi_panel_plat *plat = dev_get_plat(dev);
++	struct st7701_priv *priv = dev_get_priv(dev);
++	int ret;
++
++	dm_gpio_set_value(&priv->reset, 0);
++
++	ret = st7701_supply_on(priv->vcc);
++	if (!ret && priv->iovcc != priv->vcc)
++		ret = st7701_supply_on(priv->iovcc);
++	if (ret) {
++		dev_err(dev, "supply: %d\n", ret);
++		return ret;
++	}
++	mdelay(120);
++
++	dm_gpio_set_value(&priv->reset, 1);
++	mdelay(150);
++
++	plat->lanes = priv->desc->lanes;
++	plat->format = priv->desc->format;
++	plat->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++			   MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	return 0;
++}
++
++static const struct panel_ops st7701_ops = {
++	.enable_backlight = st7701_enable_backlight,
++	.set_backlight = st7701_set_backlight,
++	.get_display_timing = st7701_get_display_timing,
++};
++
++static const struct udevice_id st7701_ids[] = {
++	{ .compatible = "odroid,go-ultra-panel", .data = (ulong)&go_ultra_desc },
++	{ }
++};
++
++U_BOOT_DRIVER(sitronix_st7701) = {
++	.name		= "sitronix_st7701",
++	.id		= UCLASS_PANEL,
++	.of_match	= st7701_ids,
++	.ops		= &st7701_ops,
++	.of_to_plat	= st7701_of_to_plat,
++	.probe		= st7701_probe,
++	.plat_auto	= sizeof(struct mipi_dsi_panel_plat),
++	.priv_auto	= sizeof(struct st7701_priv),
++};

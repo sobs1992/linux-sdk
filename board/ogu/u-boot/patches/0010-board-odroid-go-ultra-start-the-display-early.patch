@@ -1,0 +1,119 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: start the display early
+
+Probe the video device from board_early_init_r(), right after relocation
+and the stdio tables: the panel lights up before the storage and the
+console come up. Not from board_init(): stdio_init_tables() runs after
+it and drops the vidconsole registered by the probe (white screen with
+the logo, no text). Set vddao_3v3 to its 3.0 V first.
+
+While waiting for the power key on USB power, keep the message on the
+panel for 3 s, then turn the backlight off; back on when the system
+starts.
+---
+ .../amlogic/odroid-go-ultra/odroid-go-ultra.c | 52 ++++++++++++++++++-
+ 1 file changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+index 8d5c6d990fd..fd8b14bfd0a 100644
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -3,6 +3,7 @@
+  * Copyright (C) 2023 Neil Armstrong <neil.armstrong@linaro.org>
+  */
+ 
++#include <backlight.h>
+ #include <console.h>
+ #include <dm.h>
+ #include <env.h>
+@@ -12,6 +13,7 @@
+ #include <linux/delay.h>
+ #include <power/pmic.h>
+ #include <power/regulator.h>
++#include <time.h>
+ 
+ /*
+  * The GO Ultra has two PMICs: the RK818 (battery, charger, USB-C power and
+@@ -40,6 +42,41 @@
+ #define RK817_INT_PWRON_FALL	BIT(0)	/* power key pressed */
+ #define DEV_OFF			BIT(0)
+ 
++/*
++ * Light the panel as early as U-Boot can: right after relocation and the
++ * stdio tables, before the storage and the console are set up (the video
++ * uclass would otherwise come up with the console, in stdio_add_devices()).
++ * Not in board_init(): stdio_init_tables() comes after it and would drop
++ * the vidconsole registered by the probe.
++ *
++ * vddao_3v3 first, at the 3.0 V of the device tree: with 3.3 V the panel
++ * shows horizontal stripes. Probing the regulator sets it.
++ */
++int board_early_init_r(void)
++{
++	struct udevice *dev;
++
++	if (regulator_get_by_platname("vddao_3v3", &dev))
++		printf("vddao_3v3: not set\n");
++
++	if (IS_ENABLED(CONFIG_VIDEO) &&
++	    uclass_first_device_err(UCLASS_VIDEO, &dev))
++		printf("Display: not started\n");
++
++	return 0;
++}
++
++static struct udevice *ogu_backlight(void)
++{
++	struct udevice *dev;
++
++	if (!IS_ENABLED(CONFIG_BACKLIGHT) ||
++	    uclass_first_device_err(UCLASS_PANEL_BACKLIGHT, &dev))
++		return NULL;
++
++	return dev;
++}
++
+ int mmc_get_env_dev(void)
+ {
+ 	if (meson_get_boot_device() == BOOT_DEVICE_EMMC)
+@@ -61,8 +98,9 @@ static void ogu_power_off(struct udevice *rk817, struct udevice *rk818)
+ 
+ int meson_board_late_init(void)
+ {
+-	struct udevice *rk817, *rk818;
++	struct udevice *rk817, *rk818, *backlight;
+ 	int on818, irq818, sts;
++	ulong start;
+ 
+ 	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@20", &rk817) ||
+ 	    uclass_get_device_by_name(UCLASS_PMIC, "pmic@1c", &rk818))
+@@ -82,7 +120,14 @@ int meson_board_late_init(void)
+ 
+ 	printf("Woken by USB power: charging, press the power key to start\n");
+ 	pmic_reg_write(rk817, RK817_INT_STS0, RK817_INT_PWRON_FALL);
++	/* The message stays on the panel for a while, then it goes dark */
++	backlight = ogu_backlight();
++	start = get_timer(0);
+ 	for (;;) {
++		if (backlight && get_timer(start) > 3000) {
++			backlight_set_brightness(backlight, BACKLIGHT_OFF);
++			backlight = NULL;
++		}
+ 		if (tstc()) {
+ 			getchar();
+ 			printf("Key on the console: stopping here\n");
+@@ -106,6 +151,11 @@ int meson_board_late_init(void)
+ 		mdelay(50);
+ 	}
+ 
++	/* Lit again (no-op if it never went off) */
++	backlight = ogu_backlight();
++	if (backlight)
++		backlight_set_brightness(backlight, BACKLIGHT_DEFAULT);
++
+ 	/* A reset from here on must not wait again */
+ 	pmic_reg_write(rk818, RK818_INT_STS2, RK818_INT_PLUG_IN);
+ 	return 0;
+-- 
+2.53.0
+

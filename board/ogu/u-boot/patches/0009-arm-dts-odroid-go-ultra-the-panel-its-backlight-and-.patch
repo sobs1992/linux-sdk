@@ -1,0 +1,83 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm: dts: odroid-go-ultra: the panel, its backlight and rails
+
+The upstream board dts has no display. Add the MIPI DSI panel, its PWM
+backlight and the D-PHYs as the SDK's Linux dts does, without the
+assigned-clocks the U-Boot clock driver cannot set (the DSI driver sets
+those clocks itself). vddao_3v3 and vcc_lcd at 3.0 V as Hardkernel sets
+them: with vddao_3v3 at 3.3 V the panel shows horizontal stripes.
+---
+ .../meson-g12b-odroid-go-ultra-u-boot.dtsi    | 63 +++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi b/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
+index 1c0f9765eb2..1a06c5ca678 100644
+--- a/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
++++ b/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
+@@ -22,3 +22,66 @@
+ &vdd_ee {
+ 	regulator-init-microvolt = <875000>;
+ };
++
++/*
++ * The display, as the Linux dts of the OdroidLinux SDK has it: the KD50T048A
++ * panel (ST7701, "odroid,go-ultra-panel") on MIPI DSI, 2 lanes, its PWM
++ * backlight on PWM_F (GPIOH_5). The rails as Hardkernel sets them:
++ * vddao_3v3 and vcc_lcd at 3.0 V, else the panel shows horizontal stripes.
++ */
++/ {
++	panel_backlight: backlight {
++		compatible = "pwm-backlight";
++		pwms = <&pwm_ef 1 40000 0>;
++		brightness-levels = <0 255>;
++		default-brightness-level = <255>;
++	};
++};
++
++&vddao_3v3 {
++	regulator-min-microvolt = <3000000>;
++	regulator-max-microvolt = <3000000>;
++
++	regulator-state-mem {
++		regulator-suspend-microvolt = <3000000>;
++	};
++};
++
++&vcc_lcd {
++	regulator-always-on;
++	regulator-boot-on;
++	regulator-min-microvolt = <3000000>;
++	regulator-max-microvolt = <3000000>;
++};
++
++&mipi_analog_dphy {
++	status = "okay";
++};
++
++&mipi_dphy {
++	status = "okay";
++};
++
++&mipi_dsi {
++	status = "okay";
++
++	/* Unknown to the U-Boot clock driver: the DSI driver sets them */
++	/delete-property/ assigned-clocks;
++	/delete-property/ assigned-clock-parents;
++
++	panel@0 {
++		compatible = "odroid,go-ultra-panel", "sitronix,st7701";
++		reg = <0>;
++		reset-gpios = <&gpio GPIOH_4 GPIO_ACTIVE_HIGH>;
++		IOVCC-supply = <&vcc_lcd>;
++		VCC-supply = <&vcc_lcd>;
++		backlight = <&panel_backlight>;
++		rotation = <270>;
++	};
++};
++
++&pwm_ef {
++	status = "okay";
++	pinctrl-0 = <&pwm_f_h_pins>;
++	pinctrl-names = "default";
++};

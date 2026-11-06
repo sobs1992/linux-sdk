@@ -1,0 +1,1042 @@
+From: OdroidLinux SDK
+Subject: [PATCH] video: meson: add MIPI DSI output
+
+The VPU driver knew CVBS and HDMI. Add the third output of the G12A,
+G12B and SM1: the ENCL encoder feeding the Synopsys DesignWare MIPI DSI
+host, as in Linux (meson_encoder_dsi.c, meson_dw_mipi_dsi.c, the ENCL
+parts of meson_venc.c).
+
+meson_dw_mipi_dsi: a video bridge for "amlogic,meson-g12a-dw-mipi-dsi",
+with the generic dw_mipi_dsi host and the AXG/G12A D-PHY. The U-Boot
+G12A clock driver has neither the GP0 PLL nor the video clocks, so it
+sets them itself: GP0 at the lane bit rate, the D-PHY bit clock GP0/1,
+the pixel clock GP0 / (bpp / lanes) through VCLK2 to CTS_ENCL.
+
+The order is that of Linux: host and D-PHY up in command mode and the
+panel init commands, then the encoder, then video mode and the
+backlight. Fed pixels while still in command mode, the host overflows
+its DPI FIFO and never puts the data lanes in HS: black screen.
+
+The VPU takes this path when the DSI node on its DPI port (port 2) is
+enabled. The panel node's "rotation" turns the console. The OSD stays
+in RGB: neither the OSD1 RGB->YUV matrix nor the POST2 matrix.
+---
+ drivers/video/meson/Kconfig             |  14 +
+ drivers/video/meson/Makefile            |   1 +
+ drivers/video/meson/meson_dw_mipi_dsi.c | 528 ++++++++++++++++++++++++
+ drivers/video/meson/meson_registers.h   |   1 +
+ drivers/video/meson/meson_venc.c        | 215 ++++++++++
+ drivers/video/meson/meson_vpu.c         | 130 +++++-
+ drivers/video/meson/meson_vpu.h         |   4 +
+ 7 files changed, 881 insertions(+), 12 deletions(-)
+ create mode 100644 drivers/video/meson/meson_dw_mipi_dsi.c
+
+diff --git a/drivers/video/meson/Kconfig b/drivers/video/meson/Kconfig
+index 77c3017382e..e0462795f72 100644
+--- a/drivers/video/meson/Kconfig
++++ b/drivers/video/meson/Kconfig
+@@ -11,3 +11,17 @@ config VIDEO_MESON
+ 	imply VIDEO_DAMAGE
+ 	help
+ 	  Enable Amlogic Meson Video Processing Unit video support.
++
++config VIDEO_MESON_DSI
++	bool "Amlogic MIPI DSI output"
++	depends on VIDEO_MESON && MESON_G12A
++	select VIDEO_BRIDGE
++	select VIDEO_DW_MIPI_DSI
++	select PHY
++	select MESON_AXG_MIPI_DPHY
++	select MESON_G12A_MIPI_DPHY_ANALOG
++	select DM_RESET
++	help
++	  Drive a MIPI DSI panel from the ENCL encoder through the Synopsys
++	  DesignWare DSI host of the Amlogic G12A, G12B and SM1, when the
++	  DSI node on the VPU's DPI port is enabled.
+diff --git a/drivers/video/meson/Makefile b/drivers/video/meson/Makefile
+index 1e929b343e5..433a4633cb8 100644
+--- a/drivers/video/meson/Makefile
++++ b/drivers/video/meson/Makefile
+@@ -7,3 +7,4 @@
+ obj-$(CONFIG_VIDEO_MESON) = meson_vpu.o meson_vpu_init.o meson_canvas.o
+ obj-$(CONFIG_VIDEO_MESON) += meson_plane.o meson_venc.o meson_vclk.o
+ obj-$(CONFIG_VIDEO_MESON) += meson_dw_hdmi.o simplefb_common.o ../dw_hdmi.o
++obj-$(CONFIG_VIDEO_MESON_DSI) += meson_dw_mipi_dsi.o
+diff --git a/drivers/video/meson/meson_dw_mipi_dsi.c b/drivers/video/meson/meson_dw_mipi_dsi.c
+new file mode 100644
+index 00000000000..6f1b38e0169
+--- /dev/null
++++ b/drivers/video/meson/meson_dw_mipi_dsi.c
+@@ -0,0 +1,528 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Amlogic G12A/G12B/SM1 MIPI DSI: the Synopsys DesignWare DSI host with
++ * Amlogic's top-level glue and clocks.
++ *
++ * Based on the Linux driver drivers/gpu/drm/meson/meson_dw_mipi_dsi.c
++ * Copyright (C) 2021 BayLibre, SAS
++ * Author: Neil Armstrong <narmstrong@baylibre.com>
++ * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
++ *
++ * The U-Boot clock driver of the G12A has no GP0 PLL and no video clocks,
++ * so this driver sets them itself, as the Linux clock tree does with the
++ * dsi node's assigned-clocks:
++ *
++ *   GP0 PLL (lane bit rate) --+-- MIPI_DSI_PXCLK (/1) -> D-PHY bit clock
++ *                             +-- VCLK2 (/bpp*lanes) -> VCLK2_DIV1 -> CTS_ENCL
++ *
++ * The pixel clock is the bit rate divided by bpp / lanes, so the ENCL
++ * encoder and the DSI host run exactly in step.
++ *
++ * Order, as in Linux: DSI host and D-PHY up in command mode, panel init
++ * commands (attach), then the VPU starts the encoder, then video mode and
++ * the backlight (set_backlight). The host must not get pixels while it is
++ * still in command mode: its DPI FIFO overflows and the data lanes never
++ * go to HS (black screen).
++ */
++
++#define LOG_CATEGORY UCLASS_VIDEO_BRIDGE
++
++#include <clk.h>
++#include <dm.h>
++#include <dsi_host.h>
++#include <generic-phy.h>
++#include <log.h>
++#include <mipi_dsi.h>
++#include <panel.h>
++#include <phy-mipi-dphy.h>
++#include <regmap.h>
++#include <reset.h>
++#include <syscon.h>
++#include <video_bridge.h>
++#include <asm/io.h>
++#include <dm/device-internal.h>
++#include <dm/device_compat.h>
++#include <dm/lists.h>
++#include <linux/bitfield.h>
++#include <linux/bitops.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/math64.h>
++#include <linux/time.h>
++
++/* Amlogic glue registers, after the DW MIPI DSI ones */
++#define MIPI_DSI_TOP_SW_RESET		0x3c0
++#define MIPI_DSI_TOP_SW_RESET_DWC	BIT(0)
++#define MIPI_DSI_TOP_SW_RESET_INTR	BIT(1)
++#define MIPI_DSI_TOP_SW_RESET_DPI	BIT(2)
++#define MIPI_DSI_TOP_SW_RESET_TIMING	BIT(3)
++#define MIPI_DSI_TOP_SW_RESET_ALL	(MIPI_DSI_TOP_SW_RESET_DWC | \
++					 MIPI_DSI_TOP_SW_RESET_INTR | \
++					 MIPI_DSI_TOP_SW_RESET_DPI | \
++					 MIPI_DSI_TOP_SW_RESET_TIMING)
++#define MIPI_DSI_TOP_CLK_CNTL		0x3c4
++#define MIPI_DSI_TOP_CLK_SYSCLK_EN	BIT(0)
++#define MIPI_DSI_TOP_CLK_PIXCLK_EN	BIT(1)
++#define MIPI_DSI_TOP_CNTL		0x3c8
++#define MIPI_DSI_TOP_DPI_COLOR_MODE	GENMASK(23, 20)
++#define MIPI_DSI_TOP_IN_COLOR_MODE	GENMASK(18, 16)
++#define MIPI_DSI_TOP_COMP2_SEL		GENMASK(13, 12)
++#define MIPI_DSI_TOP_COMP1_SEL		GENMASK(11, 10)
++#define MIPI_DSI_TOP_COMP0_SEL		GENMASK(9, 8)
++#define MIPI_DSI_TOP_MEM_PD		0x3f4
++
++#define VENC_IN_COLOR_24B		0x1
++#define VENC_IN_COLOR_18B		0x2
++#define DPI_COLOR_18BIT_CFG_2		4
++#define DPI_COLOR_24BIT			5
++
++/* HHI clock registers */
++#define HHI_GP0_PLL_CNTL0		0x040
++#define		GP0_PLL_LOCK		BIT(31)
++#define		GP0_PLL_RST		BIT(29)
++#define		GP0_PLL_EN		BIT(28)
++#define		GP0_PLL_OD		GENMASK(18, 16)
++#define		GP0_PLL_N		GENMASK(14, 10)
++#define		GP0_PLL_M		GENMASK(7, 0)
++#define HHI_GP0_PLL_CNTL1		0x044	/* fraction, 17 bits */
++#define HHI_GP0_PLL_CNTL2		0x048
++#define HHI_GP0_PLL_CNTL3		0x04c
++#define HHI_GP0_PLL_CNTL4		0x050
++#define HHI_GP0_PLL_CNTL5		0x054
++#define HHI_GP0_PLL_CNTL6		0x058
++#define HHI_VIID_CLK_DIV		0x128
++#define		VCLK2_DIV		GENMASK(7, 0)
++#define		CTS_ENCL_SEL		GENMASK(15, 12)
++#define		VCLK2_DIV_EN		BIT(16)
++#define		VCLK2_DIV_RESET		BIT(17)
++#define HHI_VIID_CLK_CNTL		0x12c
++#define		VCLK2_DIV1_EN		BIT(0)
++#define		VCLK2_SOFT_RESET	BIT(15)
++#define		VCLK2_SEL		GENMASK(18, 16)
++#define		VCLK2_EN		BIT(19)
++#define HHI_VID_CLK_CNTL2		0x194
++#define		CTS_ENCL_EN		BIT(3)
++#define HHI_MIPIDSI_PHY_CLK_CNTL	0x254
++#define		MIPI_DSI_PXCLK_DIV	GENMASK(6, 0)
++#define		MIPI_DSI_PXCLK_EN	BIT(8)
++#define		MIPI_DSI_PXCLK_SEL	GENMASK(14, 12)
++
++#define VCLK_SEL_GP0			1	/* vclk2 and pxclk muxes */
++#define CTS_SEL_VCLK2_DIV1		8	/* cts_encl mux */
++
++#define XTAL_RATE			24000000ULL
++
++struct meson_dw_mipi_dsi_priv {
++	void __iomem *base;
++	struct regmap *hhi;
++	struct phy phy;
++	struct phy_configure_opts_mipi_dphy phy_opts;
++	struct reset_ctl top_rst;
++	struct mipi_dsi_device device;
++	struct udevice *panel;
++	struct udevice *dsi_host;
++	struct display_timing timings;
++	bool phy_on;
++};
++
++/* GP0 PLL: DCO = 24 MHz * (M + FRAC / 2^17), 3-6 GHz; out = DCO >> OD */
++static int meson_dsi_gp0_set_rate(struct regmap *hhi, u64 rate)
++{
++	unsigned int od, m, frac, try;
++	u64 dco;
++	u32 val;
++	int ret;
++
++	for (od = 0; od <= 4; od++) {
++		dco = rate << od;
++		if (dco >= 3000000000ULL)
++			break;
++	}
++	if (od > 4 || dco > 6120000000ULL)
++		return -EINVAL;
++
++	m = div64_u64(dco, XTAL_RATE);
++	frac = div64_u64((dco - m * XTAL_RATE) << 17, XTAL_RATE);
++	if (m < 125 || m > 255)
++		return -EINVAL;
++
++	/* Linux: GP0 sometimes fails to lock in early boot */
++	for (try = 0; try < 3; try++) {
++		regmap_write(hhi, HHI_GP0_PLL_CNTL0, GP0_PLL_RST);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL0, GP0_PLL_RST |
++			     FIELD_PREP(GP0_PLL_OD, od) |
++			     FIELD_PREP(GP0_PLL_N, 1) |
++			     FIELD_PREP(GP0_PLL_M, m));
++		regmap_write(hhi, HHI_GP0_PLL_CNTL1, frac);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL2, 0x00000000);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL3, 0x48681c00);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL4, 0x33771290);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL5, 0x39272000);
++		regmap_write(hhi, HHI_GP0_PLL_CNTL6, 0x56540000);
++		regmap_update_bits(hhi, HHI_GP0_PLL_CNTL0, GP0_PLL_EN,
++				   GP0_PLL_EN);
++		udelay(10);
++		regmap_update_bits(hhi, HHI_GP0_PLL_CNTL0, GP0_PLL_RST, 0);
++
++		ret = regmap_read_poll_timeout(hhi, HHI_GP0_PLL_CNTL0, val,
++					       val & GP0_PLL_LOCK, 20, 100000);
++		if (!ret)
++			return 0;
++	}
++
++	return ret;
++}
++
++static int meson_dsi_set_clocks(struct udevice *dev, u64 bit_rate,
++				unsigned int px_div)
++{
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++	struct regmap *hhi = priv->hhi;
++	int ret;
++
++	if (!px_div || px_div > 256)
++		return -EINVAL;
++
++	/* Stop what runs from GP0 */
++	regmap_update_bits(hhi, HHI_VID_CLK_CNTL2, CTS_ENCL_EN, 0);
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_EN | VCLK2_DIV1_EN, 0);
++	regmap_update_bits(hhi, HHI_MIPIDSI_PHY_CLK_CNTL, MIPI_DSI_PXCLK_EN, 0);
++
++	ret = meson_dsi_gp0_set_rate(hhi, bit_rate);
++	if (ret) {
++		dev_err(dev, "GP0 PLL: no lock at %llu Hz (%d)\n", bit_rate, ret);
++		return ret;
++	}
++
++	/* D-PHY bit clock: GP0 / 1 */
++	regmap_update_bits(hhi, HHI_MIPIDSI_PHY_CLK_CNTL,
++			   MIPI_DSI_PXCLK_SEL | MIPI_DSI_PXCLK_DIV,
++			   FIELD_PREP(MIPI_DSI_PXCLK_SEL, VCLK_SEL_GP0));
++	regmap_update_bits(hhi, HHI_MIPIDSI_PHY_CLK_CNTL, MIPI_DSI_PXCLK_EN,
++			   MIPI_DSI_PXCLK_EN);
++
++	/* Pixel clock: GP0 -> VCLK2 / px_div -> VCLK2_DIV1 -> CTS_ENCL */
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_SEL,
++			   FIELD_PREP(VCLK2_SEL, VCLK_SEL_GP0));
++	regmap_update_bits(hhi, HHI_VIID_CLK_DIV, VCLK2_DIV | VCLK2_DIV_RESET,
++			   FIELD_PREP(VCLK2_DIV, px_div - 1));
++	regmap_update_bits(hhi, HHI_VIID_CLK_DIV, VCLK2_DIV_EN, VCLK2_DIV_EN);
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_EN, VCLK2_EN);
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_SOFT_RESET,
++			   VCLK2_SOFT_RESET);
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_SOFT_RESET, 0);
++	regmap_update_bits(hhi, HHI_VIID_CLK_CNTL, VCLK2_DIV1_EN,
++			   VCLK2_DIV1_EN);
++	regmap_update_bits(hhi, HHI_VIID_CLK_DIV, CTS_ENCL_SEL,
++			   FIELD_PREP(CTS_ENCL_SEL, CTS_SEL_VCLK2_DIV1));
++	regmap_update_bits(hhi, HHI_VID_CLK_CNTL2, CTS_ENCL_EN, CTS_ENCL_EN);
++
++	return 0;
++}
++
++static void meson_dw_mipi_dsi_hw_init(struct meson_dw_mipi_dsi_priv *priv)
++{
++	/* Software reset */
++	setbits_le32(priv->base + MIPI_DSI_TOP_SW_RESET,
++		     MIPI_DSI_TOP_SW_RESET_ALL);
++	clrbits_le32(priv->base + MIPI_DSI_TOP_SW_RESET,
++		     MIPI_DSI_TOP_SW_RESET_ALL);
++
++	/* Enable clocks */
++	setbits_le32(priv->base + MIPI_DSI_TOP_CLK_CNTL,
++		     MIPI_DSI_TOP_CLK_SYSCLK_EN | MIPI_DSI_TOP_CLK_PIXCLK_EN);
++
++	/* Take memory out of power down */
++	writel(0, priv->base + MIPI_DSI_TOP_MEM_PD);
++}
++
++static int meson_dsi_phy_init(void *priv_data)
++{
++	struct mipi_dsi_device *device = priv_data;
++	struct udevice *dev = device->dev;
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++	unsigned int dpi_data_format, venc_data_width, bpp;
++	int ret;
++
++	bpp = mipi_dsi_pixel_format_to_bpp(device->format);
++	ret = meson_dsi_set_clocks(dev, priv->phy_opts.hs_clk_rate,
++				   bpp / device->lanes);
++	if (ret)
++		return ret;
++
++	switch (device->format) {
++	case MIPI_DSI_FMT_RGB888:
++		dpi_data_format = DPI_COLOR_24BIT;
++		venc_data_width = VENC_IN_COLOR_24B;
++		break;
++	case MIPI_DSI_FMT_RGB666:
++		dpi_data_format = DPI_COLOR_18BIT_CFG_2;
++		venc_data_width = VENC_IN_COLOR_18B;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* Configure color format for DPI register */
++	writel(FIELD_PREP(MIPI_DSI_TOP_DPI_COLOR_MODE, dpi_data_format) |
++	       FIELD_PREP(MIPI_DSI_TOP_IN_COLOR_MODE, venc_data_width) |
++	       FIELD_PREP(MIPI_DSI_TOP_COMP2_SEL, 2) |
++	       FIELD_PREP(MIPI_DSI_TOP_COMP1_SEL, 1) |
++	       FIELD_PREP(MIPI_DSI_TOP_COMP0_SEL, 0),
++	       priv->base + MIPI_DSI_TOP_CNTL);
++
++	return generic_phy_configure(&priv->phy, &priv->phy_opts);
++}
++
++static int meson_dsi_get_lane_mbps(void *priv_data,
++				   struct display_timing *timings,
++				   u32 lanes, u32 format,
++				   unsigned int *lane_mbps)
++{
++	struct mipi_dsi_device *device = priv_data;
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(device->dev);
++	int bpp;
++
++	bpp = mipi_dsi_pixel_format_to_bpp(format);
++	if (bpp < 0)
++		return bpp;
++
++	phy_mipi_dphy_get_default_config(timings->pixelclock.typ, bpp, lanes,
++					 &priv->phy_opts);
++	*lane_mbps = DIV_ROUND_UP(priv->phy_opts.hs_clk_rate, USEC_PER_SEC);
++
++	return 0;
++}
++
++static int meson_dsi_get_timing(void *priv_data, unsigned int lane_mbps,
++				struct mipi_dsi_phy_timing *timing)
++{
++	struct mipi_dsi_device *device = priv_data;
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(device->dev);
++
++	/* As Linux, which took them from the vendor driver */
++	switch (priv->timings.hactive.typ) {
++	case 240:
++	case 768:
++	case 1920:
++	case 2560:
++		timing->clk_lp2hs = 23;
++		timing->clk_hs2lp = 38;
++		timing->data_lp2hs = 15;
++		timing->data_hs2lp = 9;
++		break;
++	default:
++		timing->clk_lp2hs = 37;
++		timing->clk_hs2lp = 135;
++		timing->data_lp2hs = 50;
++		timing->data_hs2lp = 3;
++	}
++
++	return 0;
++}
++
++static void meson_dsi_get_esc_clk_rate(void *priv_data,
++				       unsigned int *esc_clk_rate)
++{
++	*esc_clk_rate = 4; /* MHz */
++}
++
++static const struct mipi_dsi_phy_ops meson_dsi_phy_ops = {
++	.init = meson_dsi_phy_init,
++	.get_lane_mbps = meson_dsi_get_lane_mbps,
++	.get_timing = meson_dsi_get_timing,
++	.get_esc_clk_rate = meson_dsi_get_esc_clk_rate,
++};
++
++static int meson_dw_mipi_dsi_attach(struct udevice *dev)
++{
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++	struct mipi_dsi_device *device = &priv->device;
++	struct mipi_dsi_panel_plat *mplat;
++	int ret;
++
++	ret = device_find_first_child_by_uclass(dev, UCLASS_PANEL,
++						&priv->panel);
++	if (ret) {
++		dev_err(dev, "no panel (%d)\n", ret);
++		return ret;
++	}
++
++	/* Powers the panel up and takes it out of reset */
++	ret = device_probe(priv->panel);
++	if (ret) {
++		dev_err(dev, "panel %s: probe failed (%d)\n",
++			priv->panel->name, ret);
++		return ret;
++	}
++
++	mplat = dev_get_plat(priv->panel);
++	mplat->device = device;
++	device->dev = dev;
++	device->lanes = mplat->lanes;
++	device->format = mplat->format;
++	device->mode_flags = mplat->mode_flags;
++
++	ret = panel_get_display_timing(priv->panel, &priv->timings);
++	if (ret) {
++		ret = ofnode_decode_display_timing(dev_ofnode(priv->panel), 0,
++						   &priv->timings);
++		if (ret) {
++			dev_err(dev, "no display timing (%d)\n", ret);
++			return ret;
++		}
++	}
++
++	ret = device_find_first_child_by_uclass(dev, UCLASS_DSI_HOST,
++						&priv->dsi_host);
++	if (!ret)
++		ret = device_probe(priv->dsi_host);
++	if (ret) {
++		dev_err(dev, "no DSI host (%d)\n", ret);
++		return ret;
++	}
++
++	ret = generic_phy_init(&priv->phy);
++	if (ret)
++		return ret;
++
++	meson_dw_mipi_dsi_hw_init(priv);
++
++	/* Clocks, D-PHY and host setup; leaves the host in command mode */
++	ret = dsi_host_init(priv->dsi_host, device, &priv->timings, 4,
++			    &meson_dsi_phy_ops);
++	if (ret) {
++		dev_err(dev, "DSI host init failed (%d)\n", ret);
++		return ret;
++	}
++
++	ret = generic_phy_power_on(&priv->phy);
++	if (ret) {
++		dev_err(dev, "D-PHY power on failed (%d)\n", ret);
++		return ret;
++	}
++	priv->phy_on = true;
++
++	/* Panel init commands, before the encoder runs */
++	ret = panel_enable_backlight(priv->panel);
++	if (ret) {
++		dev_err(dev, "panel %s: init failed (%d)\n",
++			priv->panel->name, ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++/* Called once the VPU feeds the encoder: video mode, then the backlight */
++static int meson_dw_mipi_dsi_set_backlight(struct udevice *dev, int percent)
++{
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++	int ret;
++
++	if (!priv->phy_on)
++		return -ENODEV;
++
++	ret = dsi_host_enable(priv->dsi_host);
++	if (ret) {
++		dev_err(dev, "DSI video mode failed (%d)\n", ret);
++		return ret;
++	}
++
++	ret = panel_set_backlight(priv->panel, percent);
++	if (ret && ret != -ENOSYS)
++		dev_warn(dev, "backlight: %d\n", ret);
++
++	return 0;
++}
++
++static int meson_dw_mipi_dsi_get_display_timing(struct udevice *dev,
++						struct display_timing *timing)
++{
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++
++	if (!priv->panel)
++		return -ENODEV;
++
++	*timing = priv->timings;
++
++	return 0;
++}
++
++static int meson_dw_mipi_dsi_bind(struct udevice *dev)
++{
++	int ret;
++
++	ret = device_bind_driver_to_node(dev, "dw_mipi_dsi", "dsihost",
++					 dev_ofnode(dev), NULL);
++	if (ret)
++		return ret;
++
++	/* The panel */
++	return dm_scan_fdt_dev(dev);
++}
++
++static int meson_dw_mipi_dsi_probe(struct udevice *dev)
++{
++	struct meson_dw_mipi_dsi_priv *priv = dev_get_priv(dev);
++	struct clk pclk;
++	ofnode hhi;
++	int ret;
++
++	priv->base = dev_read_addr_ptr(dev);
++	if (!priv->base)
++		return -EINVAL;
++
++	hhi = ofnode_by_compatible(ofnode_null(),
++				   "amlogic,meson-gx-hhi-sysctrl");
++	priv->hhi = syscon_node_to_regmap(hhi);
++	if (IS_ERR(priv->hhi))
++		return PTR_ERR(priv->hhi);
++
++	ret = generic_phy_get_by_name(dev, "dphy", &priv->phy);
++	if (ret) {
++		dev_err(dev, "no D-PHY (%d)\n", ret);
++		return ret;
++	}
++
++	ret = clk_get_by_name(dev, "pclk", &pclk);
++	if (!ret)
++		ret = clk_enable(&pclk);
++	if (ret) {
++		dev_err(dev, "pclk: %d\n", ret);
++		return ret;
++	}
++
++	/* The TOP reset also resets the APB side */
++	ret = reset_get_by_name(dev, "top", &priv->top_rst);
++	if (ret) {
++		dev_err(dev, "no top reset (%d)\n", ret);
++		return ret;
++	}
++	reset_assert(&priv->top_rst);
++	udelay(20);
++	reset_deassert(&priv->top_rst);
++
++	return 0;
++}
++
++static const struct video_bridge_ops meson_dw_mipi_dsi_ops = {
++	.attach = meson_dw_mipi_dsi_attach,
++	.set_backlight = meson_dw_mipi_dsi_set_backlight,
++	.get_display_timing = meson_dw_mipi_dsi_get_display_timing,
++};
++
++static const struct udevice_id meson_dw_mipi_dsi_ids[] = {
++	{ .compatible = "amlogic,meson-g12a-dw-mipi-dsi" },
++	{ }
++};
++
++U_BOOT_DRIVER(meson_dw_mipi_dsi) = {
++	.name		= "meson_dw_mipi_dsi",
++	.id		= UCLASS_VIDEO_BRIDGE,
++	.of_match	= meson_dw_mipi_dsi_ids,
++	.bind		= meson_dw_mipi_dsi_bind,
++	.probe		= meson_dw_mipi_dsi_probe,
++	.ops		= &meson_dw_mipi_dsi_ops,
++	.priv_auto	= sizeof(struct meson_dw_mipi_dsi_priv),
++};
+diff --git a/drivers/video/meson/meson_registers.h b/drivers/video/meson/meson_registers.h
+index f6a5d1ac8ce..fdf78eba8e9 100644
+--- a/drivers/video/meson/meson_registers.h
++++ b/drivers/video/meson/meson_registers.h
+@@ -558,6 +558,7 @@
+ #define VPP_WRAP_OSD1_MATRIX_PRE_OFFSET0_1 0x3d6b
+ #define VPP_WRAP_OSD1_MATRIX_PRE_OFFSET2 0x3d6c
+ #define VPP_WRAP_OSD1_MATRIX_EN_CTRL 0x3d6d
++#define VPP_POST2_MATRIX_EN_CTRL 0x39ad
+ 
+ #define VPP_WRAP_OSD2_MATRIX_COEF00_01 0x3d70
+ #define VPP_WRAP_OSD2_MATRIX_COEF02_10 0x3d71
+diff --git a/drivers/video/meson/meson_venc.c b/drivers/video/meson/meson_venc.c
+index 1bc6aaf7305..48122faf34e 100644
+--- a/drivers/video/meson/meson_venc.c
++++ b/drivers/video/meson/meson_venc.c
+@@ -11,6 +11,9 @@
+ #include <fdtdec.h>
+ #include <log.h>
+ #include <asm/io.h>
++#include <linux/bitfield.h>
++#include <linux/bitops.h>
++#include <linux/iopoll.h>
+ #include "meson_vpu.h"
+ 
+ enum {
+@@ -1567,3 +1570,215 @@ void meson_vpu_setup_venc(struct udevice *dev,
+ 
+ 	meson_venc_hdmi_mode_set(priv, mode);
+ }
++
++/*
++ * ENCL, the LCD encoder, for MIPI DSI. Ported from Linux
++ * drivers/gpu/drm/meson/meson_venc.c (meson_venc_mipi_dsi_mode_set(),
++ * meson_encl_load_gamma()) and meson_encoder_dsi.c, with the SDK's
++ * Linux patches 0004 (gamma) and 0005 (no POST2 matrix).
++ */
++#define ENCL_PX_LN_CNT_SHADOW_EN		BIT(15)
++#define ENCL_VIDEO_MODE_ADV_VFIFO_EN		BIT(3)
++#define ENCL_VIDEO_MODE_ADV_GAIN_HDTV		BIT(4)
++#define ENCL_SEL_GAMMA_RGB_IN			BIT(10)
++#define ENCL_VIDEO_FILT_CTRL_BYPASS_FILTER	BIT(12)
++#define ENCL_VIDEO_RGBIN_RGB			BIT(0)
++#define ENCL_VIDEO_RGBIN_ZBLK			BIT(1)
++#define L_GAMMA_CNTL_PORT_ADR_RDY		BIT(5)
++#define L_GAMMA_CNTL_PORT_WR_RDY		BIT(4)
++#define L_GAMMA_CNTL_PORT_EN			BIT(0)
++#define L_GAMMA_ADDR_PORT_AUTO_INC		BIT(11)
++#define L_GAMMA_ADDR_PORT_SEL_R			BIT(10)
++#define L_GAMMA_ADDR_PORT_SEL_G			BIT(9)
++#define L_GAMMA_ADDR_PORT_SEL_B			BIT(8)
++#define L_GAMMA_ADDR_PORT_ADDR			GENMASK(7, 0)
++#define L_DITH_CNTL_DITH10_EN			BIT(10)
++#define L_TCON_MISC_SEL_STV1			BIT(4)
++#define L_TCON_MISC_SEL_STV2			BIT(5)
++
++static void meson_encl_set_gamma_table(struct meson_vpu_priv *priv,
++				       u32 rgb_mask)
++{
++	void __iomem *cntl = priv->io_base + _REG(L_GAMMA_CNTL_PORT);
++	u32 reg;
++	int i;
++
++	writel_bits(L_GAMMA_CNTL_PORT_EN, 0, cntl);
++
++	if (readl_poll_timeout(cntl, reg, reg & L_GAMMA_CNTL_PORT_ADR_RDY,
++			       10000))
++		debug("%s: GAMMA ADR_RDY timeout\n", __func__);
++
++	writel(L_GAMMA_ADDR_PORT_AUTO_INC | rgb_mask |
++	       FIELD_PREP(L_GAMMA_ADDR_PORT_ADDR, 0),
++	       priv->io_base + _REG(L_GAMMA_ADDR_PORT));
++
++	/* Linear: 256 steps over 10 bits */
++	for (i = 0; i < 256; i++) {
++		if (readl_poll_timeout(cntl, reg,
++				       reg & L_GAMMA_CNTL_PORT_WR_RDY, 10000))
++			debug("%s: GAMMA WR_RDY timeout\n", __func__);
++
++		writel(i * 4, priv->io_base + _REG(L_GAMMA_DATA_PORT));
++	}
++
++	if (readl_poll_timeout(cntl, reg, reg & L_GAMMA_CNTL_PORT_ADR_RDY,
++			       10000))
++		debug("%s: GAMMA ADR_RDY timeout\n", __func__);
++
++	writel(L_GAMMA_ADDR_PORT_AUTO_INC | rgb_mask |
++	       FIELD_PREP(L_GAMMA_ADDR_PORT_ADDR, 0x23),
++	       priv->io_base + _REG(L_GAMMA_ADDR_PORT));
++}
++
++static void meson_encl_load_gamma(struct meson_vpu_priv *priv)
++{
++	meson_encl_set_gamma_table(priv, L_GAMMA_ADDR_PORT_SEL_R);
++	meson_encl_set_gamma_table(priv, L_GAMMA_ADDR_PORT_SEL_G);
++	meson_encl_set_gamma_table(priv, L_GAMMA_ADDR_PORT_SEL_B);
++
++	writel_bits(L_GAMMA_CNTL_PORT_EN, L_GAMMA_CNTL_PORT_EN,
++		    priv->io_base + _REG(L_GAMMA_CNTL_PORT));
++}
++
++#define encl_write(reg, val)	writel((val), priv->io_base + _REG(reg))
++
++void meson_vpu_setup_venc_dsi(struct udevice *dev,
++			      const struct display_timing *mode)
++{
++	struct meson_vpu_priv *priv = dev_get_priv(dev);
++	unsigned int hactive = mode->hactive.typ;
++	unsigned int vactive = mode->vactive.typ;
++	unsigned int hsync_start = hactive + mode->hfront_porch.typ;
++	unsigned int hsync_end = hsync_start + mode->hsync_len.typ;
++	unsigned int htotal = hsync_end + mode->hback_porch.typ;
++	unsigned int vsync_start = vactive + mode->vfront_porch.typ;
++	unsigned int vsync_end = vsync_start + mode->vsync_len.typ;
++	unsigned int vtotal = vsync_end + mode->vback_porch.typ;
++	unsigned int max_pxcnt = htotal - 1;
++	unsigned int max_lncnt = vtotal - 1;
++	unsigned int havon_begin = htotal - hsync_start;
++	unsigned int havon_end = havon_begin + hactive - 1;
++	unsigned int vavon_bline = vtotal - vsync_start;
++	unsigned int vavon_eline = vavon_bline + vactive - 1;
++	unsigned int hso_begin = 0;
++	unsigned int hso_end = hsync_end - hsync_start;
++	unsigned int vso_begin = 0;
++	unsigned int vso_end = 0;
++	unsigned int vso_bline = 0;
++	unsigned int vso_eline = vsync_end - vsync_start;
++
++	meson_vpp_setup_mux(priv, MESON_VIU_VPP_MUX_ENCL);
++
++	encl_write(ENCL_VIDEO_EN, 0);
++
++	encl_write(ENCL_VIDEO_MODE, ENCL_PX_LN_CNT_SHADOW_EN);
++	encl_write(ENCL_VIDEO_MODE_ADV, ENCL_VIDEO_MODE_ADV_VFIFO_EN |
++		   ENCL_VIDEO_MODE_ADV_GAIN_HDTV | ENCL_SEL_GAMMA_RGB_IN);
++
++	encl_write(ENCL_VIDEO_FILT_CTRL, ENCL_VIDEO_FILT_CTRL_BYPASS_FILTER);
++	encl_write(ENCL_VIDEO_MAX_PXCNT, max_pxcnt);
++	encl_write(ENCL_VIDEO_MAX_LNCNT, max_lncnt);
++	encl_write(ENCL_VIDEO_HAVON_BEGIN, havon_begin);
++	encl_write(ENCL_VIDEO_HAVON_END, havon_end);
++	encl_write(ENCL_VIDEO_VAVON_BLINE, vavon_bline);
++	encl_write(ENCL_VIDEO_VAVON_ELINE, vavon_eline);
++
++	encl_write(ENCL_VIDEO_HSO_BEGIN, hso_begin);
++	encl_write(ENCL_VIDEO_HSO_END, hso_end);
++	encl_write(ENCL_VIDEO_VSO_BEGIN, vso_begin);
++	encl_write(ENCL_VIDEO_VSO_END, vso_end);
++	encl_write(ENCL_VIDEO_VSO_BLINE, vso_bline);
++	encl_write(ENCL_VIDEO_VSO_ELINE, vso_eline);
++	encl_write(ENCL_VIDEO_RGBIN_CTRL,
++		   ENCL_VIDEO_RGBIN_RGB | ENCL_VIDEO_RGBIN_ZBLK);
++
++	/* default black pattern */
++	encl_write(ENCL_TST_MDSEL, 0);
++	encl_write(ENCL_TST_Y, 0);
++	encl_write(ENCL_TST_CB, 0);
++	encl_write(ENCL_TST_CR, 0);
++	encl_write(ENCL_TST_EN, 1);
++	writel_bits(ENCL_VIDEO_MODE_ADV_VFIFO_EN, 0,
++		    priv->io_base + _REG(ENCL_VIDEO_MODE_ADV));
++
++	encl_write(ENCL_VIDEO_EN, 1);
++
++	encl_write(L_RGB_BASE_ADDR, 0);
++	encl_write(L_RGB_COEFF_ADDR, 0x400); /* Magic value */
++
++	encl_write(L_DITH_CNTL_ADDR, L_DITH_CNTL_DITH10_EN);
++
++	/* DE signal for TTL */
++	encl_write(L_OEH_HS_ADDR, havon_begin);
++	encl_write(L_OEH_HE_ADDR, havon_end + 1);
++	encl_write(L_OEH_VS_ADDR, vavon_bline);
++	encl_write(L_OEH_VE_ADDR, vavon_eline);
++
++	/* DE signal for TTL */
++	encl_write(L_OEV1_HS_ADDR, havon_begin);
++	encl_write(L_OEV1_HE_ADDR, havon_end + 1);
++	encl_write(L_OEV1_VS_ADDR, vavon_bline);
++	encl_write(L_OEV1_VE_ADDR, vavon_eline);
++
++	/* Hsync signal for TTL */
++	if (mode->flags & DISPLAY_FLAGS_HSYNC_HIGH) {
++		encl_write(L_STH1_HS_ADDR, hso_begin);
++		encl_write(L_STH1_HE_ADDR, hso_end);
++	} else {
++		encl_write(L_STH1_HS_ADDR, hso_end);
++		encl_write(L_STH1_HE_ADDR, hso_begin);
++	}
++	encl_write(L_STH1_VS_ADDR, 0);
++	encl_write(L_STH1_VE_ADDR, max_lncnt);
++
++	/* Vsync signal for TTL */
++	encl_write(L_STV1_HS_ADDR, vso_begin);
++	encl_write(L_STV1_HE_ADDR, vso_end);
++	if (mode->flags & DISPLAY_FLAGS_VSYNC_HIGH) {
++		encl_write(L_STV1_VS_ADDR, vso_bline);
++		encl_write(L_STV1_VE_ADDR, vso_eline);
++	} else {
++		encl_write(L_STV1_VS_ADDR, vso_eline);
++		encl_write(L_STV1_VE_ADDR, vso_bline);
++	}
++
++	/* DE signal */
++	encl_write(L_DE_HS_ADDR, havon_begin);
++	encl_write(L_DE_HE_ADDR, havon_end + 1);
++	encl_write(L_DE_VS_ADDR, vavon_bline);
++	encl_write(L_DE_VE_ADDR, vavon_eline);
++
++	/* Hsync signal */
++	encl_write(L_HSYNC_HS_ADDR, hso_begin);
++	encl_write(L_HSYNC_HE_ADDR, hso_end);
++	encl_write(L_HSYNC_VS_ADDR, 0);
++	encl_write(L_HSYNC_VE_ADDR, max_lncnt);
++
++	/* Vsync signal */
++	encl_write(L_VSYNC_HS_ADDR, vso_begin);
++	encl_write(L_VSYNC_HE_ADDR, vso_end);
++	encl_write(L_VSYNC_VS_ADDR, vso_bline);
++	encl_write(L_VSYNC_VE_ADDR, vso_eline);
++
++	encl_write(L_INV_CNT_ADDR, 0);
++	encl_write(L_TCON_MISC_SEL_ADDR,
++		   L_TCON_MISC_SEL_STV1 | L_TCON_MISC_SEL_STV2);
++
++	/* meson_encoder_dsi_atomic_enable() */
++	encl_write(ENCL_VIDEO_EN, 0);
++	meson_encl_load_gamma(priv);
++
++	writel_bits(ENCL_VIDEO_MODE_ADV_VFIFO_EN, ENCL_VIDEO_MODE_ADV_VFIFO_EN,
++		    priv->io_base + _REG(ENCL_VIDEO_MODE_ADV));
++	encl_write(ENCL_TST_EN, 0);
++
++	/*
++	 * The panel takes RGB: no RGB->YUV matrix on OSD1 (meson_vpu_init()
++	 * sets one for HDMI), no YUV->RGB matrix after the blender.
++	 */
++	writel_bits(BIT(0), 0, priv->io_base + _REG(VPP_WRAP_OSD1_MATRIX_EN_CTRL));
++	writel_bits(BIT(0), 0, priv->io_base + _REG(VPP_POST2_MATRIX_EN_CTRL));
++
++	encl_write(ENCL_VIDEO_EN, 1);
++}
+diff --git a/drivers/video/meson/meson_vpu.c b/drivers/video/meson/meson_vpu.c
+index ca627728743..e840b5ea4fa 100644
+--- a/drivers/video/meson/meson_vpu.c
++++ b/drivers/video/meson/meson_vpu.c
+@@ -12,6 +12,10 @@
+ #include <fdt_support.h>
+ #include <log.h>
+ #include <part.h>
++#include <backlight.h>
++#include <cpu_func.h>
++#include <video_bridge.h>
++#include <dm/ofnode_graph.h>
+ #include <linux/sizes.h>
+ #include <asm/arch/mem.h>
+ #include <asm/global_data.h>
+@@ -31,6 +35,7 @@ static struct meson_framebuffer {
+ 	unsigned int xsize;
+ 	unsigned int ysize;
+ 	bool is_cvbs;
++	bool is_dsi;
+ } meson_fb = { 0 };
+ 
+ bool meson_vpu_is_compatible(struct meson_vpu_priv *priv,
+@@ -41,9 +46,108 @@ bool meson_vpu_is_compatible(struct meson_vpu_priv *priv,
+ 	return compat == family;
+ }
+ 
+-static int meson_vpu_setup_mode(struct udevice *dev, struct udevice *disp)
++/* Framebuffer at the end of addressable RAM */
++static void meson_vpu_setup_fb(struct udevice *dev)
++{
++	struct video_uc_plat *uc_plat = dev_get_uclass_plat(dev);
++	struct video_priv *uc_priv = dev_get_uclass_priv(dev);
++
++	meson_fb.xsize = uc_priv->xsize;
++	meson_fb.ysize = uc_priv->ysize;
++
++	meson_fb.fb_size = ALIGN(meson_fb.xsize * meson_fb.ysize *
++				 ((1 << VPU_MAX_LOG2_BPP) / 8) +
++				 MESON_VPU_OVERSCAN, EFI_PAGE_SIZE);
++	meson_fb.base = gd->bd->bi_dram[0].start +
++			gd->bd->bi_dram[0].size - meson_fb.fb_size;
++
++	/* Override the framebuffer address */
++	uc_plat->base = meson_fb.base;
++}
++
++/* The DSI host on the DPI port (port 2), if enabled */
++static struct udevice *meson_vpu_get_dsi(struct udevice *dev)
++{
++	struct udevice *bridge;
++	ofnode port, remote = ofnode_null();
++	u32 reg;
++
++	if (!IS_ENABLED(CONFIG_VIDEO_MESON_DSI))
++		return NULL;
++
++	/*
++	 * The ports are direct children of the VPU node, without a "ports"
++	 * node, which ofnode_graph_get_port_by_id() wants.
++	 */
++	ofnode_for_each_subnode(port, dev_ofnode(dev)) {
++		if (strncmp(ofnode_get_name(port), "port@", 5) ||
++		    ofnode_read_u32(port, "reg", &reg) || reg != 2)
++			continue;
++		remote = ofnode_graph_get_remote_port_parent(
++				ofnode_find_subnode(port, "endpoint"));
++		break;
++	}
++	if (!ofnode_valid(remote) || !ofnode_is_enabled(remote))
++		return NULL;
++
++	if (uclass_get_device_by_ofnode(UCLASS_VIDEO_BRIDGE, remote, &bridge))
++		return NULL;
++
++	return bridge;
++}
++
++/*
++ * MIPI DSI panel on ENCL. The order follows Linux: DSI host and D-PHY up
++ * in command mode and the panel init commands (attach), then the VPU and
++ * the encoder, then video mode and the backlight.
++ */
++static int meson_vpu_setup_dsi(struct udevice *dev, struct udevice *bridge)
+ {
+ 	struct video_uc_plat *uc_plat = dev_get_uclass_plat(dev);
++	struct video_priv *uc_priv = dev_get_uclass_priv(dev);
++	struct display_timing timing;
++	ofnode node;
++	u32 rotation;
++	int ret;
++
++	ret = video_bridge_attach(bridge);
++	if (ret)
++		return ret;
++
++	ret = video_bridge_get_display_timing(bridge, &timing);
++	if (ret)
++		return ret;
++
++	uc_priv->xsize = timing.hactive.typ;
++	uc_priv->ysize = timing.vactive.typ;
++	uc_priv->bpix = VPU_MAX_LOG2_BPP;
++
++	/* Panel mounted turned: "rotation" (degrees) on the panel node */
++	ofnode_for_each_subnode(node, dev_ofnode(bridge)) {
++		if (!ofnode_read_u32(node, "rotation", &rotation)) {
++			uc_priv->rot = (rotation / 90) % 4;
++			break;
++		}
++	}
++
++	meson_fb.is_dsi = true;
++	meson_vpu_setup_fb(dev);
++
++	/* Black until the console draws: the video uclass clears it later */
++	memset((void *)uc_plat->base, 0, meson_fb.fb_size - MESON_VPU_OVERSCAN);
++	flush_dcache_range(uc_plat->base, uc_plat->base +
++			   meson_fb.fb_size - MESON_VPU_OVERSCAN);
++
++	meson_vpu_setup_plane(dev, false);
++	meson_vpu_setup_venc_dsi(dev, &timing);
++
++	video_set_flush_dcache(dev, 1);
++
++	return video_bridge_set_backlight(bridge, BACKLIGHT_DEFAULT);
++}
++
++static int meson_vpu_setup_mode(struct udevice *dev, struct udevice *disp)
++{
+ 	struct video_priv *uc_priv = dev_get_uclass_priv(dev);
+ 	struct display_timing timing;
+ 	bool is_cvbs = false;
+@@ -74,18 +178,9 @@ cvbs:
+ 	uc_priv->bpix = VPU_MAX_LOG2_BPP;
+ 
+ 	meson_fb.is_cvbs = is_cvbs;
+-	meson_fb.xsize = uc_priv->xsize;
+-	meson_fb.ysize = uc_priv->ysize;
+ 
+ 	/* Move the framebuffer to the end of addressable ram */
+-	meson_fb.fb_size = ALIGN(meson_fb.xsize * meson_fb.ysize *
+-				 ((1 << VPU_MAX_LOG2_BPP) / 8) +
+-				 MESON_VPU_OVERSCAN, EFI_PAGE_SIZE);
+-	meson_fb.base = gd->bd->bi_dram[0].start +
+-			gd->bd->bi_dram[0].size - meson_fb.fb_size;
+-
+-	/* Override the framebuffer address */
+-	uc_plat->base = meson_fb.base;
++	meson_vpu_setup_fb(dev);
+ 
+ 	meson_vpu_setup_plane(dev, timing.flags & DISPLAY_FLAGS_INTERLACED);
+ 	meson_vpu_setup_venc(dev, &timing, is_cvbs);
+@@ -130,6 +225,15 @@ static int meson_vpu_probe(struct udevice *dev)
+ 
+ 	meson_vpu_init(dev);
+ 
++	/* A MIPI DSI panel, else HDMI or CVBS */
++	disp = meson_vpu_get_dsi(dev);
++	if (disp) {
++		ret = meson_vpu_setup_dsi(dev, disp);
++		if (!ret)
++			return 0;
++		log_err("MIPI DSI panel: %d\n", ret);
++	}
++
+ 	/* probe the display */
+ 	ret = uclass_get_device(UCLASS_DISPLAY, 0, &disp);
+ 
+@@ -153,7 +257,9 @@ static void meson_vpu_setup_simplefb(void *fdt)
+ 	u64 mem_start, mem_size;
+ 	int offset, ret;
+ 
+-	if (meson_fb.is_cvbs)
++	if (meson_fb.is_dsi)
++		pipeline = "vpu-dsi";
++	else if (meson_fb.is_cvbs)
+ 		pipeline = "vpu-cvbs";
+ 	else
+ 		pipeline = "vpu-hdmi";
+diff --git a/drivers/video/meson/meson_vpu.h b/drivers/video/meson/meson_vpu.h
+index d9588c3775c..0193b559c37 100644
+--- a/drivers/video/meson/meson_vpu.h
++++ b/drivers/video/meson/meson_vpu.h
+@@ -74,6 +74,8 @@ void meson_canvas_setup(struct meson_vpu_priv *priv,
+ 			unsigned int wrap,
+ 			unsigned int blkmode);
+ 
++/* Mux VIU/VPP to ENCL */
++#define MESON_VIU_VPP_MUX_ENCL	0x0
+ /* Mux VIU/VPP to ENCI */
+ #define MESON_VIU_VPP_MUX_ENCI	0x5
+ /* Mux VIU/VPP to ENCP */
+@@ -85,6 +87,8 @@ void meson_vpu_setup_plane(struct udevice *dev, bool is_interlaced);
+ bool meson_venc_hdmi_supported_mode(const struct display_timing *mode);
+ void meson_vpu_setup_venc(struct udevice *dev,
+ 			  const struct display_timing *mode, bool is_cvbs);
++void meson_vpu_setup_venc_dsi(struct udevice *dev,
++			      const struct display_timing *mode);
+ bool meson_vclk_dmt_supported_freq(struct meson_vpu_priv *priv,
+ 				   unsigned int freq);
+ void meson_vpu_setup_vclk(struct udevice *dev,
