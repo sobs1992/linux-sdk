@@ -72,7 +72,8 @@ config BR2_PACKAGE_BARE_APP_HALFLIFE
 	  and valve_russian for Russian menus, to halflife/ of the games
 	  partition (GAMES, /games), from a PC or with
 	  scripts/halflife-install.sh.
-	  bare_app needs GAME_HALFLIFE (on in ogu_defconfig). In the SDK:
+	  bare_app needs GAME_HALFLIFE (on in ogu_defconfig and
+	  oga_defconfig). In the SDK:
 	  APPS_CONFIG += bare-app.HALFLIFE=y
 
 endif

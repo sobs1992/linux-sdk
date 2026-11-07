@@ -538,11 +538,16 @@ NotoSerif-CondensedMedium (пакет `vcmi` ставит его в `Mods/vcmi/C
 
 ### Half-Life (Xash3D FWGS)
 
-`APPS_CONFIG += bare-app.HALFLIFE=y` (включено в `ogu_defconfig`) собирает пакеты
-`xash3d-fwgs` (движок [Xash3D FWGS](https://github.com/FWGS/xash3d-fwgs) с платформой
-bare_app, патч 0001, без SDL), `hlsdk-portable` (код игры) и `mesa-panfrost` (Mesa 25.0
-только с panfrost и EGL/GLES2: Mesa из Buildroot для panfrost требует LLVM и clang).
-Движок рисует через GPU (`ref_gles3compat`) в буфер вне экрана и отдаёт кадры bare_app.
+`APPS_CONFIG += bare-app.HALFLIFE=y` (включено в `ogu_defconfig` и `oga_defconfig`)
+собирает пакеты `xash3d-fwgs` (движок [Xash3D FWGS](https://github.com/FWGS/xash3d-fwgs)
+с платформой bare_app, патч 0001, без SDL), `hlsdk-portable` (код игры) и `mesa-panfrost`
+(Mesa 25.0 только с panfrost и EGL/GLES2: Mesa из Buildroot для panfrost требует LLVM и
+clang).
+Движок рисует через GPU (`ref_gles3compat`) в буфер вне экрана или программно и отдаёт
+кадры bare_app. Рендер выбирается в меню игры («Настройки» → «Видео» → «Видеорежимы»,
+патч 0009 показывает там работающий); пока не выбран, на Ultra — GPU, на OGA — программный:
+Cortex-A35 читает кадры GPU (`glReadPixels` из некэшируемой памяти) дольше, чем рисует
+сам (19 FPS через GPU против 57–71).
 В меню bare_app появляется пункт «Half-Life». Файлы игры в образ не входят, их копирует
 скрипт в `halflife/` раздела GAMES:
 
