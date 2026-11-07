@@ -1,0 +1,93 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: switch off the unused PMIC outputs
+
+The RK817 came up with seven outputs on that nothing on this board
+uses: DCDC1 (1.1 V), DCDC4 (3.0 V), LDO1-3 and LDO5-6, and the RK818
+with LDO3 (1.0 V). The dts did not describe them, so the regulator core
+had no right to change them and left them as the PMICs start.
+
+Hardkernel's kernel (odroidgoU-4.9.y, meson64_gou_pmic.dtsi) turns all
+of them off at boot ("regulator-boot-off"; RK817 DCDC1 "Not Used"),
+together with the RK818's LDO1-4, LDO6, LDO8 and the RK817's LDO7 and
+LDO9. Describe the same outputs, named, without "regulator-always-on":
+the regulator core then switches off the ones that are on and unused
+30 s after boot.
+
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -525,6 +525,31 @@
+ 				};
+ 			};
+ 
++			/* not used on this board: switched off as unused (Hardkernel boot-off) */
++			LDO_REG1 {
++				regulator-name = "rk818_ldo1";
++			};
++
++			LDO_REG2 {
++				regulator-name = "rk818_ldo2";
++			};
++
++			LDO_REG3 {
++				regulator-name = "rk818_ldo3";
++			};
++
++			LDO_REG4 {
++				regulator-name = "rk818_ldo4";
++			};
++
++			LDO_REG6 {
++				regulator-name = "rk818_ldo6";
++			};
++
++			LDO_REG8 {
++				regulator-name = "rk818_ldo8";
++			};
++
+ 			OTG_SWITCH {
+ 				regulator-name = "otg_switch";
+ 				regulator-state-mem {
+@@ -612,6 +637,43 @@
+ 				};
+ 			};
+ 
++			/* not used on this board: switched off as unused (Hardkernel boot-off) */
++			DCDC_REG1 {
++				regulator-name = "rk817_buck1";
++			};
++
++			DCDC_REG4 {
++				regulator-name = "rk817_buck4";
++			};
++
++			LDO_REG1 {
++				regulator-name = "rk817_ldo1";
++			};
++
++			LDO_REG2 {
++				regulator-name = "rk817_ldo2";
++			};
++
++			LDO_REG3 {
++				regulator-name = "rk817_ldo3";
++			};
++
++			LDO_REG5 {
++				regulator-name = "rk817_ldo5";
++			};
++
++			LDO_REG6 {
++				regulator-name = "rk817_ldo6";
++			};
++
++			LDO_REG7 {
++				regulator-name = "rk817_ldo7";
++			};
++
++			LDO_REG9 {
++				regulator-name = "rk817_ldo9";
++			};
++
+ 			rk817_boost: BOOST {
+ 				regulator-always-on;
+ 				regulator-boot-on;
