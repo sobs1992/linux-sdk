@@ -7,7 +7,8 @@
 # 1.7.3 or newer: the Horn of the Abyss mod for VCMI needs it
 VCMI_VERSION = 1.7.5
 VCMI_SITE = $(call github,vcmi,vcmi,$(VCMI_VERSION))
-VCMI_LICENSE = GPL-2.0+, GPL-3.0 (FuzzyLite, in the Nullkiller2 AI)
+VCMI_LICENSE = GPL-2.0+, GPL-3.0 (FuzzyLite, in the Nullkiller2 AI), \
+	OFL-1.1 (NotoSerif-CondensedMedium.ttf)
 VCMI_LICENSE_FILES = license.txt AI/FuzzyLite/LICENSE
 
 # AI/FuzzyLite is a git submodule, empty in the release tarball: fetch the
@@ -23,6 +24,20 @@ define VCMI_EXTRACT_FUZZYLITE
 		$(TAR) --strip-components=1 -C $(@D)/AI/FuzzyLite $(TAR_OPTIONS) -
 endef
 VCMI_POST_EXTRACT_HOOKS += VCMI_EXTRACT_FUZZYLITE
+
+# The fit view (0011, BARE_APP_VCMI_FIT) draws the text at the frame's
+# size: there the condensed cut of Noto Serif reads better than the
+# Medium VCMI ships. Noto (OFL-1.1), pinned to a commit of its site repo.
+VCMI_NOTO_COMMIT = 86ce02c0fe7890f5936c5dffb26fca0797d1be64
+VCMI_NOTO_FONT = NotoSerif-CondensedMedium.ttf
+VCMI_EXTRA_DOWNLOADS += \
+	https://github.com/notofonts/notofonts.github.io/raw/$(VCMI_NOTO_COMMIT)/fonts/NotoSerif/hinted/ttf/$(VCMI_NOTO_FONT)
+
+define VCMI_INSTALL_NOTO_FONT
+	$(INSTALL) -D -m 0644 $(VCMI_DL_DIR)/$(VCMI_NOTO_FONT) \
+		$(TARGET_DIR)/usr/share/vcmi/Mods/vcmi/Content/Data/$(VCMI_NOTO_FONT)
+endef
+VCMI_POST_INSTALL_TARGET_HOOKS += VCMI_INSTALL_NOTO_FONT
 VCMI_DEPENDENCIES = \
 	boost \
 	libsquish \

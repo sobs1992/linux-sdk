@@ -1,9 +1,6 @@
 From: OdroidLinux SDK
 Subject: [PATCH] client: bare_app: the fit view, the whole screen taken down in linear light (BARE_APP_VCMI_FIT)
 
-SHELVED: not in the package's patch series. Made against patches
-0001-0008 and 0010; see README.md next to it.
-
 With BARE_APP_VCMI_FIT=1 the whole screen is in the frame. Its logical
 size is max(w, 800) x max(h, 600): 854x600 on the ODROID-GO Ultra
 (854x480), squashed vertically only (2:1 across, 2.5:1 down). It is
@@ -25,9 +22,9 @@ screen. H3's bitmap fonts are drawn the same way by a TrueType font
 (FontChain), its size fitted to 0.8 of the bitmap text's width (TINY 7,
 SMALFONT 9-10, MEDFONT 10 px); alignment comes through IFont::anchor
 (set in renderTextCenter/Right). Layout keeps the bitmap metrics.
-Noto Serif/Sans Medium are meant to be replaced by
-NotoSerif-CondensedMedium (github.com/notofonts, OFL), which is not
-shipped by the package.
+Noto Serif/Sans Medium are replaced by NotoSerif-CondensedMedium
+(github.com/notofonts, OFL) when it is there: the package installs it
+into Mods/vcmi/Content/Data.
 
 L1 switches to a 1:1 magnifier (BareAppLink::magnifies) with the bitmap
 fonts pixel-exact, redrawing everything on the switch.
