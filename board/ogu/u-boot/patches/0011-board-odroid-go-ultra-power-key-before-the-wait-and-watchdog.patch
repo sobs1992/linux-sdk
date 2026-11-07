@@ -1,0 +1,94 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: a power key press before the wait
+ counts; stop the watchdog for the kernel
+
+Powered off with USB plugged in, the board comes up again at once and
+waits for the power key. A press in the first seconds, before U-Boot
+began to wait, was cleared there, and the key had to be pressed a second
+time. The RK817 keeps that press pending (INT_STS0 PWRON_FALL/RISE): start
+at once when it is there. Clear both bits on a press in the loop too, so
+Linux does not get half of it.
+
+The watchdog (CONFIG_WATCHDOG_AUTOSTART) resets the board when U-Boot
+hangs. Stop it before the kernel: one that does not take it over in time
+would be reset.
+
+---
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -7,6 +7,7 @@
+ #include <console.h>
+ #include <dm.h>
+ #include <env.h>
++#include <image.h>
+ #include <log.h>
+ #include <asm/arch/boot.h>
+ #include <linux/bitops.h>
+@@ -14,6 +15,7 @@
+ #include <power/pmic.h>
+ #include <power/regulator.h>
+ #include <time.h>
++#include <wdt.h>
+ 
+ /*
+  * The GO Ultra has two PMICs: the RK818 (battery, charger, USB-C power and
+@@ -40,6 +42,7 @@
+ #define RK817_SLPPOL_H		BIT(5)
+ #define RK817_INT_STS0		0xf8
+ #define RK817_INT_PWRON_FALL	BIT(0)	/* power key pressed */
++#define RK817_INT_PWRON_RISE	BIT(1)	/* power key released */
+ #define DEV_OFF			BIT(0)
+ 
+ /*
+@@ -118,8 +121,20 @@
+ 	    !(irq818 & RK818_INT_PLUG_IN))
+ 		return 0;
+ 
++	/*
++	 * The power key may have been pressed already: to power the board
++	 * on with USB plugged in, or while it was starting. The RK817 keeps
++	 * that interrupt pending until Linux takes it, so start at once.
++	 */
++	sts = pmic_reg_read(rk817, RK817_INT_STS0);
++	if (sts > 0 && (sts & (RK817_INT_PWRON_FALL | RK817_INT_PWRON_RISE))) {
++		pmic_reg_write(rk817, RK817_INT_STS0,
++			       RK817_INT_PWRON_FALL | RK817_INT_PWRON_RISE);
++		printf("Power key pressed: starting\n");
++		goto boot;
++	}
++
+ 	printf("Woken by USB power: charging, press the power key to start\n");
+-	pmic_reg_write(rk817, RK817_INT_STS0, RK817_INT_PWRON_FALL);
+ 	/* The message stays on the panel for a while, then it goes dark */
+ 	backlight = ogu_backlight();
+ 	start = get_timer(0);
+@@ -136,7 +151,8 @@
+ 		}
+ 		sts = pmic_reg_read(rk817, RK817_INT_STS0);
+ 		if (sts > 0 && (sts & RK817_INT_PWRON_FALL)) {
+-			pmic_reg_write(rk817, RK817_INT_STS0, RK817_INT_PWRON_FALL);
++			pmic_reg_write(rk817, RK817_INT_STS0,
++				       RK817_INT_PWRON_FALL | RK817_INT_PWRON_RISE);
+ 			printf("Power key: starting\n");
+ 			break;
+ 		}
+@@ -156,7 +172,19 @@
+ 	if (backlight)
+ 		backlight_set_brightness(backlight, BACKLIGHT_DEFAULT);
+ 
++boot:
+ 	/* A reset from here on must not wait again */
+ 	pmic_reg_write(rk818, RK818_INT_STS2, RK818_INT_PLUG_IN);
+ 	return 0;
+ }
++
++/*
++ * The watchdog (started by U-Boot, CONFIG_WATCHDOG_AUTOSTART) resets the
++ * board if U-Boot hangs, e.g. on the SD card. Stop it for the kernel: one
++ * without the meson_gxbb_wdt driver, or loading it late, would be reset.
++ */
++void board_prep_linux(struct bootm_headers *images)
++{
++	if (IS_ENABLED(CONFIG_WDT) && wdt_stop_all())
++		printf("Watchdog: not stopped\n");
++}
