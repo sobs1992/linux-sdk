@@ -409,6 +409,39 @@ dd if=/dev/zero of=/dev/mmcblk1 bs=512 seek=1 count=1919 conv=fsync   # mmcblk1 
 ```
 
 Перед этим снять первые 16 МиБ eMMC: из них заводской загрузчик и возвращается.
+
+### eMMC
+
+`make image` собирает кроме `ogu.img` ещё `images/ogu-emmc.img`: та же разметка
+(FIP, BOOT, rootfs, на первой загрузке `/data` и `/games`), но свой идентификатор
+диска (`IMAGE_EMMC_DISK_ID`, `4f475545` против `4f475531` у SD). Без этого при
+вставленной карте `root=PARTUUID=…-02` и `/boot` указывали бы на оба диска.
+
+Когда FIP есть на eMMC, BootROM всегда берёт его, FIP с SD больше не запускается.
+U-Boot с eMMC сначала ищет `extlinux.conf` на SD (`mmc0`), потом на eMMC (`mmc1`):
+вставлена загрузочная карта — система с неё, нет — с eMMC.
+
+Запись и обновление eMMC: держать **Vol+** при включении, пока на экране не
+появится `VOLUME-UP: eMMC as a USB disk` (патч U-Boot 0012). U-Boot показывает eMMC
+компьютеру как USB-диск по USB-C (`ums`), дальше
+
+```
+make flash-emmc          # весь образ (rootfs и разделы данных заново)
+make flash-emmc-boot     # только FIP и раздел BOOT (ядро, dtb), rootfs остаётся
+```
+
+Диск находится по USB-идентификатору гаджета U-Boot (`EMMC_UMS_USB_ID`,
+`scripts/usb-disk.sh`), либо `DEV=/dev/sdX`. После записи диск извлекается, и плата
+перезагружается; выйти из режима можно и выдернув кабель (U-Boot видит это по
+RK818) или Ctrl+C в UART. Новый U-Boot перед записью в eMMC стоит проверить, запустив
+его из работающего: положить `u-boot.bin` в `/boot` как `u-boot-test.bin`, остановить
+отсчёт в UART и `load mmc 1:1 0x01000000 u-boot-test.bin; go 0x01000000` (`mmc 0:1`
+с SD). U-Boot, который зависает, но проходит проверку BL2, BootROM запускает снова и
+снова, и SD тогда не поможет.
+
+`flash-boot`/`flash-emmc-boot` пишут и 440 байт загрузочного кода в секторе 0
+(`boot-area.mbr`): он меняется с каждой сборкой FIP вместе с ним; таблица разделов
+остаётся.
 Пока он на месте, образ грузится и через него: заводской U-Boot исполняет
 `boot.ini` с первой карты из `${mmc_list}` (`mmc 0` — eMMC, `mmc 1` — SD; нужен
 `setenv mmc_list 1 0; saveenv`), а `boot.ini` запускает mainline `u-boot.bin` с FAT.

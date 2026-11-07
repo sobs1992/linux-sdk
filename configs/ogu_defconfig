@@ -10,6 +10,9 @@
 #    boot.ini chainloads mainline U-Boot (u-boot.bin). For the card to win
 #    over the eMMC it needs "setenv mmc_list 1 0; saveenv" once (UART).
 # Either way mainline U-Boot boots extlinux.conf from the SD card.
+# With our FIP on the eMMC (images/ogu-emmc.img, see "eMMC image" below)
+# U-Boot comes from the eMMC and Linux from the SD card if it has one,
+# else from the eMMC.
 #
 # See configs/oga_defconfig for the meaning of the variables.
 
@@ -84,3 +87,14 @@ IMAGE_DATA_START_MB := 4096
 IMAGE_DATA_SIZE_MB  := 1024
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f475531
+
+# --- eMMC image ---
+# The same layout with its own disk identifier ("OGUE"): images/ogu-emmc.img.
+# The BootROM always takes the FIP from the eMMC once it holds one; that
+# U-Boot then boots Linux from the SD card if the card has extlinux.conf
+# (mmc0 comes first in boot_targets), else from the eMMC.
+# Writing it: VOLUME-UP held at power-on makes U-Boot show the eMMC as a
+# USB disk (U-Boot patch 0012), then "make flash-emmc" (or
+# flash-emmc-boot); the disk is found by U-Boot's gadget USB id.
+IMAGE_EMMC_DISK_ID := 0x4f475545
+EMMC_UMS_USB_ID    := 1b8e:fada

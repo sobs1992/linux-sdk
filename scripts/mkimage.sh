@@ -166,11 +166,15 @@ put "$BOOT_IMG" "$P1_START"
 put "$ROOT_IMG" "$p2_start"
 mv "$TMP_IMG" "$OUT_IMG"
 
-# Bootloader blobs + BOOT partition for "make flash-boot"
-out_dir=$(dirname "$OUT_IMG")
-dd if="$OUT_IMG" of="$out_dir/boot-area.bin" bs=1M skip=$(( first_sector * 512 )) \
+# Bootloader blobs + BOOT partition for "make flash-boot": BOOT_AREA.bin
+# from sector BOOT_AREA.sector on, and the MBR boot code as BOOT_AREA.mbr
+# (written apart: sector 0 also holds the partition table)
+BOOT_AREA=${BOOT_AREA:-$(dirname "$OUT_IMG")/boot-area}
+dd if="$OUT_IMG" of="$BOOT_AREA.bin" bs=1M skip=$(( first_sector * 512 )) \
 	count=$(( (p2_start - first_sector) * 512 )) iflag=skip_bytes,count_bytes status=none
-echo "$first_sector" > "$out_dir/boot-area.sector"
+echo "$first_sector" > "$BOOT_AREA.sector"
+rm -f "$BOOT_AREA.mbr"
+if [ -n "$MBR_CODE" ]; then cp "$MBR_CODE" "$BOOT_AREA.mbr"; fi
 
 echo "Image: $OUT_IMG ($(( total_sectors / 2048 )) MiB)"
 sfdisk -l "$OUT_IMG" | sed -n '/^Device/,$p'

@@ -1,0 +1,127 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: VOLUME-UP at power-on: the eMMC as
+ a USB disk
+
+To write an image to the eMMC without opening the case or a working
+Linux on it: with VOLUME-UP held at power-on U-Boot runs "ums" on the
+eMMC (found by its controller, sd_emmc_c), so the computer sees it as a
+USB disk on the USB-C port. Eject the disk on the computer, or unplug
+the cable, and the board restarts.
+
+The DWC2 gadget cannot tell an unplugged cable: g_dnl_board_usb_cable_connected()
+reads the RK818's USB supply bit, so ums ends when the cable goes.
+
+---
+diff --git a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+index 3de25386228..a5b46f2ea09 100644
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -4,6 +4,8 @@
+  */
+ 
+ #include <backlight.h>
++#include <button.h>
++#include <command.h>
+ #include <console.h>
+ #include <dm.h>
+ #include <env.h>
+@@ -99,7 +101,8 @@ static void ogu_power_off(struct udevice *rk817, struct udevice *rk818)
+ 	printf("Still powered\n");
+ }
+ 
+-int meson_board_late_init(void)
++/* Woken by USB power: wait, charging, for the power key */
++static void ogu_charge_wait(void)
+ {
+ 	struct udevice *rk817, *rk818, *backlight;
+ 	int on818, irq818, sts;
+@@ -107,7 +110,7 @@ int meson_board_late_init(void)
+ 
+ 	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@20", &rk817) ||
+ 	    uclass_get_device_by_name(UCLASS_PMIC, "pmic@1c", &rk818))
+-		return 0;
++		return;
+ 
+ 	/*
+ 	 * ON_SOURCE keeps its value over a reboot, and the RK817 one says
+@@ -119,7 +122,7 @@ int meson_board_late_init(void)
+ 	irq818 = pmic_reg_read(rk818, RK818_INT_STS2);
+ 	if (on818 < 0 || irq818 < 0 || !(on818 & RK8XX_ON_PLUG_IN) ||
+ 	    !(irq818 & RK818_INT_PLUG_IN))
+-		return 0;
++		return;
+ 
+ 	/*
+ 	 * The power key may have been pressed already: to power the board
+@@ -175,6 +178,71 @@ int meson_board_late_init(void)
+ boot:
+ 	/* A reset from here on must not wait again */
+ 	pmic_reg_write(rk818, RK818_INT_STS2, RK818_INT_PLUG_IN);
++}
++
++/*
++ * USB power, read by the USB gadget commands (ums): unplugging the cable
++ * ends "ums" (the DWC2 gadget cannot tell it by itself).
++ */
++int g_dnl_board_usb_cable_connected(void)
++{
++	struct udevice *rk818;
++	int sts;
++
++	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@1c", &rk818))
++		return -EOPNOTSUPP;
++	sts = pmic_reg_read(rk818, RK818_SUP_STS);
++	if (sts < 0)
++		return -EOPNOTSUPP;
++	return !!(sts & RK818_SUP_STS_USB_EXS);
++}
++
++/* U-Boot's number of the eMMC (sd_emmc_c), -1 if not found */
++static int ogu_emmc_devnum(void)
++{
++	struct udevice *dev;
++	struct uclass *uc;
++
++	uclass_id_foreach_dev(UCLASS_MMC, dev, uc)
++		if (dev_read_addr(dev) == 0xffe07000)
++			return dev_seq(dev);
++	return -1;
++}
++
++/*
++ * VOLUME-UP held at power-on: the eMMC as a USB disk for the computer
++ * (USB mass storage on the USB-C port), to write a new image to it. It
++ * ends when the computer ejects the disk, when the USB cable goes or with
++ * Ctrl+C on the console; the board then resets.
++ */
++static void ogu_ums_key(void)
++{
++	char cmd[32];
++	struct udevice *dev;
++	int emmc;
++
++	if (button_get_by_label("VOLUME-UP", &dev) ||
++	    button_get_state(dev) != BUTTON_ON)
++		return;
++
++	emmc = ogu_emmc_devnum();
++	if (emmc < 0) {
++		printf("VOLUME-UP: no eMMC\n");
++		return;
++	}
++	printf("VOLUME-UP: eMMC as a USB disk. Eject it on the computer\n"
++	       "or unplug the cable to restart.\n");
++	snprintf(cmd, sizeof(cmd), "ums 0 mmc %d", emmc);
++	run_command(cmd, 0);
++	printf("USB disk closed: restarting\n");
++	mdelay(500);
++	do_reset(NULL, 0, 0, NULL);
++}
++
++int meson_board_late_init(void)
++{
++	ogu_charge_wait();
++	ogu_ums_key();
+ 	return 0;
+ }
+ 

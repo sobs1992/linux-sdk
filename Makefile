@@ -379,9 +379,14 @@ rootfs-clean: check-fw
 
 IMAGE_FILE := $(IMAGES_DIR)/$(IMAGE_NAME).img
 IMAGE_DTB_LAYOUT ?= tree
+# Boards with an eMMC: IMAGE_EMMC_DISK_ID makes a second image of the same
+# layout for it, images/<name>-emmc.img, with its own disk identifier, so
+# that root=PARTUUID and /boot never point at both disks when an SD card
+# made by this SDK is in the slot.
+IMAGE_EMMC_FILE := $(if $(IMAGE_EMMC_DISK_ID),$(IMAGES_DIR)/$(IMAGE_NAME)-emmc.img)
 
-.PHONY: image all flash flash-boot clean info help
-image: check-fw
+# $(call mkimage,<image file>,<disk id>,<boot area name>)
+define mkimage
 	KERNEL=$(LINUX_INSTALL)/$(LINUX_IMAGE) \
 	LINUX_DIR=$(LINUX_INSTALL) \
 	DTB_LAYOUT=$(IMAGE_DTB_LAYOUT) \
@@ -392,12 +397,30 @@ image: check-fw
 	CMDLINE="$(LINUX_CMDLINE)" \
 	BOOT_SIZE_MB=$(IMAGE_BOOT_SIZE_MB) \
 	ROOTFS_FREE_MB=$(IMAGE_ROOTFS_FREE_MB) \
-	DISK_ID=$(IMAGE_DISK_ID) \
+	DISK_ID=$(2) \
 	DATA_START_MB=$(IMAGE_DATA_START_MB) \
 	DATA_SIZE_MB=$(IMAGE_DATA_SIZE_MB) \
+	BOOT_AREA=$(IMAGES_DIR)/$(3) \
 	WORK_DIR=$(OUT)/image-work \
 	HOST_TOOLS=$(ROOTFS_OUT)/host/bin \
-	$(SDK_DIR)/scripts/mkimage.sh $(IMAGE_FILE)
+	$(SDK_DIR)/scripts/mkimage.sh $(1)
+endef
+
+# $(call flash-boot-area,<boot area name>,<device>[,<env>]): the bootloader blobs
+# and the BOOT partition, plus the MBR boot code if the board has one (its
+# 440 bytes only: the partition table stays)
+define flash-boot-area
+	@test -f $(IMAGES_DIR)/$(1).sector || { echo "Run 'make image' first"; exit 1; }
+	$(3) $(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/$(1).bin $(2) $$(cat $(IMAGES_DIR)/$(1).sector) \
+		$(if $(IMAGE_MBR_CODE),$(IMAGES_DIR)/$(1).mbr)
+endef
+
+.PHONY: image all flash flash-boot flash-emmc flash-emmc-boot clean info help
+image: check-fw
+	$(call mkimage,$(IMAGE_FILE),$(IMAGE_DISK_ID),boot-area)
+ifneq ($(IMAGE_EMMC_FILE),)
+	$(call mkimage,$(IMAGE_EMMC_FILE),$(IMAGE_EMMC_DISK_ID),emmc-boot-area)
+endif
 
 all: uboot linux rootfs $(BOOTFW_DEPS)
 	$(MAKE) FW=$(FW) image
@@ -407,11 +430,22 @@ flash: check-fw
 	$(SDK_DIR)/scripts/flash.sh $(IMAGE_FILE) $(DEV) 0
 
 # Rewrite the bootloader and the BOOT partition (kernel, dtbs, extlinux),
-# keeping the MBR and the rootfs: make flash-boot DEV=/dev/sdX.
+# keeping the partition table and the rootfs: make flash-boot DEV=/dev/sdX.
 # The card must hold an image of the same firmware config.
 flash-boot: check-fw
-	@test -f $(IMAGES_DIR)/boot-area.sector || { echo "Run 'make image' first"; exit 1; }
-	$(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/boot-area.bin $(DEV) $$(cat $(IMAGES_DIR)/boot-area.sector)
+	$(call flash-boot-area,boot-area,$(DEV))
+
+# The same two for the eMMC, which U-Boot shows to the computer as a USB
+# disk (on the ODROID-GO Ultra: VOLUME-UP held at power-on). Without DEV
+# the disk is found by its USB id, EMMC_UMS_USB_ID (vendor:product).
+EMMC_DEV = $(or $(DEV),$(shell $(SDK_DIR)/scripts/usb-disk.sh $(EMMC_UMS_USB_ID)))
+flash-emmc: check-fw
+	@test -n "$(IMAGE_EMMC_FILE)" || { echo "$(FW) has no eMMC image (IMAGE_EMMC_DISK_ID)"; exit 1; }
+	EJECT=1 $(SDK_DIR)/scripts/flash.sh $(IMAGE_EMMC_FILE) $(EMMC_DEV) 0
+
+flash-emmc-boot: check-fw
+	@test -n "$(IMAGE_EMMC_FILE)" || { echo "$(FW) has no eMMC image (IMAGE_EMMC_DISK_ID)"; exit 1; }
+	$(call flash-boot-area,emmc-boot-area,$(EMMC_DEV),EJECT=1)
 
 clean: check-fw
 	rm -rf $(OUT)
@@ -433,6 +467,7 @@ info: check-fw
 	@echo "Buildroot: $(BUILDROOT_SRC) $(call gitdesc,$(BUILDROOT_SRC)) $(BUILDROOT_DEFCONFIG)"
 	@echo "Apps:      $(or $(APPS),none)$(if $(APPS_AUTOSTART), (autostart: $(APPS_AUTOSTART)))$(if $(APPS_CONFIG), options: $(APPS_CONFIG))"
 	@echo "Image:     $(IMAGE_FILE)"
+	@$(if $(IMAGE_EMMC_FILE),echo "eMMC:      $(IMAGE_EMMC_FILE)",true)
 
 help:
 	@echo "Firmware config:"
@@ -455,4 +490,6 @@ help:
 	@echo "  all (default)          all components + image"
 	@echo "  flash DEV=/dev/sdX     write the image to an SD card"
 	@echo "  flash-boot DEV=...     rewrite bootloader + BOOT partition, keep rootfs"
+	@echo "  flash-emmc             write images/<name>-emmc.img to the eMMC shown as a USB disk"
+	@echo "  flash-emmc-boot        the same, bootloader + BOOT partition only"
 	@echo "  clean                  remove output/<fw>"
