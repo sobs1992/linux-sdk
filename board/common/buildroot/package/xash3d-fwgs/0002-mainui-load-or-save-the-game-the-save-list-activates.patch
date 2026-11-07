@@ -1,0 +1,37 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] mainui: load or save the game the save list activates
+
+Enter or the gamepad's A on a line of the save list did nothing: the list
+model had no OnActivateEntry. With a gamepad the arrows stay in the list
+and never reach the Load/Save buttons, so a game could not be loaded from
+the menu. Activating a line now does what those buttons do.
+
+diff --git a/3rdparty/mainui/menus/LoadGame.cpp b/3rdparty/mainui/menus/LoadGame.cpp
+index 51ed816..8ad6d49 100644
+--- a/3rdparty/mainui/menus/LoadGame.cpp
++++ b/3rdparty/mainui/menus/LoadGame.cpp
+@@ -134,6 +134,9 @@ public:
+ 	}
+ 
+ 	void OnDeleteEntry( int line ) override;
++	// Enter or the gamepad's A on a line does what the Load/Save button does:
++	// with a gamepad the arrows stay in the list and never reach the buttons
++	void OnActivateEntry( int line ) override;
+ private:
+ 	CMenuLoadGame *parent;
+ };
+@@ -374,6 +377,14 @@ void CMenuLoadGame::_Init( void )
+ 	AddItem( savesList );
+ }
+ 
++void CMenuSavesListModel::OnActivateEntry( int line )
++{
++	if( parent->IsSaveMode( ))
++		parent->SaveGame();
++	else
++		parent->LoadGame();
++}
++
+ void CMenuLoadGame::LoadGame()
+ {
+ 	if( !savesListModel.IsValidIndex( savesList.GetCurrentIndex( )))

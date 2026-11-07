@@ -94,6 +94,7 @@ scripts/rk-legacy-pack.sh      упаковка uboot.img/trust.img для SPI m
 scripts/flash.sh               запись на SD с проверками
 scripts/apps-config.sh         приложения из конфига прошивки (APPS) -> настройки Buildroot
 scripts/homm3-install.sh       данные Героев III и моды VCMI (HotA, русский) на раздел GAMES (с ПК или по SSH)
+scripts/halflife-install.sh    файлы Half-Life (valve, valve_russian) на раздел GAMES (с ПК или по SSH)
 src/                           сабмодули компонентов
 dl/                            кэш загрузок (общий для всех прошивок)
 ```
@@ -504,8 +505,8 @@ Linux минутами не читал SD-карту (`No partition table - mmc 
 тусклое и в полосах), MCLK для кодека, оси стиков (плюс исправление инверсии в
 `adc-joystick`) и частоты A53 не выше заводских. Звуковая карта meson axg играет
 только с выставленным маршрутом DPCM: его при загрузке ставит
-`/etc/init.d/S30audio` (`alsactl` из `/etc/asound-route.state`). bare_app с Doom и
-Heroes III запускается сам, как на OGA. Батарея — драйвер `rk818_battery` из ROCKNIX
+`/etc/init.d/S30audio` (`alsactl` из `/etc/asound-route.state`). bare_app с Doom,
+Heroes III и Half-Life запускается сам, как на OGA. Батарея — драйвер `rk818_battery` из ROCKNIX
 (Ondrej Jirman) с их исправлениями, плюс наш патч: подключение и отключение
 зарядки видно сразу (`/sys/class/power_supply/rk818-battery`, `rk818-usb`).
 
@@ -534,6 +535,31 @@ Heroes III на 854×480 (`homm3_view = HOMM3_VIEW_FIT` у платформы ba
 NotoSerif-CondensedMedium (пакет `vcmi` ставит его в `Mods/vcmi/Content/Data`). L1 —
 лупа 1:1 с оригинальными растровыми шрифтами игры, её часть по положению курсора.
 `HOMM3_VIEW_NATIVE` (патч 0008) — только 1:1 за курсором.
+
+### Half-Life (Xash3D FWGS)
+
+`APPS_CONFIG += bare-app.HALFLIFE=y` (включено в `ogu_defconfig`) собирает пакеты
+`xash3d-fwgs` (движок [Xash3D FWGS](https://github.com/FWGS/xash3d-fwgs) с платформой
+bare_app, патч 0001, без SDL), `hlsdk-portable` (код игры) и `mesa-panfrost` (Mesa 25.0
+только с panfrost и EGL/GLES2: Mesa из Buildroot для panfrost требует LLVM и clang).
+Движок рисует через GPU (`ref_gles3compat`) в буфер вне экрана и отдаёт кадры bare_app.
+В меню bare_app появляется пункт «Half-Life». Файлы игры в образ не входят, их копирует
+скрипт в `halflife/` раздела GAMES:
+
+```sh
+scripts/halflife-install.sh ~/.steam/steam/steamapps/common/Half-Life /media/$USER/GAMES
+scripts/halflife-install.sh ~/.steam/steam/steamapps/common/Half-Life 192.168.7.2
+```
+
+Копируются `valve` (около 550 МБ, без библиотек Windows/macOS/x86 и чужих сохранений)
+и переводы меню `valve_<язык>` (у Steam — `valve_russian`). Настройки и сохранения
+движок пишет в `/data/halflife`. Язык игры — язык bare_app. По-русски, кроме строк
+`valve_russian`, меню берёт наш перевод строк самого Xash
+(`package/xash3d-fwgs/russian/mainui_russian.txt`), а надписи в игре (названия глав,
+подсказки учебного курса) — наш `titles_valve_russian.txt` (при сборке перекодируется
+в cp1251 и вместе с первым кладётся в `extras.pk3`). Патчи движка 0005–0008: каталог
+перевода из каталога игры только для чтения, кнопки и заголовки меню текстом вместо
+английских картинок, названия осей геймпада, сообщения и шрифт с кириллицей.
 
 ## BeagleBone Black (`bbb`)
 

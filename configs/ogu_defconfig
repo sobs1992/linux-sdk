@@ -67,7 +67,7 @@ APPS_AUTOSTART := bare-app
 # bare_app's own Kconfig defconfig (platform ogu), the shareware doom1.wad,
 # the Heroes III engine VCMI (game data on /games, see README)
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
-                  bare-app.HOMM3=y
+                  bare-app.HOMM3=y bare-app.HALFLIFE=y
 
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,

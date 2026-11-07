@@ -1,0 +1,20 @@
+config BR2_PACKAGE_MESA_PANFROST
+	bool "mesa-panfrost"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4
+	depends on !BR2_STATIC_LIBS
+	depends on !BR2_PACKAGE_MESA3D # the same libraries
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_ZLIB
+	help
+	  Mesa 25.0 with only the panfrost driver (ARM Mali Midgard,
+	  Bifrost: the GO Ultra's G52, the OGA's G31), EGL, GLES 2/3 and
+	  GBM, no window system: for rendering off screen on the render
+	  node. Buildroot's mesa3d (26.x) builds panfrost only with LLVM,
+	  clang and libclc for the host and the target; 25.0 needs none
+	  of them.
+
+	  https://www.mesa3d.org/
+
+comment "mesa-panfrost needs a toolchain w/ threads, sync_4, dynamic library"
+	depends on !BR2_TOOLCHAIN_HAS_THREADS || !BR2_TOOLCHAIN_HAS_SYNC_4 || BR2_STATIC_LIBS

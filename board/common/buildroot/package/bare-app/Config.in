@@ -54,4 +54,25 @@ config BR2_PACKAGE_BARE_APP_HOMM3
 	  from a PC or with scripts/homm3-install.sh. In the SDK:
 	  APPS_CONFIG += bare-app.HOMM3=y
 
+config BR2_PACKAGE_BARE_APP_HALFLIFE
+	bool "Half-Life (Xash3D FWGS)"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_USE_MMU
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_XASH3D_FWGS
+	select BR2_PACKAGE_HLSDK_PORTABLE
+	# the GPU renderer
+	select BR2_PACKAGE_MESA_PANFROST if BR2_TOOLCHAIN_HAS_SYNC_4
+	help
+	  The Xash3D FWGS engine (package xash3d-fwgs, GPLv3) and the
+	  game code of hlsdk-portable (Valve's SDK licence) for
+	  Half-Life, drawn by the GPU (mesa-panfrost). The game files
+	  are not included: copy the valve directory of a bought copy,
+	  and valve_russian for Russian menus, to halflife/ of the games
+	  partition (GAMES, /games), from a PC or with
+	  scripts/halflife-install.sh.
+	  bare_app needs GAME_HALFLIFE (on in ogu_defconfig). In the SDK:
+	  APPS_CONFIG += bare-app.HALFLIFE=y
+
 endif

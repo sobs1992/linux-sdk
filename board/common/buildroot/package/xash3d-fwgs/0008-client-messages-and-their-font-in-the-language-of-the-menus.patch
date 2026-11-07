@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 23:00:00 +0100
+Subject: [PATCH] client: messages and their font in the language of the menus
+
+The messages of titles.txt (chapter titles, the hints of the Hazard
+Course, "Saved...") stayed English with ui_language russian: Steam's
+valve_russian/ has no titles.txt. And they could not be anything else:
+the client draws them byte by byte with the credits font, and that of the
+25th anniversary gfx.wad has only Latin letters; the charset's font
+(creditsfont_cp1251.fnt) replaced only the font of the original gfx.wad.
+
+In another language than English the engine now loads
+titles_<game>_<language>.txt instead of titles.txt when there is one
+(named after the game, so that a mod keeps its own messages), and uses
+the charset's credits font whatever gfx.wad is.
+---
+ engine/client/cl_scrn.c         |  9 +++++++--
+ engine/client/dll_int/cl_game.c | 17 ++++++++++++++++-
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/engine/client/cl_scrn.c b/engine/client/cl_scrn.c
+--- a/engine/client/cl_scrn.c
++++ b/engine/client/cl_scrn.c
+@@ -718,8 +718,13 @@
+ 	float scale = hud_fontscale.value;
+ 	dword crc = 0;
+ 
+-	// replace default gfx.wad textures by current charset's font
+-	if( !CRC32_File( &crc, "gfx.wad" ) || crc == 0x49eb9f16 )
++	const char *language = Cvar_VariableString( "ui_language" );
++
++	// replace default gfx.wad textures by current charset's font; in another
++	// language than English too: the font of the game may not have its
++	// letters (that of the 25th anniversary gfx.wad is Latin only)
++	if( !CRC32_File( &crc, "gfx.wad" ) || crc == 0x49eb9f16
++		|| ( !COM_StringEmpty( language ) && Q_stricmp( language, "english" )))
+ 	{
+ 		string charsetFnt;
+ 
+diff --git a/engine/client/dll_int/cl_game.c b/engine/client/dll_int/cl_game.c
+--- a/engine/client/dll_int/cl_game.c
++++ b/engine/client/dll_int/cl_game.c
+@@ -586,7 +586,22 @@
+ 	clgame.numTitles = 0;
+ 
+ 	fs_offset_t fileSize = 0;
+-	char *pMemFile = (char *)FS_LoadFile( filename, &fileSize, false );
++	char *pMemFile = NULL;
++	const char *language = Cvar_VariableString( "ui_language" );
++
++	// in another language than English: titles_<game>_<language>.txt, the
++	// game's messages translated, when there is one (named after the game,
++	// so that it is not taken for the messages of a mod)
++	if( !COM_StringEmpty( language ) && Q_stricmp( language, "english" ))
++	{
++		string name;
++
++		Q_snprintf( name, sizeof( name ), "titles_%s_%s.txt", GI->gamefolder, language );
++		pMemFile = (char *)FS_LoadFile( name, &fileSize, false );
++	}
++
++	if( !pMemFile )
++		pMemFile = (char *)FS_LoadFile( filename, &fileSize, false );
+ 	if( !pMemFile )
+ 		return;
+ 
+-- 
+2.43.0
+

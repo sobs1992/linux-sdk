@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 22:30:00 +0100
+Subject: [PATCH] mainui: gamepad axis names in the language of the menus
+
+The axis binding map of the gamepad menu showed the names of the axes
+("Side", "Forward", ...) translated only until the first change: the
+spin controls take their text from the model, an array of the English
+names. The model now has them translated.
+---
+ 3rdparty/mainui/menus/Gamepad.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/3rdparty/mainui/menus/Gamepad.cpp b/3rdparty/mainui/menus/Gamepad.cpp
+--- a/3rdparty/mainui/menus/Gamepad.cpp
++++ b/3rdparty/mainui/menus/Gamepad.cpp
+@@ -308,7 +308,12 @@
+ {
+ 	int i, y;
+ 
+-	static CStringArrayModel model( axisNames, V_ARRAYSIZE( axisNames ) );
++	// the names of the axes in the language of the menus
++	static const char *axisNamesLocalized[V_ARRAYSIZE( axisNames )];
++	static CStringArrayModel model( axisNamesLocalized, V_ARRAYSIZE( axisNamesLocalized ) );
++
++	for( i = 0; i < V_ARRAYSIZE( axisNames ); i++ )
++		axisNamesLocalized[i] = L( axisNames[i] );
+ 
+ 	banner.SetPicture( ART_BANNER );
+ 
+-- 
+2.43.0
+

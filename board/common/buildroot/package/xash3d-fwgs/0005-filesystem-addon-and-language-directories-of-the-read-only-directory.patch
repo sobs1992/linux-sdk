@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 21:00:00 +0100
+Subject: [PATCH] filesystem: addon and language directories of the read-only
+ directory
+
+With XASH3D_RODIR the game's directory (valve/) is mounted from there as
+well as from the base directory, but valve_hd/, valve_addon/, valve_lv/
+and valve_<language>/ only from the base directory: with the game files
+read-only in XASH3D_RODIR and the base directory a writable one for the
+settings and saved games, -language russian mounted an empty valve_russian/
+and the menus stayed English. Each of them is now mounted from the
+read-only directory too, when it is there, before the one of the base
+directory.
+---
+ filesystem/searchpath.c | 41 +++++++++++++++++++++++++++++++++--------
+ 1 file changed, 33 insertions(+), 8 deletions(-)
+
+--- a/filesystem/searchpath.c
++++ b/filesystem/searchpath.c
+@@ -307,6 +307,35 @@
+ 
+ /*
+ ================
++FS_AddAddonDirectory
++
++mounts <dir>_<suffix> (_hd, _addon, _lv, _<language>): the one of the
++read-only directory too, where the game's own (valve/) is found, then the
++one of the base directory, which overrides it
++================
++*/
++static void FS_AddAddonDirectory( const char *dir, const char *suffix, uint flags )
++{
++	char buf[MAX_VA_STRING];
++
++	if( !COM_StringEmpty( fs_rodir ))
++	{
++		Q_snprintf( buf, sizeof( buf ), "%s/%s_%s/", fs_rodir, dir, suffix );
++
++		if( FS_SysFolderExists( buf ))
++		{
++			FS_AllowDirectPaths( true );
++			FS_AddGameDirectory( buf, flags );
++			FS_AllowDirectPaths( false );
++		}
++	}
++
++	Q_snprintf( buf, sizeof( buf ), "%s_%s/", dir, suffix );
++	FS_AddGameDirectory( buf, flags );
++}
++
++/*
++================
+ FS_AddGameHierarchy
+ 
+ ================
+@@ -385,26 +414,22 @@
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_HD ))
+ 	{
+-		Q_snprintf( buf, sizeof( buf ), "%s_hd/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddAddonDirectory( dir, "hd", flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_ADDON ))
+ 	{
+-		Q_snprintf( buf, sizeof( buf ), "%s_addon/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddAddonDirectory( dir, "addon", flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_LV ))
+ 	{
+-		Q_snprintf( buf, sizeof( buf ), "%s_lv/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddAddonDirectory( dir, "lv", flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_L10N ))
+ 	{
+-		Q_snprintf( buf, sizeof( buf ), "%s_%s/", dir, fs_language );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddAddonDirectory( dir, fs_language, flags );
+ 	}
+ 
+ 	if( is_game_dir )
+-- 
+2.43.0
+

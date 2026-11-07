@@ -1,0 +1,777 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 16:22:35 +0100
+Subject: [PATCH] engine: bare_app platform: frames and gamepad over bare_app's
+ game_ipc.h
+
+bare_app (a launcher for handheld consoles) starts its games with a socket
+and shared memory with three frames of its video layer (its
+src/games/game_ipc.h). --enable-bare-app=<bare_app's src> builds an engine
+without SDL for it: the software renderer draws into the frame the engine
+owns and swaps it with the middle one; with EGL the OpenGL ES renderers
+draw off screen into a pbuffer on Mesa's surfaceless platform (the GPU's
+render node), read back into that frame. The socket brings the gamepad's
+buttons and axes (D-pad repeated in menus), sound goes to ALSA
+(platform/linux/s_alsa.c, -alsadev). SIGTERM quits from the main loop so
+that the settings are written; gl_vsync is kept off: there is no vsync, the
+frame rate is fps_max.
+---
+ common/backends.h                   |   2 +
+ common/defaults.h                   |   4 +
+ engine/platform/bare_app/bare_app.c | 646 ++++++++++++++++++++++++++++
+ engine/platform/platform.h          |   4 +-
+ engine/wscript                      |  17 +
+ 5 files changed, 671 insertions(+), 2 deletions(-)
+ create mode 100644 engine/platform/bare_app/bare_app.c
+
+diff --git a/common/backends.h b/common/backends.h
+index 1003ad4..3c4d020 100644
+--- a/common/backends.h
++++ b/common/backends.h
+@@ -22,6 +22,7 @@ GNU General Public License for more details.
+ #define VIDEO_FBDEV   3
+ #define VIDEO_DOS     4
+ #define VIDEO_PS4     5
++#define VIDEO_BARE_APP 6 // frames for bare_app, see engine/platform/bare_app
+ 
+ // audio backends (XASH_SOUND)
+ #define SOUND_NULL     0
+@@ -36,6 +37,7 @@ GNU General Public License for more details.
+ #define INPUT_PSP     2
+ #define INPUT_EVDEV   3
+ #define INPUT_PS4     4
++#define INPUT_BARE_APP 5 // gamepad from bare_app
+ 
+ // timer (XASH_TIMER)
+ #define TIMER_NULL  0 // not used
+diff --git a/common/defaults.h b/common/defaults.h
+index a48e47f..607bcd8 100644
+--- a/common/defaults.h
++++ b/common/defaults.h
+@@ -34,6 +34,10 @@ SETUP BACKENDS DEFINITIONS
+ 		#define XASH_VIDEO     VIDEO_SDL
+ 		#define XASH_INPUT     INPUT_SDL
+ 		#define XASH_SOUND     SOUND_SDL
++	#elif XASH_BARE_APP // started by bare_app: frames and gamepad over its socket, sound to ALSA
++		#define XASH_VIDEO     VIDEO_BARE_APP
++		#define XASH_INPUT     INPUT_BARE_APP
++		#define XASH_SOUND     SOUND_ALSA
+ 	#elif XASH_LINUX // we are building for Linux without SDL, only framebuffer is supported for now
+ 		#define XASH_VIDEO     VIDEO_FBDEV
+ 		#define XASH_INPUT     INPUT_EVDEV
+diff --git a/engine/platform/bare_app/bare_app.c b/engine/platform/bare_app/bare_app.c
+new file mode 100644
+index 0000000..573b3d5
+--- /dev/null
++++ b/engine/platform/bare_app/bare_app.c
+@@ -0,0 +1,646 @@
++/*
++bare_app.c - the engine as a game of bare_app
++Copyright (C) 2026 Xash3D FWGS contributors
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++*/
++
++/*
++bare_app (a launcher for handheld consoles) starts the engine with two
++descriptors, described by its src/games/game_ipc.h: a socket that brings the
++gamepad's buttons and axes and takes "frame published" messages, and shared
++memory with three XRGB8888 frames of the size of its video layer. The
++software renderer draws straight into the frame the engine owns, which is then
++swapped with the one in the middle. The socket closing means bare_app is
++gone. Sound goes to ALSA (platform/linux/s_alsa.c, -alsadev).
++*/
++
++#include "platform/platform.h"
++#if XASH_VIDEO == VIDEO_BARE_APP
++#include "input.h"
++#include "keydefs.h"
++#include "client.h"
++#include "vid_common.h"
++#include <errno.h>
++#include <signal.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "core/input.h"
++#include "games/game_ipc.h"
++
++static struct
++{
++	struct game_shm *shm;
++	size_t size;
++	unsigned back; // the frame the renderer draws into
++	qboolean pad_down[GP_COUNT];
++	short axes[GP_AXIS_COUNT];
++	double repeat_time; // when a held D-pad direction repeats next, 0 - none
++} ba;
++
++// bare_app ends a game with SIGTERM: quit from the main loop, so that the
++// settings are written like on a quit from the menu
++static volatile sig_atomic_t ba_term;
++
++static void BareApp_OnTerm( int sig )
++{
++	ba_term = 1;
++}
++
++/*
++==============================================================================
++
++VIDEO
++
++==============================================================================
++*/
++static qboolean BareApp_MapFrames( void )
++{
++	struct stat st;
++	void *map;
++
++	if( ba.shm )
++		return true;
++
++	if( fstat( GAME_IPC_SHM, &st ) < 0 || st.st_size < GAME_SHM_HEADER )
++	{
++		Con_Printf( S_ERROR "no frame memory: the engine is started by bare_app only\n" );
++		return false;
++	}
++
++	map = mmap( NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, GAME_IPC_SHM, 0 );
++	if( map == MAP_FAILED )
++	{
++		Con_Printf( S_ERROR "frame memory: %s\n", strerror( errno ));
++		return false;
++	}
++
++	ba.shm = map;
++	ba.size = st.st_size;
++	if( ba.shm->magic != GAME_SHM_MAGIC || game_shm_size( ba.shm ) > ba.size || ba.shm->stride < ba.shm->width * 4 )
++	{
++		Con_Printf( S_ERROR "frame memory is not bare_app's\n" );
++		munmap( map, ba.size );
++		ba.shm = NULL;
++		return false;
++	}
++
++	// the producer starts with 0, the middle holds 1, bare_app 2
++	ba.back = 0;
++
++	struct sigaction sa = { .sa_handler = BareApp_OnTerm };
++	sigaction( SIGTERM, &sa, NULL );
++	sigaction( SIGINT, &sa, NULL );
++	Con_Reportf( "bare_app: frames %ux%u\n", ba.shm->width, ba.shm->height );
++	return true;
++}
++
++// hands the frame the engine owns over to bare_app and takes the middle one
++static void BareApp_Publish( void )
++{
++	struct game_msg m = { .type = GAME_MSG_FRAME };
++
++	ba.back = atomic_exchange( &ba.shm->middle, ba.back | GAME_SHM_FRESH ) & ~GAME_SHM_FRESH;
++
++	// a full socket already holds a "frame" message, nothing to add
++	if( send( GAME_IPC_SOCK, &m, sizeof( m ), MSG_DONTWAIT | MSG_NOSIGNAL ) < 0 && errno == EPIPE )
++		Sys_Quit( "bare_app is gone" );
++}
++
++void Platform_Minimize_f( void )
++{
++	// bare_app minimises its games itself
++}
++
++/*
++==============================================================================
++
++OPENGL ES: off screen, on the GPU's render node (EGL surfaceless platform of
++Mesa), into a pbuffer of the frame's size that is the default framebuffer
++the renderer expects. Each frame is read back into bare_app's frame.
++
++==============================================================================
++*/
++#if XASH_BARE_APP_EGL
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
++#define BA_GL_UNSIGNED_BYTE 0x1401
++#define BA_GL_RGBA          0x1908
++#define BA_GL_BGRA_EXT      0x80E1
++#define BA_GL_RENDERER      0x1F01
++#define BA_GL_EXTENSIONS    0x1F03
++
++static struct
++{
++	EGLDisplay dpy;
++	EGLSurface surface;
++	EGLContext context;
++	int attrs[REF_GL_ATTRIBUTES_COUNT];
++	qboolean bgra; // the driver reads BGRA, the byte order of bare_app's frames
++	byte *pixels;  // the frame read back, bottom row first
++	void (*ReadPixels)( int x, int y, int w, int h, unsigned format, unsigned type, void *pixels );
++	const char *(*GetString)( unsigned name );
++} egl;
++
++static void BareApp_DefaultAttributes( void )
++{
++	memset( egl.attrs, 0, sizeof( egl.attrs ));
++	egl.attrs[REF_GL_RED_SIZE] = 8;
++	egl.attrs[REF_GL_GREEN_SIZE] = 8;
++	egl.attrs[REF_GL_BLUE_SIZE] = 8;
++	egl.attrs[REF_GL_DEPTH_SIZE] = 24;
++	egl.attrs[REF_GL_STENCIL_SIZE] = 8;
++}
++
++static EGLConfig BareApp_ChooseConfig( qboolean es, qboolean msaa )
++{
++	EGLint attrs[32], n = 0, count = 0;
++	EGLConfig config;
++
++	attrs[n++] = EGL_SURFACE_TYPE;    attrs[n++] = EGL_PBUFFER_BIT;
++	attrs[n++] = EGL_RENDERABLE_TYPE; attrs[n++] = es ? EGL_OPENGL_ES2_BIT : EGL_OPENGL_BIT;
++	attrs[n++] = EGL_RED_SIZE;        attrs[n++] = egl.attrs[REF_GL_RED_SIZE];
++	attrs[n++] = EGL_GREEN_SIZE;      attrs[n++] = egl.attrs[REF_GL_GREEN_SIZE];
++	attrs[n++] = EGL_BLUE_SIZE;       attrs[n++] = egl.attrs[REF_GL_BLUE_SIZE];
++	attrs[n++] = EGL_ALPHA_SIZE;      attrs[n++] = egl.attrs[REF_GL_ALPHA_SIZE];
++	attrs[n++] = EGL_DEPTH_SIZE;      attrs[n++] = egl.attrs[REF_GL_DEPTH_SIZE];
++	attrs[n++] = EGL_STENCIL_SIZE;    attrs[n++] = egl.attrs[REF_GL_STENCIL_SIZE];
++	if( msaa && egl.attrs[REF_GL_MULTISAMPLESAMPLES] > 1 )
++	{
++		attrs[n++] = EGL_SAMPLE_BUFFERS; attrs[n++] = 1;
++		attrs[n++] = EGL_SAMPLES;        attrs[n++] = egl.attrs[REF_GL_MULTISAMPLESAMPLES];
++	}
++	attrs[n++] = EGL_NONE;
++
++	if( !eglChooseConfig( egl.dpy, attrs, &config, 1, &count ) || count < 1 )
++		return NULL;
++	return config;
++}
++
++static void BareApp_FreeGL( void )
++{
++	if( egl.dpy != EGL_NO_DISPLAY && egl.dpy )
++	{
++		eglMakeCurrent( egl.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
++		if( egl.context )
++			eglDestroyContext( egl.dpy, egl.context );
++		if( egl.surface )
++			eglDestroySurface( egl.dpy, egl.surface );
++		eglTerminate( egl.dpy );
++	}
++	if( egl.pixels )
++		Mem_Free( egl.pixels );
++	egl.pixels = NULL;
++	egl.dpy = EGL_NO_DISPLAY;
++	egl.surface = EGL_NO_SURFACE;
++	egl.context = EGL_NO_CONTEXT;
++}
++
++static qboolean BareApp_InitGL( void )
++{
++	PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay;
++	const qboolean es = FBitSet( egl.attrs[REF_GL_CONTEXT_PROFILE_MASK], REF_GL_CONTEXT_PROFILE_ES ) ? true : false;
++	const int w = ba.shm->width, h = ba.shm->height;
++	EGLint ctx_attrs[16], n = 0, major, minor;
++	EGLConfig config;
++	const char *ext;
++
++	// Mesa renders without a display on the render node; elsewhere (a PC
++	// driver) the default display is fine for a pbuffer too
++	getPlatformDisplay = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress( "eglGetPlatformDisplayEXT" );
++	egl.dpy = getPlatformDisplay ? getPlatformDisplay( EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL ) : EGL_NO_DISPLAY;
++	if( egl.dpy == EGL_NO_DISPLAY || !eglInitialize( egl.dpy, &major, &minor ))
++	{
++		egl.dpy = eglGetDisplay( EGL_DEFAULT_DISPLAY );
++		if( egl.dpy == EGL_NO_DISPLAY || !eglInitialize( egl.dpy, &major, &minor ))
++		{
++			Con_Printf( S_ERROR "EGL: no display (0x%x)\n", eglGetError( ));
++			egl.dpy = EGL_NO_DISPLAY;
++			return false;
++		}
++	}
++
++	if( !eglBindAPI( es ? EGL_OPENGL_ES_API : EGL_OPENGL_API ))
++	{
++		Con_Printf( S_ERROR "EGL: no %s API\n", es ? "OpenGL ES" : "OpenGL" );
++		BareApp_FreeGL( );
++		return false;
++	}
++
++	config = BareApp_ChooseConfig( es, true );
++	if( !config )
++		config = BareApp_ChooseConfig( es, false ); // without multisampling
++	if( !config )
++	{
++		Con_Printf( S_ERROR "EGL: no pbuffer config (0x%x)\n", eglGetError( ));
++		BareApp_FreeGL( );
++		return false;
++	}
++
++	const EGLint surface_attrs[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_NONE };
++	egl.surface = eglCreatePbufferSurface( egl.dpy, config, surface_attrs );
++	if( egl.surface == EGL_NO_SURFACE )
++	{
++		Con_Printf( S_ERROR "EGL: pbuffer %dx%d (0x%x)\n", w, h, eglGetError( ));
++		BareApp_FreeGL( );
++		return false;
++	}
++
++	if( egl.attrs[REF_GL_CONTEXT_MAJOR_VERSION] )
++	{
++		ctx_attrs[n++] = EGL_CONTEXT_MAJOR_VERSION;
++		ctx_attrs[n++] = egl.attrs[REF_GL_CONTEXT_MAJOR_VERSION];
++		ctx_attrs[n++] = EGL_CONTEXT_MINOR_VERSION;
++		ctx_attrs[n++] = egl.attrs[REF_GL_CONTEXT_MINOR_VERSION];
++	}
++	if( !es && FBitSet( egl.attrs[REF_GL_CONTEXT_PROFILE_MASK], REF_GL_CONTEXT_PROFILE_CORE ))
++	{
++		ctx_attrs[n++] = EGL_CONTEXT_OPENGL_PROFILE_MASK;
++		ctx_attrs[n++] = EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT;
++	}
++	ctx_attrs[n++] = EGL_NONE;
++
++	egl.context = eglCreateContext( egl.dpy, config, EGL_NO_CONTEXT, ctx_attrs );
++	if( egl.context == EGL_NO_CONTEXT || !eglMakeCurrent( egl.dpy, egl.surface, egl.surface, egl.context ))
++	{
++		Con_Printf( S_ERROR "EGL: context (0x%x)\n", eglGetError( ));
++		BareApp_FreeGL( );
++		return false;
++	}
++
++	egl.ReadPixels = (void *)eglGetProcAddress( "glReadPixels" );
++	egl.GetString = (void *)eglGetProcAddress( "glGetString" );
++	if( !egl.ReadPixels || !egl.GetString )
++	{
++		Con_Printf( S_ERROR "EGL: no glReadPixels\n" );
++		BareApp_FreeGL( );
++		return false;
++	}
++
++	ext = egl.GetString( BA_GL_EXTENSIONS );
++	egl.bgra = es && ext && Q_strstr( ext, "GL_EXT_read_format_bgra" );
++	egl.pixels = Mem_Malloc( host.mempool, (size_t)w * h * 4 );
++
++	EGLint samples = 0;
++	eglGetConfigAttrib( egl.dpy, config, EGL_SAMPLES, &samples );
++	Con_Printf( "bare_app: EGL %d.%d, %s, %dx%d, %d samples, reading %s\n", major, minor,
++		egl.GetString( BA_GL_RENDERER ), w, h, samples, egl.bgra ? "BGRA" : "RGBA" );
++	return true;
++}
++
++void GL_SwapBuffers( void )
++{
++	const int w = ba.shm->width, h = ba.shm->height;
++	byte *frame;
++
++	if( !egl.context )
++		return;
++
++	egl.ReadPixels( 0, 0, w, h, egl.bgra ? BA_GL_BGRA_EXT : BA_GL_RGBA, BA_GL_UNSIGNED_BYTE, egl.pixels );
++
++	// GL's rows go up, bare_app's down
++	frame = game_shm_frame( ba.shm, ba.back );
++	for( int y = 0; y < h; y++ )
++	{
++		const byte *in = egl.pixels + (size_t)( h - 1 - y ) * w * 4;
++		uint32_t *out = (uint32_t *)( frame + (size_t)y * ba.shm->stride );
++
++		if( egl.bgra )
++		{
++			memcpy( out, in, (size_t)w * 4 );
++			continue;
++		}
++
++		for( int x = 0; x < w; x++, in += 4 )
++			out[x] = ( in[0] << 16 ) | ( in[1] << 8 ) | in[2];
++	}
++
++	BareApp_Publish( );
++}
++
++int GL_SetAttribute( int attr, int val )
++{
++	if( attr < 0 || attr >= REF_GL_ATTRIBUTES_COUNT )
++		return -1;
++
++	egl.attrs[attr] = val;
++	return 0;
++}
++
++int GL_GetAttribute( int attr, int *val )
++{
++	if( attr < 0 || attr >= REF_GL_ATTRIBUTES_COUNT )
++		return -1;
++
++	*val = egl.attrs[attr];
++	return 0;
++}
++
++void *GL_GetProcAddress( const char *name )
++{
++	return (void *)eglGetProcAddress( name );
++}
++#else // !XASH_BARE_APP_EGL
++static void BareApp_DefaultAttributes( void )
++{
++}
++
++static qboolean BareApp_InitGL( void )
++{
++	Con_Printf( S_ERROR "this engine is built without EGL: software renderer only\n" );
++	return false;
++}
++
++static void BareApp_FreeGL( void )
++{
++}
++
++void GL_SwapBuffers( void )
++{
++}
++
++int GL_SetAttribute( int attr, int val )
++{
++	return 0;
++}
++
++int GL_GetAttribute( int attr, int *val )
++{
++	return 0;
++}
++
++void *GL_GetProcAddress( const char *name )
++{
++	return NULL;
++}
++#endif // !XASH_BARE_APP_EGL
++
++qboolean R_Init_Video( ref_graphic_apis_t type )
++{
++	if( type != REF_SOFTWARE && type != REF_GL )
++		return false;
++
++	if( !BareApp_MapFrames( ))
++		return false;
++
++	if( type == REF_GL )
++	{
++		// the renderer asks for its context
++		BareApp_DefaultAttributes( );
++		ref.dllFuncs.GL_SetupAttributes( SAFE_NO );
++
++		if( !BareApp_InitGL( ))
++			return false;
++	}
++
++	if( !VID_SetMode( ))
++		return false;
++
++	if( type == REF_GL )
++		ref.dllFuncs.GL_InitExtensions( );
++
++	host.renderinfo_changed = false;
++	return true;
++}
++
++void R_Free_Video( void )
++{
++	BareApp_FreeGL( );
++	ref.dllFuncs.GL_ClearExtensions();
++}
++
++qboolean VID_SetMode( void )
++{
++	R_ChangeDisplaySettings( 0, 0, WINDOW_MODE_FULLSCREEN );
++	return true;
++}
++
++rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
++{
++	// always the size of bare_app's video layer
++	int render_w = width = ba.shm->width;
++	int render_h = height = ba.shm->height;
++
++	VID_SetDisplayTransform( &render_w, &render_h );
++	R_SaveVideoMode( width, height, render_w, render_h, false );
++
++	return rserr_ok;
++}
++
++int R_MaxVideoModes( void )
++{
++	return 0;
++}
++
++vidmode_t *R_GetVideoMode( int num )
++{
++	return NULL;
++}
++
++void GL_UpdateSwapInterval( void )
++{
++	// bare_app shows the newest frame at its own pace, there is no vsync to
++	// wait for: with gl_vsync on the engine would not limit the frame rate
++	// (Host_CalcFPS), fps_max does
++	if( gl_vsync.value )
++		Cvar_DirectSet( &gl_vsync, "0" );
++	ClearBits( gl_vsync.flags, FCVAR_CHANGED );
++}
++
++void *SW_LockBuffer( void )
++{
++	return game_shm_frame( ba.shm, ba.back );
++}
++
++void SW_UnlockBuffer( void )
++{
++	BareApp_Publish( );
++}
++
++qboolean SW_CreateBuffer( int width, int height, uint *stride, uint *bpp, uint *r, uint *g, uint *b )
++{
++	if( width > ba.shm->width || height > ba.shm->height )
++	{
++		Con_Printf( S_ERROR "%dx%d doesn't fit into bare_app's %ux%u\n", width, height, ba.shm->width, ba.shm->height );
++		return false;
++	}
++
++	*bpp = 4;
++	*stride = ba.shm->stride / 4;
++	*r = 0xff0000;
++	*g = 0x00ff00;
++	*b = 0x0000ff;
++	return true;
++}
++
++ref_window_type_t R_GetWindowHandle( void **handle, ref_window_type_t type )
++{
++	return REF_WINDOW_TYPE_NULL;
++}
++
++void VID_Info_f( void )
++{
++	Con_Printf( "bare_app video layer %ux%u\n", ba.shm ? ba.shm->width : 0, ba.shm ? ba.shm->height : 0 );
++}
++
++platform_orientation_t Platform_GetDisplayOrientation( void )
++{
++	// bare_app turns the frames for the panel itself
++	return ORIENTATION_LANDSCAPE;
++}
++
++/*
++==============================================================================
++
++INPUT
++
++==============================================================================
++*/
++
++// bare_app names the buttons by the labels on the console
++static const int ba_keys[GP_COUNT] =
++{
++	[GP_UP] = K_DPAD_UP,
++	[GP_DOWN] = K_DPAD_DOWN,
++	[GP_LEFT] = K_DPAD_LEFT,
++	[GP_RIGHT] = K_DPAD_RIGHT,
++	[GP_A] = K_A_BUTTON,
++	[GP_B] = K_B_BUTTON,
++	[GP_X] = K_X_BUTTON,
++	[GP_Y] = K_Y_BUTTON,
++	[GP_L1] = K_L1_BUTTON,
++	[GP_R1] = K_R1_BUTTON,
++	[GP_L2] = K_L2_BUTTON,
++	[GP_R2] = K_R2_BUTTON,
++	[GP_SELECT] = K_BACK_BUTTON,
++	[GP_START] = K_START_BUTTON,
++	[GP_MENU] = K_START_BUTTON,
++	// a row of F1..F6 on the GO Ultra; bare_app keeps F5 (minimise) and F6 (quit)
++	[GP_F1] = K_START_BUTTON,
++	[GP_F2] = K_BACK_BUTTON,
++	[GP_F3] = K_F6, // savequick in the engine's default keys
++	[GP_F4] = K_F7, // loadquick
++};
++
++static const engineAxis_t ba_axes[GP_AXIS_COUNT] =
++{
++	[GP_AXIS_LX] = JOY_AXIS_SIDE,
++	[GP_AXIS_LY] = JOY_AXIS_FWD,
++	[GP_AXIS_RX] = JOY_AXIS_YAW,
++	[GP_AXIS_RY] = JOY_AXIS_PITCH,
++};
++
++#define BA_DPAD ( GP_BIT( GP_UP ) | GP_BIT( GP_DOWN ) | GP_BIT( GP_LEFT ) | GP_BIT( GP_RIGHT ))
++
++// bare_app doesn't repeat buttons to games, menus (sliders, lists) need it
++#define BA_REPEAT_DELAY    0.4
++#define BA_REPEAT_INTERVAL 0.08
++
++static qboolean BareApp_DpadHeld( void )
++{
++	return ba.pad_down[GP_UP] || ba.pad_down[GP_DOWN] || ba.pad_down[GP_LEFT] || ba.pad_down[GP_RIGHT];
++}
++
++static void BareApp_Button( int code, qboolean down )
++{
++	if( code < 0 || code >= GP_COUNT || !ba_keys[code] || ba.pad_down[code] == down )
++		return;
++
++	ba.pad_down[code] = down;
++	Key_Event( ba_keys[code], down );
++
++	if( FBitSet( BA_DPAD, GP_BIT( code )))
++		ba.repeat_time = BareApp_DpadHeld( ) ? host.realtime + BA_REPEAT_DELAY : 0.0;
++}
++
++static void BareApp_Axis( int code, short value )
++{
++	if( code < 0 || code >= GP_AXIS_COUNT || ba.axes[code] == value )
++		return;
++
++	ba.axes[code] = value;
++	Joy_AxisMotionEvent( ba_axes[code], value );
++}
++
++void Platform_RunEvents( void )
++{
++	struct game_msg m;
++	ssize_t n;
++
++	if( ba_term )
++		Sys_Quit( "ended by bare_app" );
++
++	for( ;; )
++	{
++		n = recv( GAME_IPC_SOCK, &m, sizeof( m ), MSG_DONTWAIT );
++
++		if( n == 0 )
++			Sys_Quit( "bare_app is gone" );
++
++		if( n < 0 )
++		{
++			if( errno == EINTR )
++				continue;
++			break;
++		}
++
++		if( n != sizeof( m ))
++			continue;
++
++		// the left stick comes as axes, the directions it makes too are not the D-pad
++		if( m.type == GAME_MSG_BUTTON && !FBitSet( m.flags, GAME_BTN_STICK ))
++			BareApp_Button( m.code, m.pressed ? true : false );
++		else if( m.type == GAME_MSG_AXIS )
++			BareApp_Axis( m.code, m.value );
++	}
++
++	if( cls.key_dest != key_game && ba.repeat_time > 0.0 && host.realtime >= ba.repeat_time )
++	{
++		for( int i = GP_UP; i <= GP_RIGHT; i++ )
++		{
++			if( ba.pad_down[i] )
++				Key_Event( ba_keys[i], true );
++		}
++
++		ba.repeat_time = host.realtime + BA_REPEAT_INTERVAL;
++	}
++}
++
++void Platform_MouseMove( float *x, float *y )
++{
++	if( x ) *x = 0.0f;
++	if( y ) *y = 0.0f;
++}
++
++int Platform_JoyInit( void )
++{
++	Joy_SetCapabilities( false, 0, NULL );
++	return 1;
++}
++
++void Platform_JoyShutdown( void )
++{
++}
++
++void Platform_CalibrateGamepadGyro( void )
++{
++}
++
++key_modifier_t Platform_GetKeyModifiers( void )
++{
++	return KeyModifier_None;
++}
++
++#endif // XASH_VIDEO == VIDEO_BARE_APP
+diff --git a/engine/platform/platform.h b/engine/platform/platform.h
+index 4b1e40c..c4a673a 100644
+--- a/engine/platform/platform.h
++++ b/engine/platform/platform.h
+@@ -400,7 +400,7 @@ static inline qboolean Platform_MouseConnected( void ) { return true; }
+ #if XASH_SDL || XASH_DOS
+ void Platform_RunEvents( void );
+ void Platform_MouseMove( float *x, float *y );
+-#elif XASH_PS4 // the gamepad, keyboard and mouse are polled in Platform_RunEvents
++#elif XASH_PS4 || XASH_BARE_APP // the gamepad, keyboard and mouse are polled in Platform_RunEvents
+ void Platform_RunEvents( void );
+ void Platform_MouseMove( float *x, float *y );
+ #else
+@@ -429,7 +429,7 @@ int Platform_TranslateKeyLayout( int keynum );
+ static inline int Platform_TranslateKeyLayout( int keynum ) { return keynum; }
+ #endif
+ 
+-#if XASH_SDL >= 2 || XASH_PS4
++#if XASH_SDL >= 2 || XASH_PS4 || XASH_BARE_APP
+ int Platform_JoyInit( void ); // returns number of connected gamepads, negative if error
+ void Platform_JoyShutdown( void );
+ void Platform_CalibrateGamepadGyro( void );
+diff --git a/engine/wscript b/engine/wscript
+index dafbf49..7730ead 100644
+--- a/engine/wscript
++++ b/engine/wscript
+@@ -43,6 +43,9 @@ def options(opt):
+ 	grp.add_option('--enable-fbdev', action = 'store_true', dest = 'FBDEV_SW', default = False,
+ 		help = 'build fbdev-only software-only engine')
+ 
++	grp.add_option('--enable-bare-app', action = 'store', dest = 'BARE_APP', default = None, metavar = 'DIR',
++		help = 'build a software-only engine started by bare_app: frames and gamepad over its src/games/game_ipc.h, found in DIR (bare_app\'s src), sound to ALSA')
++
+ 	grp.add_option('--enable-custom-swap', action = 'store_true', dest = 'CUSTOM_SWAP', default = False,
+ 		help = 'enable custom swap allocator. For devices with no swap support')
+ 
+@@ -127,6 +130,12 @@ def configure(conf):
+ 			conf.env.LIB_PS4CLIENT_SYS = ['SceImeDialog', 'SceCommonDialog', 'SceAudioIn', 'SceAudioOut', 'ScePad', 'SceUserService', 'SceSysmodule', 'SceKeyboard', 'SceMouse']
+ 		elif conf.env.DEST_OS == 'linux' and conf.options.FBDEV_SW:
+ 			conf.check_cc(lib='asound')
++		elif conf.env.DEST_OS == 'linux' and conf.options.BARE_APP:
++			conf.env.BARE_APP = os.path.abspath(conf.options.BARE_APP)
++			conf.check_cc(header_name='games/game_ipc.h', includes=[conf.env.BARE_APP], msg='Checking for bare_app\'s games/game_ipc.h')
++			conf.check_cc(lib='asound')
++			# OpenGL ES renderers through EGL, off screen; software only without it
++			conf.env.BARE_APP_EGL = conf.check_cc(lib='EGL', header_name='EGL/egl.h', uselib_store='EGL', mandatory=False)
+ 		elif conf.options.SDL12: # TODO: move to sdl2.py
+ 			conf.check_cfg(package='sdl', args='--cflags --libs', uselib_store='SDL1')
+ 			conf.env.XASH_SDL = 1
+@@ -278,6 +287,14 @@ def build(bld):
+ 
+ 	if bld.env.CLIENT:
+ 		defines = []
++		if bld.env.BARE_APP:
++			source += bld.path.ant_glob('platform/bare_app/*.c')
++			defines += ['XASH_BARE_APP=1']
++			includes += [bld.env.BARE_APP]
++			if bld.env.BARE_APP_EGL:
++				defines += ['XASH_BARE_APP_EGL=1']
++				libs += ['EGL']
++
+ 		if bld.env.XASH_SDL:
+ 			libs += ['SDL%d' % bld.env.XASH_SDL]
+ 			source += bld.path.ant_glob(['platform/sdl%d/*.c' % bld.env.XASH_SDL])

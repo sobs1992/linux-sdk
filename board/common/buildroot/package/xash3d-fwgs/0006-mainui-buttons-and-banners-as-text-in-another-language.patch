@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 21:30:00 +0100
+Subject: [PATCH] mainui: buttons and banners as text in another language
+
+The buttons of the main menu (gfx/shell/btns_main.bmp) and the banners
+of the menus (gfx/shell/head_*.bmp) of Half-Life are pictures of English
+words: with ui_language russian the menus were English but for the
+hints. In a language other than English they are now drawn as text, by
+their names, which are translated (as with render_picbutton_text in
+gameinfo).
+---
+ 3rdparty/mainui/BaseMenu.cpp          | 8 ++++++++
+ 3rdparty/mainui/BaseMenu.h            | 1 +
+ 3rdparty/mainui/controls/Framework.cpp | 4 +++-
+ 3 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/3rdparty/mainui/BaseMenu.cpp b/3rdparty/mainui/BaseMenu.cpp
+--- a/3rdparty/mainui/BaseMenu.cpp
++++ b/3rdparty/mainui/BaseMenu.cpp
+@@ -1206,6 +1206,14 @@
+ 
+ 	uiStatic.renderPicbuttonText = gMenu.m_gameinfo.flags & GFL_RENDER_PICBUTTON_TEXT;
+ 
++	// the buttons (btns_main.bmp) and banners (head_*.bmp) of the game are
++	// pictures of English words: in another language they are drawn as
++	// their names, which are translated
++	const char *language = EngFuncs::GetCvarString( "ui_language" );
++	uiStatic.englishPictures = !language[0] || !strcmp( language, "english" );
++	if( !uiStatic.englishPictures )
++		uiStatic.renderPicbuttonText = true;
++
+ 	// trying to load colors.lst
+ 	UI_ApplyCustomColors ();
+ }
+diff --git a/3rdparty/mainui/BaseMenu.h b/3rdparty/mainui/BaseMenu.h
+--- a/3rdparty/mainui/BaseMenu.h
++++ b/3rdparty/mainui/BaseMenu.h
+@@ -126,6 +126,7 @@
+ 	bool needMapListUpdate;
+ 	bool nextFrameActive;
+ 	bool renderPicbuttonText;
++	bool englishPictures;	// the pictures with words drawn: not for another language
+ 
+ 	int lowmemory;
+ 
+diff --git a/3rdparty/mainui/controls/Framework.cpp b/3rdparty/mainui/controls/Framework.cpp
+--- a/3rdparty/mainui/controls/Framework.cpp
++++ b/3rdparty/mainui/controls/Framework.cpp
+@@ -228,7 +228,9 @@
+ 
+ void CMenuFramework::CMenuBannerBitmap::SetPicture(const char *pic)
+ {
+-	image.Load( pic );
++	// without the picture the banner is its name (of the button that opened it)
++	if( uiStatic.englishPictures )
++		image.Load( pic );
+ }
+ 
+ void CMenuFramework::CMenuBannerBitmap::Draw( Point pt, Size sz )
+-- 
+2.43.0
+

@@ -1,0 +1,28 @@
+config BR2_PACKAGE_XASH3D_FWGS
+	bool "xash3d-fwgs"
+	depends on BR2_INSTALL_LIBSTDCPP # menu
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_USE_MMU # fork()
+	depends on !BR2_STATIC_LIBS # game libraries are dlopen()ed
+	depends on BR2_PACKAGE_BARE_APP
+	select BR2_PACKAGE_ALSA_LIB
+	select BR2_PACKAGE_ZLIB
+	help
+	  Xash3D FWGS, an engine compatible with GoldSource (Half-Life),
+	  built as a game of bare_app: frames and gamepad over
+	  bare_app's socket and shared memory
+	  (0001-engine-bare_app-platform.patch), sound to ALSA, no SDL.
+	  The software renderer, and with mesa-panfrost the OpenGL ES
+	  one, drawn off screen by the GPU.
+	  The launcher /usr/bin/xash3d, the engine, renderer and menu in
+	  /usr/lib/xash3d, the engine's resources in
+	  /usr/share/xash3d/valve/extras.pk3, with our Russian for the
+	  menus and the game's messages (russian/). The game code comes
+	  from hlsdk-portable, the game files from a bought copy.
+
+	  https://github.com/FWGS/xash3d-fwgs
+
+comment "xash3d-fwgs needs bare_app and a toolchain w/ C++, threads, dynamic library"
+	depends on BR2_USE_MMU
+	depends on !BR2_PACKAGE_BARE_APP || !BR2_INSTALL_LIBSTDCPP || \
+		!BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

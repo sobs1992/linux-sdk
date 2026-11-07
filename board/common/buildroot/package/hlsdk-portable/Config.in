@@ -1,0 +1,15 @@
+config BR2_PACKAGE_HLSDK_PORTABLE
+	bool "hlsdk-portable"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on !BR2_STATIC_LIBS
+	help
+	  The game code of Half-Life (Valve's Half-Life 1 SDK, ported by
+	  the Xash3D FWGS project) for the engine of xash3d-fwgs: the
+	  server and client libraries, in /usr/lib/xash3d/valve/dlls
+	  and cl_dlls (their names carry the architecture:
+	  hl_arm64.so). Under Valve's SDK licence: free, non-commercial.
+
+	  https://github.com/FWGS/hlsdk-portable
+
+comment "hlsdk-portable needs a toolchain w/ C++, dynamic library"
+	depends on !BR2_INSTALL_LIBSTDCPP || BR2_STATIC_LIBS

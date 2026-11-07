@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 18:45:39 +0100
+Subject: [PATCH] engine: console: the 4:3 background fitted to wide screens
+
+The console background, also the picture shown while a level loads (the
+25th anniversary "LOADING" one), was drawn as wide as the screen and 4:3
+high: on a 16:9 screen its top was cut off (854x640 on 854x480). On a
+screen wider than 4:3 it is now as high as the screen, centred between
+black bars.
+---
+ engine/client/console.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/engine/client/console.c b/engine/client/console.c
+index c7b35c5..0e27d67 100644
+--- a/engine/client/console.c
++++ b/engine/client/console.c
+@@ -2341,7 +2341,18 @@ static void Con_DrawSolidConsole( int lines )
+ 	ref.dllFuncs.Color4ub( 255, 255, 255, 255 ); // to prevent grab color from screenfade
+ 	if( refState.width * 3 / 4 < refState.height && lines >= refState.height )
+ 		ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.height, refState.width, refState.height - refState.width * 3 / 4, 0, 0, 1, 1, R_GetBuiltinTexture( REF_BLACK_TEXTURE ));
+-	ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.width * 3 / 4, refState.width, refState.width * 3 / 4, 0, 0, 1, 1, con.background );
++
++	if( refState.width * 3 / 4 > refState.height )
++	{
++		// the 4:3 picture on a wider screen: as high as the screen, centred
++		// between black bars, instead of cut at the top (the loading one)
++		const int w = refState.height * 4 / 3;
++
++		ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.height, refState.width, refState.height, 0, 0, 1, 1, R_GetBuiltinTexture( REF_BLACK_TEXTURE ));
++		ref.dllFuncs.R_DrawStretchPic(( refState.width - w ) / 2, lines - refState.height, w, refState.height, 0, 0, 1, 1, con.background );
++	}
++	else
++		ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.width * 3 / 4, refState.width, refState.width * 3 / 4, 0, 0, 1, 1, con.background );
+ 
+ 	if( !con.curFont || !host.allow_console )
+ 		return; // nothing to draw

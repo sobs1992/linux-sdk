@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sat, 7 Nov 2026 18:21:49 +0100
+Subject: [PATCH] ref: gl2_shim: index range of quads drawn with a base vertex
+
+glDrawRangeElementsBaseVertex() bounds the index values before the base
+vertex is added. The quads take their indices from the static array at the
+quad boundary below startindex, but the range started at startindex: up to
+three too high. Drivers that place the vertices by that range read below
+the vertex buffer: on panfrost (Mali G52) the GPU faulted at addresses
+near 2^36 above the buffer and every fault stalled the game for half a
+second. The end of both ranges is inclusive.
+---
+ ref/gl/gl2_shim/gl2_shim.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
+index 91541c9..54b6a9e 100644
+--- a/ref/gl/gl2_shim/gl2_shim.c
++++ b/ref/gl/gl2_shim/gl2_shim.c
+@@ -962,8 +962,17 @@ static void GL2_FlushPrims( void )
+ 			 * When DrawRangeElementsBaseVertex unavailiable, we need build 4 different index arrays (as sequence have period 4)
+ 			 * or just put 0-4 offset when it's availiable
+ 			 * */
++			/*
++			 * start and end bound the index values before the base vertex
++			 * is added: the indices taken from the array start at the quad
++			 * boundary below startindex. Drivers that place the vertices by
++			 * this range (panfrost) read below the vertex buffer otherwise,
++			 * and the GPU faults
++			 */
++			const int first = startindex - startindex % 4;
++
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, gl2wrap.triquads_ibo[0] );
+-			pglDrawRangeElementsBaseVertex( GL_TRIANGLES, startindex, startindex + count,
++			pglDrawRangeElementsBaseVertex( GL_TRIANGLES, first, first + count - 1,
+ 				Q_min( count / 4 * 6, TRIQUADS_SIZE * 6 - startindex ), GL_UNSIGNED_SHORT,
+ 				(void *)(size_t)( startindex / 4 * 6 * 2 ), startindex % 4 );
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, 0 );
+@@ -971,7 +980,7 @@ static void GL2_FlushPrims( void )
+ 		else if( rpglDrawRangeElements )
+ 		{
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, gl2wrap.triquads_ibo[startindex % 4] );
+-			rpglDrawRangeElements( GL_TRIANGLES, startindex, startindex + count,
++			rpglDrawRangeElements( GL_TRIANGLES, startindex, startindex + count - 1, // inclusive
+ 				Q_min( count / 4 * 6, TRIQUADS_SIZE * 6 - startindex ), GL_UNSIGNED_SHORT,
+ 				(void *)(size_t)( startindex / 4 * 6 * 2 ));
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, 0 );
