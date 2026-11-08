@@ -1,4 +1,4 @@
-From ceba03476de6d1bdb60be17b6fd67f557c30dd58 Mon Sep 17 00:00:00 2001
+From 1f34a611b0d91e00974d51fcdc7097ad8992816f Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Sun, 8 Nov 2026 21:33:16 +0100
 Subject: [PATCH] win32u: $WINE_FONT_SCALE scales every font the application
@@ -7,14 +7,14 @@ Subject: [PATCH] win32u: $WINE_FONT_SCALE scales every font the application
 For games whose text is too small on a small screen: the heights (and
 widths) of the fonts CreateFont() makes are multiplied by the factor.
 ---
- dlls/win32u/font.c | 30 ++++++++++++++++++++++++++++++
- 1 file changed, 30 insertions(+)
+ dlls/win32u/font.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
 
 diff --git a/dlls/win32u/font.c b/dlls/win32u/font.c
-index ed2ef52..4da16e2 100644
+index ed2ef52..720c4bf 100644
 --- a/dlls/win32u/font.c
 +++ b/dlls/win32u/font.c
-@@ -4899,6 +4899,35 @@ UINT WINAPI NtGdiGetTextCharsetInfo( HDC hdc, FONTSIGNATURE *fs, DWORD flags )
+@@ -4899,6 +4899,39 @@ UINT WINAPI NtGdiGetTextCharsetInfo( HDC hdc, FONTSIGNATURE *fs, DWORD flags )
      return ret;
  }
  
@@ -22,7 +22,11 @@ index ed2ef52..4da16e2 100644
 + * (1.25: a 16 pixel font is made 20 pixels), for games whose text is too
 + * small on a small screen. A game that spaces its lines and breaks its
 + * text by its own numbers rather than the font's metrics only has room
-+ * for a little of it (Daemonica: 1.25). 0 = off. */
++ * for a little of it (Daemonica: 1.25). 0 = off.
++ * At the new sizes FreeType's default (v40) hinting may let glyphs spill
++ * past their advances (Palatino's "c" into the next letter): with
++ * FREETYPE_PROPERTIES=truetype:interpreter-version=35 they are hinted
++ * as Windows hints them. */
 +static double font_scale(void)
 +{
 +    static double scale = -1.0;
@@ -50,7 +54,7 @@ index ed2ef52..4da16e2 100644
  /***********************************************************************
   *           NtGdiHfontCreate   (win32u.@)
   */
-@@ -4934,6 +4963,7 @@ HFONT WINAPI NtGdiHfontCreate( const void *logfont, ULONG size, ULONG type,
+@@ -4934,6 +4967,7 @@ HFONT WINAPI NtGdiHfontCreate( const void *logfont, ULONG size, ULONG type,
      if (!(fontPtr = malloc( sizeof(*fontPtr) ))) return 0;
  
      fontPtr->logfont = *plf;
