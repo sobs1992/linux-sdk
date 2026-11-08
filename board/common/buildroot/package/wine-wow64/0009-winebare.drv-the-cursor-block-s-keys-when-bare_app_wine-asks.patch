@@ -1,0 +1,34 @@
+From 027d2dc9d74d77aea1a13f88e53f472139959577 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 00:18:01 +0100
+Subject: [PATCH] winebare.drv: the cursor block's keys when bare_app_wine asks
+ for them
+
+Wine's keyboard layout gives the arrows (and Insert, Delete, Home, End,
+Page Up/Down) the numeric keypad's scan code without E0, which is what
+Pirates! wants. Games reading the keyboard by DirectInput tell the two
+apart (Daemonica turns its camera with DIK_LEFT/DIK_RIGHT): protocol 2
+has key flags, WB_KEY_EXTENDED sends the key as the cursor block's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/winebare.drv/main.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+index 2b59f76..31d15cb 100644
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -224,7 +224,8 @@ static void send_key(const struct wb_msg *msg)
+ 
+     input.ki.wVk = msg->key.vk;
+     input.ki.wScan = scan & 0xff;
+-    if (scan & 0xff00) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
++    /* the layout names the keypad's arrows first: the cursor block's when asked */
++    if ((scan & 0xff00) || (msg->key.flags & WB_KEY_EXTENDED)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+     if (!msg->key.pressed) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+     NtUserSendHardwareInput(0, 0, &input, 0);
+ }
+-- 
+2.53.0
+
