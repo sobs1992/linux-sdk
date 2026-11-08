@@ -33,4 +33,33 @@ define BARE_APP_INSTALL_INIT_SYSV
 endef
 endif
 
+# SDL2 games (BARE_APP_SDL): SDL2 gets the bareapp drivers (sdl2/, with
+# bare_app's protocol headers next to them) and, with Mesa, OpenGL ES,
+# which it loads at run time. As in vcmi.mk: hooks and options of another
+# package are expanded when they are used, so options added here win.
+ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)
+define BARE_APP_SDL2_DRIVERS
+	$(APPLY_PATCHES) $(SDL2_DIR) $(BARE_APP_PKGDIR)/sdl2 \*.patch
+	$(INSTALL) -m 0644 $(BARE_APP_SITE)/src/games/game_ipc.h \
+		$(BARE_APP_SITE)/src/core/input.h $(SDL2_DIR)/src/video/bareapp/
+endef
+SDL2_POST_PATCH_HOOKS += BARE_APP_SDL2_DRIVERS
+SDL2_CONF_OPTS += --enable-bareapp
+ifeq ($(BR2_PACKAGE_MESA_PANFROST),y)
+SDL2_DEPENDENCIES += mesa-panfrost
+SDL2_CONF_OPTS += --enable-video-opengles --enable-video-opengles2 --disable-video-opengles1
+endif
+endif
+
+# The game.ini of the SDL2 games we bring: bare_app's menu entries
+BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM) += chocolate-doom.ini
+ifneq ($(BARE_APP_GAME_INIS-y),)
+define BARE_APP_INSTALL_GAME_INIS
+	$(foreach f,$(BARE_APP_GAME_INIS-y),\
+		$(INSTALL) -D -m 0644 $(BARE_APP_PKGDIR)/games/$(f) \
+			$(TARGET_DIR)/usr/share/bare_app/games/$(f)$(sep))
+endef
+BARE_APP_POST_INSTALL_TARGET_HOOKS += BARE_APP_INSTALL_GAME_INIS
+endif
+
 $(eval $(cmake-package))

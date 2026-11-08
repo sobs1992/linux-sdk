@@ -1,0 +1,1640 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] video, joystick: bareapp drivers for the games of bare_app
+
+bare_app, the launcher of the OdroidLinux SDK, starts each game as a
+program of its own and hands it a socket and shared memory as
+descriptors 3 and 4 (bare_app's src/games/game_ipc.h, copied next to the
+drivers at build time with its gamepad names, core/input.h). With these
+drivers an SDL game runs under bare_app unchanged:
+
+- video "bareapp": picked by itself when the descriptors are there (and
+  SDL_VIDEODRIVER names no other driver). The desktop mode is the size of
+  bare_app's video layer; a window of any size is fitted to it (aspect
+  kept, black borders; SDL_BAREAPP_SCALE=stretch|integer, filtered
+  linearly or SDL_BAREAPP_FILTER=nearest, whole multiples always
+  nearest). Window surfaces and the software renderer are copied into the
+  frame; OpenGL (ES) draws off screen into a pbuffer of the window's size
+  on Mesa's surfaceless platform (the GPU's render node, no display) and
+  is read back at each swap. Frames are paced to SDL_BAREAPP_FPS (60) as
+  a vsync would. bare_app's buttons become keys as SDL_BAREAPP_KEYS says
+  ("a=return, b=escape, up=up"); when bare_app goes away the game gets
+  SDL_QUIT.
+- joystick "bareapp": the gamepad as one game controller with its own
+  mapping (buttons by label, F1 start, F2 back...; SDL_BAREAPP_GAMEPAD
+  changes it), the left stick, the right one where there is one, L2 and
+  R2 as triggers. It switches the Linux driver off with the new hint
+  SDL_JOYSTICK_LINUX=0: the evdev devices are the same buttons.
+
+configure: --enable-bareapp (Linux only), also in the generated
+configure so that the package needs no autoreconf.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+  configure                                  |  30 ++
+  configure.ac                               |  20 ++
+  include/SDL_config.h.in                    |   2 +
+  src/joystick/SDL_joystick.c                |   3 +
+  src/joystick/SDL_sysjoystick.h             |   1 +
+  src/joystick/bareapp/SDL_bareappjoystick.c | 342 ++++++++++++++++++++
+  src/joystick/linux/SDL_sysjoystick.c       |  19 +-
+  src/video/SDL_sysvideo.h                   |   1 +
+  src/video/SDL_video.c                      |   3 +
+  src/video/bareapp/SDL_bareapp.h            |  84 +++++
+  src/video/bareapp/SDL_bareapplink.c        | 481 +++++++++++++++++++++++++++++
+  src/video/bareapp/SDL_bareappvideo.c       | 439 ++++++++++++++++++++++++++
+  12 files changed, 1424 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index c6c94e1..7096d1d 100755
+--- a/configure
++++ b/configure
+@@ -933,6 +933,7 @@ enable_video_kmsdrm
+ enable_kmsdrm_shared
+ enable_video_dummy
+ enable_video_offscreen
++enable_bareapp
+ enable_video_opengl
+ enable_video_opengles
+ enable_video_opengles1
+@@ -1752,6 +1753,8 @@ Optional Features:
+   --enable-video-dummy    use dummy video driver [default=yes]
+   --enable-video-offscreen
+                           use offscreen video driver [default=yes]
++  --enable-bareapp        use the video and joystick drivers of bare_app's
++                          games [default=no]
+   --enable-video-opengl   include OpenGL support [default=yes]
+   --enable-video-opengles include OpenGL ES support [default=yes]
+   --enable-video-opengles1
+@@ -25958,6 +25961,32 @@ printf "%s\n" "#define SDL_VIDEO_DRIVER_OFFSCREEN 1" >>confdefs.h
+     fi
+ }
+ 
++CheckBareApp()
++{
++    # Check whether --enable-bareapp was given.
++if test ${enable_bareapp+y}
++then :
++  enableval=$enable_bareapp;
++else $as_nop
++  enable_bareapp=no
++fi
++
++    if test x$enable_bareapp = xyes; then
++
++printf "%s\n" "#define SDL_VIDEO_DRIVER_BAREAPP 1" >>confdefs.h
++
++        SOURCES="$SOURCES $srcdir/src/video/bareapp/*.c"
++        have_video=yes
++        SUMMARY_video="${SUMMARY_video} bareapp"
++        if test x$enable_joystick = xyes; then
++
++printf "%s\n" "#define SDL_JOYSTICK_BAREAPP 1" >>confdefs.h
++
++            SOURCES="$SOURCES $srcdir/src/joystick/bareapp/*.c"
++        fi
++    fi
++}
++
+ CheckQNXVideo()
+ {
+     if test x$enable_video = xyes; then
+@@ -28678,6 +28707,7 @@ printf "%s\n" "#define SDL_VIDEO_DRIVER_ANDROID 1" >>confdefs.h
+         CheckDeclarationAfterStatement
+         CheckDummyVideo
+         CheckOffscreenVideo
++        CheckBareApp
+         CheckDiskAudio
+         CheckDummyAudio
+         CheckDLOPEN
+diff --git a/configure.ac b/configure.ac
+index ba2f8ac..46def57 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2484,6 +2484,25 @@ CheckOffscreenVideo()
+     fi
+ }
+ 
++dnl The OdroidLinux SDK's bare_app: its games draw into its video layer and
++dnl get its gamepad (src/video/bareapp, src/joystick/bareapp)
++CheckBareApp()
++{
++    AC_ARG_ENABLE(bareapp,
++[AS_HELP_STRING([--enable-bareapp], [use the video and joystick drivers of bare_app's games [default=no]])],
++                  , enable_bareapp=no)
++    if test x$enable_bareapp = xyes; then
++        AC_DEFINE(SDL_VIDEO_DRIVER_BAREAPP, 1, [ ])
++        SOURCES="$SOURCES $srcdir/src/video/bareapp/*.c"
++        have_video=yes
++        SUMMARY_video="${SUMMARY_video} bareapp"
++        if test x$enable_joystick = xyes; then
++            AC_DEFINE(SDL_JOYSTICK_BAREAPP, 1, [ ])
++            SOURCES="$SOURCES $srcdir/src/joystick/bareapp/*.c"
++        fi
++    fi
++}
++
+ dnl Set up the QNX video driver if enabled
+ CheckQNXVideo()
+ {
+@@ -3799,6 +3818,7 @@ case "$host" in
+         CheckDeclarationAfterStatement
+         CheckDummyVideo
+         CheckOffscreenVideo
++        CheckBareApp
+         CheckDiskAudio
+         CheckDummyAudio
+         CheckDLOPEN
+diff --git a/include/SDL_config.h.in b/include/SDL_config.h.in
+index 35281d1..ebe9ee2 100644
+--- a/include/SDL_config.h.in
++++ b/include/SDL_config.h.in
+@@ -327,6 +327,7 @@
+ #undef SDL_JOYSTICK_DUMMY
+ #undef SDL_JOYSTICK_IOKIT
+ #undef SDL_JOYSTICK_MFI
++#undef SDL_JOYSTICK_BAREAPP
+ #undef SDL_JOYSTICK_LINUX
+ #undef SDL_JOYSTICK_ANDROID
+ #undef SDL_JOYSTICK_OS2
+@@ -393,6 +394,7 @@
+ #undef SDL_VIDEO_DRIVER_ANDROID
+ #undef SDL_VIDEO_DRIVER_EMSCRIPTEN
+ #undef SDL_VIDEO_DRIVER_OFFSCREEN
++#undef SDL_VIDEO_DRIVER_BAREAPP
+ #undef SDL_VIDEO_DRIVER_X11_DYNAMIC
+ #undef SDL_VIDEO_DRIVER_X11_DYNAMIC_XEXT
+ #undef SDL_VIDEO_DRIVER_X11_DYNAMIC_XCURSOR
+diff --git a/src/joystick/SDL_joystick.c b/src/joystick/SDL_joystick.c
+index e968288..1cc3564 100644
+--- a/src/joystick/SDL_joystick.c
++++ b/src/joystick/SDL_joystick.c
+@@ -52,6 +52,9 @@
+ #endif
+ 
+ static SDL_JoystickDriver *SDL_joystick_drivers[] = {
++#ifdef SDL_JOYSTICK_BAREAPP /* before LINUX_: it turns that one off */
++    &SDL_BAREAPP_JoystickDriver,
++#endif
+ #ifdef SDL_JOYSTICK_HIDAPI /* Before WINDOWS_ driver, as WINDOWS wants to check if this driver is handling things */
+     &SDL_HIDAPI_JoystickDriver,
+ #endif
+diff --git a/src/joystick/SDL_sysjoystick.h b/src/joystick/SDL_sysjoystick.h
+index cabb69a..e4ec79c 100644
+--- a/src/joystick/SDL_sysjoystick.h
++++ b/src/joystick/SDL_sysjoystick.h
+@@ -235,6 +235,7 @@ typedef struct _SDL_JoystickDriver
+ 
+ /* The available joystick drivers */
+ extern SDL_JoystickDriver SDL_ANDROID_JoystickDriver;
++extern SDL_JoystickDriver SDL_BAREAPP_JoystickDriver;
+ extern SDL_JoystickDriver SDL_BSD_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DARWIN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DUMMY_JoystickDriver;
+diff --git a/src/joystick/bareapp/SDL_bareappjoystick.c b/src/joystick/bareapp/SDL_bareappjoystick.c
+new file mode 100644
+index 0000000..c690ae8
+--- /dev/null
++++ b/src/joystick/bareapp/SDL_bareappjoystick.c
+@@ -0,0 +1,342 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#ifdef SDL_JOYSTICK_BAREAPP
++
++/*
++ * bare_app's gamepad as one game controller (video/bareapp/SDL_bareapp.h).
++ * Its buttons and axes are numbered as SDL_GameControllerButton and
++ * SDL_GameControllerAxis, and the driver gives that mapping itself. Which
++ * button of the device is which button of the controller: by their labels
++ * (A is A), Select back, Start start, F1 start, F2 back, F3 misc1, F4
++ * paddle1 (F5 and F6 are bare_app's); SDL_BAREAPP_GAMEPAD changes it
++ * ("f1=guide, f3=leftstick, l2=none"). The left stick is the
++ * left stick, the triggers L2 and R2 are fully pressed or not. While
++ * bare_app's link is there the evdev devices are not opened (the Linux
++ * driver honours SDL_JOYSTICK_LINUX=0): they are the same buttons.
++ */
++
++#include "SDL_events.h"
++#include "SDL_hints.h"
++#include "SDL_log.h"
++#include "../SDL_sysjoystick.h"
++#include "../SDL_joystick_c.h"
++#include "../../video/bareapp/SDL_bareapp.h"
++
++#define NBUTTONS SDL_CONTROLLER_BUTTON_MAX
++#define NAXES SDL_CONTROLLER_AXIS_MAX
++/* a target that is an axis: TRIGGER + SDL_GameControllerAxis */
++#define TRIGGER 0x100
++#define NONE (-1)
++
++static struct
++{
++    SDL_bool there;
++    SDL_JoystickID instance;
++    SDL_Joystick *joystick;
++    int target[GP_COUNT]; /* SDL_GameControllerButton, TRIGGER + axis or NONE */
++    Uint8 held[NBUTTONS + NAXES];
++    SDL_bool rest_sent; /* the axes' resting values, which SDL takes first */
++    Uint32 tail;
++} jd;
++
++static void DefaultMap(void)
++{
++    int i;
++
++    for (i = 0; i < GP_COUNT; i++) {
++        jd.target[i] = NONE;
++    }
++    jd.target[GP_UP] = SDL_CONTROLLER_BUTTON_DPAD_UP;
++    jd.target[GP_DOWN] = SDL_CONTROLLER_BUTTON_DPAD_DOWN;
++    jd.target[GP_LEFT] = SDL_CONTROLLER_BUTTON_DPAD_LEFT;
++    jd.target[GP_RIGHT] = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
++    jd.target[GP_A] = SDL_CONTROLLER_BUTTON_A;
++    jd.target[GP_B] = SDL_CONTROLLER_BUTTON_B;
++    jd.target[GP_X] = SDL_CONTROLLER_BUTTON_X;
++    jd.target[GP_Y] = SDL_CONTROLLER_BUTTON_Y;
++    jd.target[GP_L1] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
++    jd.target[GP_R1] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
++    jd.target[GP_L2] = TRIGGER + SDL_CONTROLLER_AXIS_TRIGGERLEFT;
++    jd.target[GP_R2] = TRIGGER + SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
++    jd.target[GP_SELECT] = SDL_CONTROLLER_BUTTON_BACK;
++    jd.target[GP_START] = SDL_CONTROLLER_BUTTON_START;
++    jd.target[GP_MENU] = SDL_CONTROLLER_BUTTON_GUIDE;
++    /* boards with a row of F keys and no Select or Start (GO Ultra) */
++    jd.target[GP_F1] = SDL_CONTROLLER_BUTTON_START;
++    jd.target[GP_F2] = SDL_CONTROLLER_BUTTON_BACK;
++    jd.target[GP_F3] = SDL_CONTROLLER_BUTTON_MISC1;
++    jd.target[GP_F4] = SDL_CONTROLLER_BUTTON_PADDLE1;
++}
++
++static void Mapped(int button, const char *value, void *ud)
++{
++    SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(value);
++    SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(value);
++
++    (void)ud;
++    if (b != SDL_CONTROLLER_BUTTON_INVALID) {
++        jd.target[button] = b;
++    } else if (a == SDL_CONTROLLER_AXIS_TRIGGERLEFT || a == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
++        jd.target[button] = TRIGGER + a;
++    } else {
++        if (SDL_strcasecmp(value, "none") != 0) {
++            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "bareapp: no controller button \"%s\"", value);
++        }
++        jd.target[button] = NONE;
++    }
++}
++
++static int BAREAPP_JoystickInit(void)
++{
++    if (!BAREAPP_Available() || BAREAPP_Open() < 0) {
++        return 0;
++    }
++    jd.there = SDL_TRUE;
++    DefaultMap();
++    BAREAPP_ParseMap(SDL_getenv("SDL_BAREAPP_GAMEPAD"), Mapped, NULL);
++    /* the same buttons are evdev devices too */
++    SDL_SetHintWithPriority("SDL_JOYSTICK_LINUX", "0", SDL_HINT_DEFAULT);
++    jd.instance = SDL_GetNextJoystickInstanceID();
++    SDL_PrivateJoystickAdded(jd.instance);
++    return 0;
++}
++
++static int BAREAPP_JoystickGetCount(void)
++{
++    return jd.there ? 1 : 0;
++}
++
++static void BAREAPP_JoystickDetect(void)
++{
++}
++
++static const char *BAREAPP_JoystickGetDeviceName(int device_index)
++{
++    return "bare_app gamepad";
++}
++
++static const char *BAREAPP_JoystickGetDevicePath(int device_index)
++{
++    return NULL;
++}
++
++static int BAREAPP_JoystickGetDeviceSteamVirtualGamepadSlot(int device_index)
++{
++    return -1;
++}
++
++static int BAREAPP_JoystickGetDevicePlayerIndex(int device_index)
++{
++    return 0;
++}
++
++static void BAREAPP_JoystickSetDevicePlayerIndex(int device_index, int player_index)
++{
++}
++
++static SDL_JoystickGUID BAREAPP_JoystickGetDeviceGUID(int device_index)
++{
++    return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_UNKNOWN, 0, 0, 0, NULL, "bare_app gamepad", 'b', 0);
++}
++
++static SDL_JoystickID BAREAPP_JoystickGetDeviceInstanceID(int device_index)
++{
++    return jd.instance;
++}
++
++static int BAREAPP_JoystickOpen(SDL_Joystick *joystick, int device_index)
++{
++    if (!jd.there) {
++        return SDL_SetError("No such device");
++    }
++    joystick->instance_id = jd.instance;
++    joystick->nbuttons = NBUTTONS;
++    joystick->naxes = NAXES;
++    joystick->nhats = 0;
++    jd.joystick = joystick;
++    SDL_zero(jd.held);
++    jd.rest_sent = SDL_FALSE;
++    return 0;
++}
++
++static int BAREAPP_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
++{
++    return SDL_Unsupported();
++}
++
++static int BAREAPP_JoystickRumbleTriggers(SDL_Joystick *joystick, Uint16 left_rumble, Uint16 right_rumble)
++{
++    return SDL_Unsupported();
++}
++
++static Uint32 BAREAPP_JoystickGetCapabilities(SDL_Joystick *joystick)
++{
++    return 0;
++}
++
++static int BAREAPP_JoystickSetLED(SDL_Joystick *joystick, Uint8 red, Uint8 green, Uint8 blue)
++{
++    return SDL_Unsupported();
++}
++
++static int BAREAPP_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
++{
++    return SDL_Unsupported();
++}
++
++static int BAREAPP_JoystickSetSensorsEnabled(SDL_Joystick *joystick, SDL_bool enabled)
++{
++    return SDL_Unsupported();
++}
++
++/* Several buttons of the device may be one of the controller's */
++static void Target(SDL_Joystick *joystick, int target, SDL_bool pressed)
++{
++    int slot = target >= TRIGGER ? NBUTTONS + (target - TRIGGER) : target;
++    SDL_bool was = jd.held[slot] != 0;
++
++    if (pressed) {
++        jd.held[slot]++;
++    } else if (jd.held[slot]) {
++        jd.held[slot]--;
++    }
++    if (was == (jd.held[slot] != 0)) {
++        return;
++    }
++    if (target >= TRIGGER) {
++        SDL_PrivateJoystickAxis(joystick, (Uint8)(target - TRIGGER), pressed ? SDL_JOYSTICK_AXIS_MAX : 0);
++    } else {
++        SDL_PrivateJoystickButton(joystick, (Uint8)target, pressed ? SDL_PRESSED : SDL_RELEASED);
++    }
++}
++
++static void BAREAPP_JoystickUpdate(SDL_Joystick *joystick)
++{
++    static const Uint8 axes[GP_AXIS_COUNT] = {
++        SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY,
++        SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY,
++    };
++    const struct game_msg *m;
++    int i;
++
++    if (!jd.rest_sent) {
++        for (i = 0; i < NAXES; i++) {
++            SDL_PrivateJoystickAxis(joystick, (Uint8)i, 0);
++        }
++        jd.rest_sent = SDL_TRUE;
++    }
++    BAREAPP_Poll();
++    while ((m = BAREAPP_Next(&jd.tail)) != NULL) {
++        if (m->type == GAME_MSG_BUTTON && m->code < GP_COUNT) {
++            /* the left stick moves the stick, not the D-pad */
++            if ((m->flags & GAME_BTN_STICK) || jd.target[m->code] == NONE) {
++                continue;
++            }
++            Target(joystick, jd.target[m->code], m->pressed ? SDL_TRUE : SDL_FALSE);
++        } else if (m->type == GAME_MSG_AXIS && m->code < GP_AXIS_COUNT) {
++            SDL_PrivateJoystickAxis(joystick, axes[m->code], m->value);
++        }
++    }
++}
++
++static void BAREAPP_JoystickClose(SDL_Joystick *joystick)
++{
++    jd.joystick = NULL;
++}
++
++static void BAREAPP_JoystickQuit(void)
++{
++    jd.there = SDL_FALSE;
++}
++
++static SDL_bool BAREAPP_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
++{
++#define BUTTON(field, b)                  \
++    out->field.kind = EMappingKind_Button; \
++    out->field.target = b
++#define AXIS(field, a)                   \
++    out->field.kind = EMappingKind_Axis; \
++    out->field.target = a
++
++    BUTTON(a, SDL_CONTROLLER_BUTTON_A);
++    BUTTON(b, SDL_CONTROLLER_BUTTON_B);
++    BUTTON(x, SDL_CONTROLLER_BUTTON_X);
++    BUTTON(y, SDL_CONTROLLER_BUTTON_Y);
++    BUTTON(back, SDL_CONTROLLER_BUTTON_BACK);
++    BUTTON(guide, SDL_CONTROLLER_BUTTON_GUIDE);
++    BUTTON(start, SDL_CONTROLLER_BUTTON_START);
++    BUTTON(leftstick, SDL_CONTROLLER_BUTTON_LEFTSTICK);
++    BUTTON(rightstick, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
++    BUTTON(leftshoulder, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
++    BUTTON(rightshoulder, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
++    BUTTON(dpup, SDL_CONTROLLER_BUTTON_DPAD_UP);
++    BUTTON(dpdown, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
++    BUTTON(dpleft, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
++    BUTTON(dpright, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
++    BUTTON(misc1, SDL_CONTROLLER_BUTTON_MISC1);
++    BUTTON(paddle1, SDL_CONTROLLER_BUTTON_PADDLE1);
++    BUTTON(paddle2, SDL_CONTROLLER_BUTTON_PADDLE2);
++    BUTTON(paddle3, SDL_CONTROLLER_BUTTON_PADDLE3);
++    BUTTON(paddle4, SDL_CONTROLLER_BUTTON_PADDLE4);
++    BUTTON(touchpad, SDL_CONTROLLER_BUTTON_TOUCHPAD);
++    AXIS(leftx, SDL_CONTROLLER_AXIS_LEFTX);
++    AXIS(lefty, SDL_CONTROLLER_AXIS_LEFTY);
++    AXIS(rightx, SDL_CONTROLLER_AXIS_RIGHTX);
++    AXIS(righty, SDL_CONTROLLER_AXIS_RIGHTY);
++    /* 0 released, SDL_JOYSTICK_AXIS_MAX pressed */
++    AXIS(lefttrigger, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
++    out->lefttrigger.half_axis_positive = SDL_TRUE;
++    AXIS(righttrigger, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
++    out->righttrigger.half_axis_positive = SDL_TRUE;
++#undef BUTTON
++#undef AXIS
++    return SDL_TRUE;
++}
++
++SDL_JoystickDriver SDL_BAREAPP_JoystickDriver = {
++    BAREAPP_JoystickInit,
++    BAREAPP_JoystickGetCount,
++    BAREAPP_JoystickDetect,
++    BAREAPP_JoystickGetDeviceName,
++    BAREAPP_JoystickGetDevicePath,
++    BAREAPP_JoystickGetDeviceSteamVirtualGamepadSlot,
++    BAREAPP_JoystickGetDevicePlayerIndex,
++    BAREAPP_JoystickSetDevicePlayerIndex,
++    BAREAPP_JoystickGetDeviceGUID,
++    BAREAPP_JoystickGetDeviceInstanceID,
++    BAREAPP_JoystickOpen,
++    BAREAPP_JoystickRumble,
++    BAREAPP_JoystickRumbleTriggers,
++    BAREAPP_JoystickGetCapabilities,
++    BAREAPP_JoystickSetLED,
++    BAREAPP_JoystickSendEffect,
++    BAREAPP_JoystickSetSensorsEnabled,
++    BAREAPP_JoystickUpdate,
++    BAREAPP_JoystickClose,
++    BAREAPP_JoystickQuit,
++    BAREAPP_JoystickGetGamepadMapping
++};
++
++#endif /* SDL_JOYSTICK_BAREAPP */
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/joystick/linux/SDL_sysjoystick.c b/src/joystick/linux/SDL_sysjoystick.c
+index 889d87c..b26d3ee 100644
+--- a/src/joystick/linux/SDL_sysjoystick.c
++++ b/src/joystick/linux/SDL_sysjoystick.c
+@@ -178,6 +178,7 @@ typedef struct SDL_sensorlist_item
+ } SDL_sensorlist_item;
+ 
+ static SDL_bool SDL_classic_joysticks = SDL_FALSE;
++static SDL_bool linux_joysticks_off = SDL_FALSE; /* SDL_JOYSTICK_LINUX=0 */
+ static SDL_joylist_item *SDL_joylist SDL_GUARDED_BY(SDL_joystick_lock) = NULL;
+ static SDL_joylist_item *SDL_joylist_tail SDL_GUARDED_BY(SDL_joystick_lock) = NULL;
+ static int numjoysticks SDL_GUARDED_BY(SDL_joystick_lock) = 0;
+@@ -1004,6 +1005,9 @@ static void LINUX_FallbackJoystickDetect(void)
+ 
+ static void LINUX_JoystickDetect(void)
+ {
++    if (linux_joysticks_off) {
++        return;
++    }
+ #ifdef SDL_USE_LIBUDEV
+     if (enumeration_method == ENUMERATION_LIBUDEV) {
+         SDL_UDEV_Poll();
+@@ -1027,7 +1031,16 @@ static int LINUX_JoystickInit(void)
+ {
+     const char *devices = SDL_GetHint(SDL_HINT_JOYSTICK_DEVICE);
+ #ifdef SDL_USE_LIBUDEV
+-    int udev_status = SDL_UDEV_Init();
++    int udev_status;
++#endif
++
++    /* off while another driver has the same buttons (bareapp) */
++    linux_joysticks_off = !SDL_GetHintBoolean("SDL_JOYSTICK_LINUX", SDL_TRUE);
++    if (linux_joysticks_off) {
++        return 0;
++    }
++#ifdef SDL_USE_LIBUDEV
++    udev_status = SDL_UDEV_Init();
+ #endif
+ 
+     SDL_classic_joysticks = SDL_GetHintBoolean(SDL_HINT_LINUX_JOYSTICK_CLASSIC, SDL_FALSE);
+@@ -2274,6 +2287,10 @@ static void LINUX_JoystickQuit(void)
+ 
+     SDL_AssertJoysticksLocked();
+ 
++    if (linux_joysticks_off) {
++        linux_joysticks_off = SDL_FALSE;
++        return;
++    }
+     if (inotify_fd >= 0) {
+         close(inotify_fd);
+         inotify_fd = -1;
+diff --git a/src/video/SDL_sysvideo.h b/src/video/SDL_sysvideo.h
+index faf598b..7f1798a 100644
+--- a/src/video/SDL_sysvideo.h
++++ b/src/video/SDL_sysvideo.h
+@@ -481,6 +481,7 @@ extern VideoBootStrap VIVANTE_bootstrap;
+ extern VideoBootStrap Emscripten_bootstrap;
+ extern VideoBootStrap QNX_bootstrap;
+ extern VideoBootStrap OFFSCREEN_bootstrap;
++extern VideoBootStrap BAREAPP_bootstrap;
+ extern VideoBootStrap NGAGE_bootstrap;
+ extern VideoBootStrap OS2DIVE_bootstrap;
+ extern VideoBootStrap OS2VMAN_bootstrap;
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index 2f6c631..a403932 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -72,6 +72,9 @@
+ 
+ /* Available video drivers */
+ static VideoBootStrap *bootstrap[] = {
++#ifdef SDL_VIDEO_DRIVER_BAREAPP /* first: only there when bare_app started us */
++    &BAREAPP_bootstrap,
++#endif
+ #ifdef SDL_VIDEO_DRIVER_COCOA
+     &COCOA_bootstrap,
+ #endif
+diff --git a/src/video/bareapp/SDL_bareapp.h b/src/video/bareapp/SDL_bareapp.h
+new file mode 100644
+index 0000000..6be1377
+--- /dev/null
++++ b/src/video/bareapp/SDL_bareapp.h
+@@ -0,0 +1,84 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * The link to bare_app, the launcher of the OdroidLinux SDK, when it
++ * started this program as one of its games: a socket and shared memory
++ * inherited as descriptors 3 and 4 (game_ipc.h, copied from bare_app's
++ * src/games/ at build time, with its gamepad names in input.h). Frames go
++ * to bare_app's video layer, its gamepad comes back as messages. Shared by
++ * the video driver (frames, keyboard) and the joystick driver.
++ */
++#ifndef SDL_bareapp_h_
++#define SDL_bareapp_h_
++
++#include "../../SDL_internal.h"
++
++#include "SDL_error.h"
++#include "SDL_rect.h"
++
++#include "game_ipc.h"
++#include "input.h"
++
++/* Whether bare_app started us and we may take its link: the descriptors are
++ * there and SDL_VIDEODRIVER does not name another driver (a game that talks
++ * to bare_app itself, like VCMI with "dummy", keeps the socket). */
++extern SDL_bool BAREAPP_Available(void);
++
++/* Maps the frames and reads the socket from now on; 0 or -1 */
++extern int BAREAPP_Open(void);
++
++/* Frame size: bare_app's video layer */
++extern int BAREAPP_FrameWidth(void);
++extern int BAREAPP_FrameHeight(void);
++
++/* Reads what bare_app sent; SDL_FALSE once bare_app is gone */
++extern SDL_bool BAREAPP_Poll(void);
++
++/* Messages received after *tail, one per call; NULL when there are no
++ * more. Each reader keeps its own tail (starting at 0). */
++extern const struct game_msg *BAREAPP_Next(Uint32 *tail);
++
++/* Source pixel layouts for BAREAPP_Present */
++typedef enum
++{
++    BAREAPP_XRGB,   /* 32-bit 0x00RRGGBB, as bare_app's frames */
++    BAREAPP_RGBA    /* bytes R, G, B, A (glReadPixels) */
++} BAREAPP_Format;
++
++/*
++ * Puts a picture into the next frame, fitted to the frame as
++ * SDL_BAREAPP_SCALE says (fit: whole, aspect kept, black borders; stretch:
++ * whole frame; integer: whole multiples), filtered as SDL_BAREAPP_FILTER
++ * says (linear, nearest; whole multiples always nearest), and publishes
++ * it. pitch may be negative (rows going up). Waits as needed for at most
++ * SDL_BAREAPP_FPS frames a second (default 60, 0: no limit).
++ */
++extern void BAREAPP_Present(const void *pixels, int w, int h, int pitch, BAREAPP_Format format);
++
++/* bare_app's gamepad names (up, a, l2, f1...): enum gp_button, -1 if none */
++extern int BAREAPP_ButtonFromString(const char *name);
++
++/* Calls cb(button, value) for every "button=value" of a comma separated
++ * list such as "a=space, b=escape"; warns about unknown buttons */
++extern void BAREAPP_ParseMap(const char *list, void (*cb)(int button, const char *value, void *ud), void *ud);
++
++#endif /* SDL_bareapp_h_ */
+diff --git a/src/video/bareapp/SDL_bareapplink.c b/src/video/bareapp/SDL_bareapplink.c
+new file mode 100644
+index 0000000..567aba8
+--- /dev/null
++++ b/src/video/bareapp/SDL_bareapplink.c
+@@ -0,0 +1,481 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_BAREAPP
++
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "SDL_hints.h"
++#include "SDL_log.h"
++#include "SDL_bareapp.h"
++
++/* Messages kept for the readers (video: keys, joystick): a reader that
++ * falls further behind loses the oldest */
++#define RING 256
++
++typedef enum
++{
++    SCALE_FIT,
++    SCALE_STRETCH,
++    SCALE_INTEGER
++} ScaleMode;
++
++static struct
++{
++    int checked;            /* the descriptors were looked at */
++    SDL_bool there;         /* ...and are bare_app's */
++    struct game_shm *shm;   /* mapped by BAREAPP_Open() */
++    size_t shm_size;
++    unsigned back;          /* the frame we draw into */
++    SDL_bool gone;
++    struct game_msg ring[RING];
++    Uint32 head;
++    ScaleMode scale;
++    SDL_bool nearest;
++    Uint64 period_ns, last_ns;
++    int *xmap;              /* per column of the frame: source column, weight */
++    int xmap_size;
++} ba;
++
++static const char *const button_names[GP_COUNT] = {
++    "up", "down", "left", "right",
++    "a", "b", "x", "y",
++    "l1", "r1", "l2", "r2",
++    "select", "start", "menu",
++    "f1", "f2", "f3", "f4", "f5", "f6",
++    "volup", "voldown",
++    "power",
++};
++
++static SDL_bool DescriptorsAreBareApp(void)
++{
++    struct stat st;
++    int type = 0;
++    socklen_t len = sizeof(type);
++    Uint32 magic = 0;
++
++    if (fstat(GAME_IPC_SOCK, &st) < 0 || !S_ISSOCK(st.st_mode) ||
++        getsockopt(GAME_IPC_SOCK, SOL_SOCKET, SO_TYPE, &type, &len) < 0 || type != SOCK_SEQPACKET) {
++        return SDL_FALSE;
++    }
++    if (fstat(GAME_IPC_SHM, &st) < 0 || st.st_size < GAME_SHM_HEADER ||
++        pread(GAME_IPC_SHM, &magic, sizeof(magic), 0) != sizeof(magic) || magic != GAME_SHM_MAGIC) {
++        return SDL_FALSE;
++    }
++    return SDL_TRUE;
++}
++
++SDL_bool BAREAPP_Available(void)
++{
++    const char *driver = SDL_GetHint(SDL_HINT_VIDEODRIVER);
++
++    if (driver && *driver && !SDL_strstr(driver, "bareapp")) {
++        return SDL_FALSE;
++    }
++    if (!ba.checked) {
++        ba.there = DescriptorsAreBareApp();
++        ba.checked = 1;
++    }
++    return ba.there;
++}
++
++static int EnvInt(const char *name, int def)
++{
++    const char *value = SDL_getenv(name);
++
++    return value && *value ? SDL_atoi(value) : def;
++}
++
++int BAREAPP_Open(void)
++{
++    struct stat st;
++    const char *scale = SDL_getenv("SDL_BAREAPP_SCALE");
++    const char *filter = SDL_getenv("SDL_BAREAPP_FILTER");
++    int fps;
++    void *map;
++
++    if (ba.shm) {
++        return 0;
++    }
++    if (!BAREAPP_Available()) {
++        return SDL_SetError("bareapp: not started by bare_app");
++    }
++    if (fstat(GAME_IPC_SHM, &st) < 0) {
++        return SDL_SetError("bareapp: shared memory: %s", strerror(errno));
++    }
++    map = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, GAME_IPC_SHM, 0);
++    if (map == MAP_FAILED) {
++        return SDL_SetError("bareapp: mmap: %s", strerror(errno));
++    }
++    ba.shm = map;
++    ba.shm_size = (size_t)st.st_size;
++    if (game_shm_size(ba.shm) > ba.shm_size) {
++        munmap(map, ba.shm_size);
++        ba.shm = NULL;
++        return SDL_SetError("bareapp: shared memory too small for its frames");
++    }
++    /* programs this game starts do not keep bare_app's link open */
++    fcntl(GAME_IPC_SOCK, F_SETFD, FD_CLOEXEC);
++    fcntl(GAME_IPC_SHM, F_SETFD, FD_CLOEXEC);
++    ba.back = 0; /* the producer starts with buffer 0 (game_ipc.h) */
++
++    ba.scale = SCALE_FIT;
++    if (scale && SDL_strcasecmp(scale, "stretch") == 0) {
++        ba.scale = SCALE_STRETCH;
++    } else if (scale && SDL_strcasecmp(scale, "integer") == 0) {
++        ba.scale = SCALE_INTEGER;
++    }
++    ba.nearest = filter && SDL_strcasecmp(filter, "nearest") == 0;
++    fps = EnvInt("SDL_BAREAPP_FPS", 60);
++    ba.period_ns = fps > 0 ? 1000000000ull / (Uint64)fps : 0;
++    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "bareapp: frames %ux%u, %s, %s, %d fps at most",
++                ba.shm->width, ba.shm->height,
++                ba.scale == SCALE_STRETCH ? "stretched" : ba.scale == SCALE_INTEGER ? "whole multiples" : "fitted",
++                ba.nearest ? "nearest" : "linear", fps);
++    return 0;
++}
++
++int BAREAPP_FrameWidth(void)
++{
++    return ba.shm ? (int)ba.shm->width : 0;
++}
++
++int BAREAPP_FrameHeight(void)
++{
++    return ba.shm ? (int)ba.shm->height : 0;
++}
++
++SDL_bool BAREAPP_Poll(void)
++{
++    struct game_msg msg;
++    ssize_t n;
++
++    if (!ba.shm || ba.gone) {
++        return SDL_FALSE;
++    }
++    while ((n = recv(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT)) > 0) {
++        if (n == sizeof(msg)) {
++            ba.ring[ba.head++ % RING] = msg;
++        }
++    }
++    if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
++        ba.gone = SDL_TRUE;
++        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "bareapp: bare_app is gone");
++    }
++    return !ba.gone;
++}
++
++const struct game_msg *BAREAPP_Next(Uint32 *tail)
++{
++    if (ba.head - *tail > RING) {
++        *tail = ba.head - RING;
++    }
++    if (*tail == ba.head) {
++        return NULL;
++    }
++    return &ba.ring[(*tail)++ % RING];
++}
++
++/* ---- frames ------------------------------------------------------------- */
++
++static SDL_INLINE Uint32 Pixel(const Uint32 *row, int x, BAREAPP_Format format)
++{
++    Uint32 p = row[x];
++
++    if (format == BAREAPP_RGBA) {
++#if SDL_BYTEORDER == SDL_LIL_ENDIAN
++        return ((p & 0xff) << 16) | (p & 0xff00) | ((p >> 16) & 0xff);
++#else
++        return p >> 8;
++#endif
++    }
++    return p;
++}
++
++/* a + (b - a) * f / 256 for each channel; f 0..256 */
++static SDL_INLINE Uint32 Lerp(Uint32 a, Uint32 b, Uint32 f)
++{
++    Uint32 rb = (((a & 0xff00ff) * (256 - f) + (b & 0xff00ff) * f) >> 8) & 0xff00ff;
++    Uint32 g = (((a & 0x00ff00) * (256 - f) + (b & 0x00ff00) * f) >> 8) & 0x00ff00;
++
++    return rb | g;
++}
++
++static void Fill(Uint8 *frame, int stride, int x, int y, int w, int h)
++{
++    int i;
++
++    for (i = 0; i < h; i++) {
++        SDL_memset(frame + (size_t)(y + i) * stride + (size_t)x * 4, 0, (size_t)w * 4);
++    }
++}
++
++/* Where the picture goes in the frame */
++static void Place(int w, int h, int fw, int fh, SDL_Rect *r)
++{
++    if (ba.scale == SCALE_STRETCH) {
++        r->w = fw;
++        r->h = fh;
++    } else if (ba.scale == SCALE_INTEGER && w <= fw && h <= fh) {
++        int k = SDL_min(fw / w, fh / h);
++
++        r->w = w * k;
++        r->h = h * k;
++    } else if ((Sint64)fw * h <= (Sint64)fh * w) { /* as wide as the frame */
++        r->w = fw;
++        r->h = (int)SDL_max(1, ((Sint64)fw * h + w / 2) / w);
++    } else {
++        r->h = fh;
++        r->w = (int)SDL_max(1, ((Sint64)fh * w + h / 2) / h);
++    }
++    r->x = (fw - r->w) / 2;
++    r->y = (fh - r->h) / 2;
++}
++
++static int *ColumnMap(int n)
++{
++    if (ba.xmap_size < n) {
++        int *map = SDL_realloc(ba.xmap, (size_t)n * 2 * sizeof(int));
++
++        if (!map) {
++            return NULL;
++        }
++        ba.xmap = map;
++        ba.xmap_size = n;
++    }
++    return ba.xmap;
++}
++
++static void Draw(const Uint8 *pixels, int w, int h, int pitch, BAREAPP_Format format,
++                 Uint8 *frame, int stride, const SDL_Rect *r)
++{
++    int x, y;
++    int *map;
++
++    if (r->w == w && r->h == h) { /* 1:1 */
++        for (y = 0; y < h; y++) {
++            const Uint32 *in = (const Uint32 *)(pixels + (Sint64)y * pitch);
++            Uint32 *out = (Uint32 *)(frame + (size_t)(r->y + y) * stride) + r->x;
++
++            if (format == BAREAPP_XRGB) {
++                SDL_memcpy(out, in, (size_t)w * 4);
++            } else {
++                for (x = 0; x < w; x++) {
++                    out[x] = Pixel(in, x, format);
++                }
++            }
++        }
++        return;
++    }
++
++    map = ColumnMap(r->w);
++    if (!map) {
++        return;
++    }
++    if (ba.nearest || (r->w % w == 0 && r->h % h == 0)) {
++        for (x = 0; x < r->w; x++) {
++            map[x] = (int)((Sint64)x * w / r->w);
++        }
++        for (y = 0; y < r->h; y++) {
++            const Uint32 *in = (const Uint32 *)(pixels + (Sint64)((Sint64)y * h / r->h) * pitch);
++            Uint32 *out = (Uint32 *)(frame + (size_t)(r->y + y) * stride) + r->x;
++
++            for (x = 0; x < r->w; x++) {
++                out[x] = Pixel(in, map[x], format);
++            }
++        }
++        return;
++    }
++
++    /* linear: the centre of each frame pixel in the picture, 8 bits of fraction */
++    for (x = 0; x < r->w; x++) {
++        Sint64 sx = ((2 * (Sint64)x + 1) * w * 256) / (2 * (Sint64)r->w) - 128;
++        int x0;
++
++        if (sx < 0) {
++            sx = 0;
++        }
++        x0 = (int)(sx >> 8);
++        if (x0 >= w - 1) {
++            map[2 * x] = w - 1;
++            map[2 * x + 1] = 0;
++        } else {
++            map[2 * x] = x0;
++            map[2 * x + 1] = (int)(sx & 255);
++        }
++    }
++    for (y = 0; y < r->h; y++) {
++        Sint64 sy = ((2 * (Sint64)y + 1) * h * 256) / (2 * (Sint64)r->h) - 128;
++        int y0, y1, fy;
++        const Uint32 *in0, *in1;
++        Uint32 *out = (Uint32 *)(frame + (size_t)(r->y + y) * stride) + r->x;
++
++        if (sy < 0) {
++            sy = 0;
++        }
++        y0 = (int)(sy >> 8);
++        fy = (int)(sy & 255);
++        if (y0 >= h - 1) {
++            y0 = h - 1;
++            fy = 0;
++        }
++        y1 = fy ? y0 + 1 : y0;
++        in0 = (const Uint32 *)(pixels + (Sint64)y0 * pitch);
++        in1 = (const Uint32 *)(pixels + (Sint64)y1 * pitch);
++        for (x = 0; x < r->w; x++) {
++            int sx0 = map[2 * x], fx = map[2 * x + 1], sx1 = fx ? sx0 + 1 : sx0;
++            Uint32 top = Lerp(Pixel(in0, sx0, format), Pixel(in0, sx1, format), (Uint32)fx);
++            Uint32 bottom = Lerp(Pixel(in1, sx0, format), Pixel(in1, sx1, format), (Uint32)fx);
++
++            out[x] = Lerp(top, bottom, (Uint32)fy);
++        }
++    }
++}
++
++static Uint64 NowNs(void)
++{
++    struct timespec ts;
++
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (Uint64)ts.tv_sec * 1000000000ull + (Uint64)ts.tv_nsec;
++}
++
++/* At most SDL_BAREAPP_FPS frames a second: the vsync a game may wait for */
++static void Pace(void)
++{
++    Uint64 now = NowNs(), due = ba.last_ns + ba.period_ns;
++
++    if (!ba.period_ns) {
++        return;
++    }
++    if (ba.last_ns && now < due) {
++        struct timespec ts = { (time_t)((due - now) / 1000000000ull), (long)((due - now) % 1000000000ull) };
++
++        while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {
++        }
++        ba.last_ns = due;
++    } else {
++        ba.last_ns = now;
++    }
++}
++
++void BAREAPP_Present(const void *pixels, int w, int h, int pitch, BAREAPP_Format format)
++{
++    struct game_shm *shm = ba.shm;
++    struct game_msg msg;
++    int fw, fh, stride;
++    Uint8 *frame;
++    SDL_Rect r;
++
++    if (!shm || ba.gone || w <= 0 || h <= 0) {
++        return;
++    }
++    fw = (int)shm->width;
++    fh = (int)shm->height;
++    stride = (int)shm->stride;
++    frame = game_shm_frame(shm, ba.back);
++    Place(w, h, fw, fh, &r);
++    Fill(frame, stride, 0, 0, fw, r.y);
++    Fill(frame, stride, 0, r.y + r.h, fw, fh - r.y - r.h);
++    Fill(frame, stride, 0, r.y, r.x, r.h);
++    Fill(frame, stride, r.x + r.w, r.y, fw - r.x - r.w, r.h);
++    Draw(pixels, w, h, pitch, format, frame, stride, &r);
++
++    Pace();
++    ba.back = atomic_exchange(&shm->middle, ba.back | GAME_SHM_FRESH) & ~GAME_SHM_FRESH;
++    SDL_zero(msg);
++    msg.type = GAME_MSG_FRAME;
++    if (send(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 && errno == EPIPE) {
++        ba.gone = SDL_TRUE;
++    }
++}
++
++/* ---- settings ----------------------------------------------------------- */
++
++int BAREAPP_ButtonFromString(const char *name)
++{
++    int i;
++
++    for (i = 0; i < GP_COUNT; i++) {
++        if (SDL_strcasecmp(name, button_names[i]) == 0) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++static char *Trim(char *s)
++{
++    char *end;
++
++    while (*s == ' ' || *s == '\t') {
++        s++;
++    }
++    end = s + SDL_strlen(s);
++    while (end > s && (end[-1] == ' ' || end[-1] == '\t')) {
++        *--end = '\0';
++    }
++    return s;
++}
++
++void BAREAPP_ParseMap(const char *list, void (*cb)(int button, const char *value, void *ud), void *ud)
++{
++    char *copy, *item, *next, *eq;
++    int button;
++
++    if (!list || !*list) {
++        return;
++    }
++    copy = SDL_strdup(list);
++    if (!copy) {
++        return;
++    }
++    for (item = copy; item; item = next) {
++        next = SDL_strchr(item, ',');
++        if (next) {
++            *next++ = '\0';
++        }
++        eq = SDL_strchr(item, '=');
++        if (!eq) {
++            continue;
++        }
++        *eq = '\0';
++        button = BAREAPP_ButtonFromString(Trim(item));
++        if (button < 0) {
++            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "bareapp: no button \"%s\"", Trim(item));
++            continue;
++        }
++        cb(button, Trim(eq + 1), ud);
++    }
++    SDL_free(copy);
++}
++
++#endif /* SDL_VIDEO_DRIVER_BAREAPP */
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/bareapp/SDL_bareappvideo.c b/src/video/bareapp/SDL_bareappvideo.c
+new file mode 100644
+index 0000000..622291c
+--- /dev/null
++++ b/src/video/bareapp/SDL_bareappvideo.c
+@@ -0,0 +1,439 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "../../SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_BAREAPP
++
++/*
++ * The "bareapp" video driver: a game of bare_app (the OdroidLinux SDK's
++ * launcher) shows its window in bare_app's video layer. It is picked by
++ * itself when bare_app started the program (SDL_bareapp.h). The window
++ * has the size the game asks for and is fitted to the frame when shown;
++ * the desktop mode is the frame's size. Software windows (window surfaces,
++ * the software renderer) are copied, OpenGL (ES) is drawn off screen by
++ * the GPU into a pbuffer of the window's size (EGL, Mesa's surfaceless
++ * platform) and read back at each swap. bare_app's buttons are a game
++ * controller (joystick driver "bareapp") and, as SDL_BAREAPP_KEYS says,
++ * keys: "a=space, b=escape, up=up, start=return".
++ */
++
++#include "../SDL_sysvideo.h"
++#include "../SDL_egl_c.h"
++#include "../../events/SDL_events_c.h"
++#include "../../events/SDL_keyboard_c.h"
++
++#include "SDL_bareapp.h"
++
++#define BAREAPP_SURFACE "_SDL_BareAppSurface"
++
++#ifndef EGL_PLATFORM_SURFACELESS_MESA
++#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
++#endif
++
++/* glReadPixels and what is saved around it */
++#define BA_GL_FRAMEBUFFER 0x8D40
++#define BA_GL_FRAMEBUFFER_BINDING 0x8CA6
++#define BA_GL_PACK_ALIGNMENT 0x0D05
++#define BA_GL_RGBA 0x1908
++#define BA_GL_UNSIGNED_BYTE 0x1401
++
++typedef struct
++{
++#ifdef SDL_VIDEO_OPENGL_EGL
++    EGLSurface egl_surface;
++    int egl_w, egl_h; /* its size: the window's when it was made */
++#endif
++} BAREAPP_WindowData;
++
++static struct
++{
++    SDL_Scancode keys[GP_COUNT];       /* SDL_BAREAPP_KEYS; 0: none */
++    Uint8 down[GP_COUNT];              /* bit 0: D-pad or button, bit 1: stick */
++    Uint8 key_count[SDL_NUM_SCANCODES]; /* buttons holding the key */
++    Uint32 tail;
++    SDL_bool quit_sent;
++#ifdef SDL_VIDEO_OPENGL_EGL
++    Uint8 *pixels;
++    size_t pixels_size;
++    void (*ReadPixels)(int x, int y, int w, int h, unsigned format, unsigned type, void *pixels);
++    void (*GetIntegerv)(unsigned name, int *value);
++    void (*BindFramebuffer)(unsigned target, unsigned framebuffer);
++    void (*PixelStorei)(unsigned name, int value);
++#endif
++} vd;
++
++/* ---- keys --------------------------------------------------------------- */
++
++static void KeyMapped(int button, const char *value, void *ud)
++{
++    SDL_Scancode code = SDL_GetScancodeFromName(value);
++
++    (void)ud;
++    if (code == SDL_SCANCODE_UNKNOWN && SDL_strcasecmp(value, "none") != 0) {
++        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "bareapp: no key \"%s\"", value);
++    }
++    vd.keys[button] = code;
++}
++
++static void Button(const struct game_msg *m)
++{
++    Uint8 bit = (m->flags & GAME_BTN_STICK) ? 2 : 1;
++    SDL_bool was, is;
++    SDL_Scancode key;
++
++    if (m->code >= GP_COUNT) {
++        return;
++    }
++    was = vd.down[m->code] != 0;
++    vd.down[m->code] = m->pressed ? (vd.down[m->code] | bit) : (vd.down[m->code] & ~bit);
++    is = vd.down[m->code] != 0;
++    key = vd.keys[m->code];
++    if (was == is || !key) {
++        return;
++    }
++    /* several buttons may make the same key */
++    if (is && vd.key_count[key]++ == 0) {
++        SDL_SendKeyboardKey(SDL_PRESSED, key);
++    } else if (!is && vd.key_count[key] && --vd.key_count[key] == 0) {
++        SDL_SendKeyboardKey(SDL_RELEASED, key);
++    }
++}
++
++static void BAREAPP_PumpEvents(_THIS)
++{
++    const struct game_msg *m;
++
++    if (!BAREAPP_Poll() && !vd.quit_sent) {
++        vd.quit_sent = SDL_TRUE;
++        SDL_SendQuit();
++    }
++    while ((m = BAREAPP_Next(&vd.tail)) != NULL) {
++        if (m->type == GAME_MSG_BUTTON) {
++            Button(m);
++        }
++    }
++}
++
++/* ---- displays ----------------------------------------------------------- */
++
++static int BAREAPP_VideoInit(_THIS)
++{
++    SDL_DisplayMode mode;
++
++    if (BAREAPP_Open() < 0) {
++        return -1;
++    }
++    SDL_zero(mode);
++    mode.format = SDL_PIXELFORMAT_RGB888;
++    mode.w = BAREAPP_FrameWidth();
++    mode.h = BAREAPP_FrameHeight();
++    mode.refresh_rate = 60;
++    if (SDL_AddBasicVideoDisplay(&mode) < 0) {
++        return -1;
++    }
++    SDL_zero(vd.keys);
++    BAREAPP_ParseMap(SDL_getenv("SDL_BAREAPP_KEYS"), KeyMapped, NULL);
++    return 0;
++}
++
++/* The frame's size and what old games ask for full screen: any of them is
++ * fitted to the frame */
++static void BAREAPP_GetDisplayModes(_THIS, SDL_VideoDisplay *display)
++{
++    static const int sizes[][2] = { { 320, 200 }, { 320, 240 }, { 640, 400 }, { 640, 480 }, { 800, 600 } };
++    SDL_DisplayMode mode = display->desktop_mode;
++    size_t i;
++
++    SDL_AddDisplayMode(display, &mode);
++    for (i = 0; i < SDL_arraysize(sizes); i++) {
++        mode.w = sizes[i][0];
++        mode.h = sizes[i][1];
++        mode.driverdata = NULL;
++        SDL_AddDisplayMode(display, &mode);
++    }
++}
++
++static int BAREAPP_SetDisplayMode(_THIS, SDL_VideoDisplay *display, SDL_DisplayMode *mode)
++{
++    return 0;
++}
++
++static void BAREAPP_VideoQuit(_THIS)
++{
++}
++
++/* ---- windows ------------------------------------------------------------ */
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++/* The pbuffer of the window's size; the old one goes once the new one is
++ * made current in its place */
++static int MakeSurface(_THIS, SDL_Window *window)
++{
++    BAREAPP_WindowData *data = window->driverdata;
++    EGLSurface old = data->egl_surface;
++    EGLSurface surface = SDL_EGL_CreateOffscreenSurface(_this, window->w, window->h);
++
++    if (surface == EGL_NO_SURFACE) {
++        return SDL_SetError("bareapp: no %dx%d pbuffer", window->w, window->h);
++    }
++    data->egl_surface = surface;
++    data->egl_w = window->w;
++    data->egl_h = window->h;
++    SDL_LogDebug(SDL_LOG_CATEGORY_VIDEO, "bareapp: pbuffer %dx%d", window->w, window->h);
++    if (old != EGL_NO_SURFACE) {
++        if (SDL_GL_GetCurrentWindow() == window) {
++            SDL_EGL_MakeCurrent(_this, surface, SDL_GL_GetCurrentContext());
++        }
++        SDL_EGL_DestroySurface(_this, old);
++    }
++    return 0;
++}
++#endif
++
++static int BAREAPP_CreateWindow(_THIS, SDL_Window *window)
++{
++    BAREAPP_WindowData *data = SDL_calloc(1, sizeof(*data));
++
++    if (!data) {
++        return SDL_OutOfMemory();
++    }
++    window->driverdata = data;
++    if (window->x == SDL_WINDOWPOS_UNDEFINED) {
++        window->x = 0;
++    }
++    if (window->y == SDL_WINDOWPOS_UNDEFINED) {
++        window->y = 0;
++    }
++#ifdef SDL_VIDEO_OPENGL_EGL
++    data->egl_surface = EGL_NO_SURFACE;
++    if (window->flags & SDL_WINDOW_OPENGL) {
++        if (!_this->egl_data) {
++            return SDL_SetError("bareapp: OpenGL is not loaded");
++        }
++        if (MakeSurface(_this, window) < 0) {
++            return -1;
++        }
++    }
++#endif
++    /* the only window there is: it has the gamepad's keys */
++    SDL_SetKeyboardFocus(window);
++    return 0;
++}
++
++static void BAREAPP_DestroyWindow(_THIS, SDL_Window *window)
++{
++    BAREAPP_WindowData *data = window->driverdata;
++
++    if (data) {
++#ifdef SDL_VIDEO_OPENGL_EGL
++        if (data->egl_surface != EGL_NO_SURFACE) {
++            SDL_EGL_DestroySurface(_this, data->egl_surface);
++        }
++#endif
++        SDL_free(data);
++    }
++    window->driverdata = NULL;
++}
++
++static void BAREAPP_SetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen)
++{
++}
++
++static int BAREAPP_CreateWindowFramebuffer(_THIS, SDL_Window *window, Uint32 *format, void **pixels, int *pitch)
++{
++    SDL_Surface *surface;
++    int w, h;
++
++    SDL_FreeSurface((SDL_Surface *)SDL_SetWindowData(window, BAREAPP_SURFACE, NULL));
++    SDL_GetWindowSizeInPixels(window, &w, &h);
++    surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 0, SDL_PIXELFORMAT_RGB888);
++    if (!surface) {
++        return -1;
++    }
++    SDL_SetWindowData(window, BAREAPP_SURFACE, surface);
++    *format = SDL_PIXELFORMAT_RGB888;
++    *pixels = surface->pixels;
++    *pitch = surface->pitch;
++    return 0;
++}
++
++static int BAREAPP_UpdateWindowFramebuffer(_THIS, SDL_Window *window, const SDL_Rect *rects, int numrects)
++{
++    SDL_Surface *surface = SDL_GetWindowData(window, BAREAPP_SURFACE);
++
++    if (!surface) {
++        return SDL_SetError("bareapp: the window has no surface");
++    }
++    BAREAPP_Present(surface->pixels, surface->w, surface->h, surface->pitch, BAREAPP_XRGB);
++    return 0;
++}
++
++static void BAREAPP_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
++{
++    SDL_FreeSurface((SDL_Surface *)SDL_SetWindowData(window, BAREAPP_SURFACE, NULL));
++}
++
++/* ---- OpenGL ------------------------------------------------------------- */
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++static int BAREAPP_GL_LoadLibrary(_THIS, const char *path)
++{
++    /* on the GPU's render node without a display; other drivers (a PC's)
++     * get their default display, which makes pbuffers too */
++    int ret = SDL_EGL_LoadLibrary(_this, path, (NativeDisplayType)EGL_DEFAULT_DISPLAY, EGL_PLATFORM_SURFACELESS_MESA);
++
++    if (ret != 0) {
++        return ret;
++    }
++    _this->egl_data->is_offscreen = SDL_TRUE; /* pbuffer configs */
++    return SDL_EGL_ChooseConfig(_this);
++}
++
++static SDL_GLContext BAREAPP_GL_CreateContext(_THIS, SDL_Window *window)
++{
++    BAREAPP_WindowData *data = window->driverdata;
++
++    return SDL_EGL_CreateContext(_this, data->egl_surface);
++}
++
++static int BAREAPP_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
++{
++    if (window && context) {
++        BAREAPP_WindowData *data = window->driverdata;
++
++        return SDL_EGL_MakeCurrent(_this, data->egl_surface, context);
++    }
++    return SDL_EGL_MakeCurrent(_this, NULL, NULL);
++}
++
++static int BAREAPP_GL_SwapWindow(_THIS, SDL_Window *window)
++{
++    BAREAPP_WindowData *data = window->driverdata;
++    int w = data->egl_w, h = data->egl_h, fb = 0, align = 4;
++    size_t size = (size_t)w * h * 4;
++
++    if (!vd.ReadPixels) {
++        vd.ReadPixels = SDL_EGL_GetProcAddress(_this, "glReadPixels");
++        vd.GetIntegerv = SDL_EGL_GetProcAddress(_this, "glGetIntegerv");
++        vd.BindFramebuffer = SDL_EGL_GetProcAddress(_this, "glBindFramebuffer");
++        vd.PixelStorei = SDL_EGL_GetProcAddress(_this, "glPixelStorei");
++        if (!vd.ReadPixels || !vd.GetIntegerv || !vd.BindFramebuffer || !vd.PixelStorei) {
++            vd.ReadPixels = NULL;
++            return SDL_SetError("bareapp: no glReadPixels");
++        }
++    }
++    if (vd.pixels_size < size) {
++        Uint8 *pixels = SDL_realloc(vd.pixels, size);
++
++        if (!pixels) {
++            return SDL_OutOfMemory();
++        }
++        vd.pixels = pixels;
++        vd.pixels_size = size;
++    }
++
++    /* the window's pixels whatever the game has bound */
++    vd.GetIntegerv(BA_GL_FRAMEBUFFER_BINDING, &fb);
++    vd.GetIntegerv(BA_GL_PACK_ALIGNMENT, &align);
++    if (fb) {
++        vd.BindFramebuffer(BA_GL_FRAMEBUFFER, 0);
++    }
++    if (align != 4) {
++        vd.PixelStorei(BA_GL_PACK_ALIGNMENT, 4);
++    }
++    vd.ReadPixels(0, 0, w, h, BA_GL_RGBA, BA_GL_UNSIGNED_BYTE, vd.pixels);
++    if (align != 4) {
++        vd.PixelStorei(BA_GL_PACK_ALIGNMENT, align);
++    }
++    if (fb) {
++        vd.BindFramebuffer(BA_GL_FRAMEBUFFER, (unsigned)fb);
++    }
++
++    /* GL's rows go up */
++    BAREAPP_Present(vd.pixels + (size_t)(h - 1) * w * 4, w, h, -w * 4, BAREAPP_RGBA);
++
++    /* the window got another size (full screen): a pbuffer of it */
++    if (window->w != data->egl_w || window->h != data->egl_h) {
++        MakeSurface(_this, window);
++    }
++    return 0;
++}
++
++static void BAREAPP_GL_DeleteContext(_THIS, SDL_GLContext context)
++{
++    SDL_EGL_DeleteContext(_this, context);
++}
++#endif /* SDL_VIDEO_OPENGL_EGL */
++
++/* ---- device ------------------------------------------------------------- */
++
++static void BAREAPP_DeleteDevice(SDL_VideoDevice *device)
++{
++    SDL_free(device);
++}
++
++static SDL_VideoDevice *BAREAPP_CreateDevice(void)
++{
++    SDL_VideoDevice *device;
++
++    if (!BAREAPP_Available()) {
++        return NULL;
++    }
++    device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(SDL_VideoDevice));
++    if (!device) {
++        SDL_OutOfMemory();
++        return NULL;
++    }
++    device->VideoInit = BAREAPP_VideoInit;
++    device->VideoQuit = BAREAPP_VideoQuit;
++    device->GetDisplayModes = BAREAPP_GetDisplayModes;
++    device->SetDisplayMode = BAREAPP_SetDisplayMode;
++    device->PumpEvents = BAREAPP_PumpEvents;
++    device->CreateSDLWindow = BAREAPP_CreateWindow;
++    device->DestroyWindow = BAREAPP_DestroyWindow;
++    device->SetWindowFullscreen = BAREAPP_SetWindowFullscreen;
++    device->CreateWindowFramebuffer = BAREAPP_CreateWindowFramebuffer;
++    device->UpdateWindowFramebuffer = BAREAPP_UpdateWindowFramebuffer;
++    device->DestroyWindowFramebuffer = BAREAPP_DestroyWindowFramebuffer;
++#ifdef SDL_VIDEO_OPENGL_EGL
++    device->GL_LoadLibrary = BAREAPP_GL_LoadLibrary;
++    device->GL_GetProcAddress = SDL_EGL_GetProcAddress;
++    device->GL_UnloadLibrary = SDL_EGL_UnloadLibrary;
++    device->GL_CreateContext = BAREAPP_GL_CreateContext;
++    device->GL_MakeCurrent = BAREAPP_GL_MakeCurrent;
++    device->GL_SetSwapInterval = SDL_EGL_SetSwapInterval;
++    device->GL_GetSwapInterval = SDL_EGL_GetSwapInterval;
++    device->GL_SwapWindow = BAREAPP_GL_SwapWindow;
++    device->GL_DeleteContext = BAREAPP_GL_DeleteContext;
++#endif
++    device->free = BAREAPP_DeleteDevice;
++    return device;
++}
++
++VideoBootStrap BAREAPP_bootstrap = {
++    "bareapp", "bare_app's video layer (OdroidLinux SDK)",
++    BAREAPP_CreateDevice,
++    NULL /* no ShowMessageBox implementation */
++};
++
++#endif /* SDL_VIDEO_DRIVER_BAREAPP */
++
++/* vi: set ts=4 sw=4 expandtab: */

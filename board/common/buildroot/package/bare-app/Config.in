@@ -94,4 +94,36 @@ config BR2_PACKAGE_BARE_APP_WINE
 	  bare_app needs GAME_WINE (on in ogu_defconfig). In the SDK:
 	  APPS_CONFIG += bare-app.WINE=y
 
+config BR2_PACKAGE_BARE_APP_SDL
+	bool "SDL2 games (SDL's bareapp drivers)"
+	depends on !BR2_STATIC_LIBS # sdl2
+	select BR2_PACKAGE_SDL2
+	help
+	  SDL2 with the video and joystick drivers "bareapp" (patch in
+	  sdl2/): an SDL2 game started by bare_app draws into its video
+	  layer and gets its gamepad as a game controller, unchanged.
+	  The window is fitted to the layer; OpenGL ES is drawn by the
+	  GPU (mesa-panfrost) off screen. Such a game is an entry of the
+	  main menu by a game.ini (bare_app's GAME_NATIVE,
+	  apps/bare_app/docs/game.ini): a package installs one in
+	  /usr/share/bare_app/games/. In the SDK:
+	  APPS_CONFIG += bare-app.SDL=y
+
+	  SDL2 is not rebuilt by itself when this changes: run
+	  "make rootfs-make BR=sdl2-dirclean" first.
+
+config BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM
+	bool "Chocolate Doom (an SDL2 game by its game.ini)"
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_USE_MMU # chocolate-doom
+	select BR2_PACKAGE_CHOCOLATE_DOOM
+	select BR2_PACKAGE_SDL2_MIXER # sound and OPL music
+	select BR2_PACKAGE_DOOM1_WAD
+	help
+	  Buildroot's chocolate-doom as it is, with the shareware
+	  doom1.wad: games/chocolate-doom.ini (installed in
+	  /usr/share/bare_app/games/) is all it takes to make it an
+	  entry of bare_app's menu, the example of an SDL2 game. In the
+	  SDK: APPS_CONFIG += bare-app.CHOCOLATE_DOOM=y
+
 endif
