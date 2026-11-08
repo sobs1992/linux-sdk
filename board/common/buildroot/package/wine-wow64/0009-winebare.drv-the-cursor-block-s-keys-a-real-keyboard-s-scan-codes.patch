@@ -1,0 +1,51 @@
+From 8715443acc1be3f78928aeb6184efbb11a6faf87 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 00:18:01 +0100
+Subject: [PATCH] winebare.drv: the cursor block's keys, a real keyboard's scan
+ codes
+
+Wine's keyboard layout gives the arrows (and Insert, Delete, Home, End,
+Page Up/Down) the numeric keypad's scan code without E0, which is what
+Pirates! wants. Games reading the keyboard by DirectInput tell the two
+apart (Daemonica turns its camera with DIK_LEFT/DIK_RIGHT): protocol 2
+has key flags, WB_KEY_EXTENDED sends the key as the cursor block's.
+
+WB_KEY_SCANCODE: a USB keyboard's key comes with its virtual key and PC
+scan code (bare_app_wine maps the Linux key code), used as they are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/winebare.drv/main.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+index 2b59f76..88241a6 100644
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -220,11 +220,20 @@ static void send_mouse(const struct wb_msg *msg)
+ static void send_key(const struct wb_msg *msg)
+ {
+     INPUT input = { .type = INPUT_KEYBOARD };
+-    UINT scan = NtUserMapVirtualKeyEx(msg->key.vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0));
++    UINT vk = msg->key.vk, scan;
+ 
+-    input.ki.wVk = msg->key.vk;
++    if (msg->key.flags & WB_KEY_SCANCODE)
++    {
++        /* a real keyboard's key: both given */
++        vk = msg->key.vk >> 8;
++        scan = msg->key.vk & 0xff;
++    }
++    else scan = NtUserMapVirtualKeyEx(vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0));
++
++    input.ki.wVk = vk;
+     input.ki.wScan = scan & 0xff;
+-    if (scan & 0xff00) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
++    /* the layout names the keypad's arrows first: the cursor block's when asked */
++    if ((scan & 0xff00) || (msg->key.flags & WB_KEY_EXTENDED)) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+     if (!msg->key.pressed) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+     NtUserSendHardwareInput(0, 0, &input, 0);
+ }
+-- 
+2.53.0
+

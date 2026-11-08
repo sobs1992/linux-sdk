@@ -516,6 +516,17 @@ Heroes III и Half-Life запускается сам, как на OGA. Бата
 `ssh root@192.168.7.2` по ключам из `board/common/buildroot/authorized_keys`, около
 7 МБ/с. Ключ хоста dropbear создаётся заново после каждой записи образа.
 
+Порт USB-A — хост. Клавиатуры и мыши bare_app подхватывает в любой момент (драйвер
+`input_hid`, устройства захватываются, чтобы клавиши не попадали в консоль): в меню
+и в играх без своей клавиатуры стрелки, Enter (A), Esc (B), Space (X), Tab (Y),
+Page Up/Down (L1/R1), F1…F6 работают как кнопки, а Windows-играм клавиши и мышь
+идут как есть. Своего Wi-Fi у GO Ultra нет: USB-адаптеры Realtek (rtw88, rtw89,
+rtl8xxxu), MediaTek (mt7601u, mt76x0u/x2u, mt7921u/7925u), Atheros (ath9k_htc,
+carl9170), Ralink (rt2800usb) собраны модулями, прошивки — из `linux-firmware`.
+Вставленный адаптер даёт `wlan0`, mdev (`/etc/mdev.conf`) запускает
+`/etc/init.d/S41wifi hotplug`: wpa_supplicant и DHCP; сеть выбирается в bare_app
+(«Настройки» → Wi-Fi), список сетей — `/etc/wpa_supplicant.conf`.
+
 `scripts/ogu-ctl.py` управляет bare_app по этой сети, без UART:
 
 ```sh
