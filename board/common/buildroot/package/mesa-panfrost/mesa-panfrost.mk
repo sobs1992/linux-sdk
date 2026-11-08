@@ -22,6 +22,8 @@ MESA_PANFROST_DEPENDENCIES = \
 	libdrm \
 	zlib
 
+# Desktop OpenGL besides GLES, through EGL only (no GLX, no libGL): Wine's
+# WineD3D draws Direct3D with it
 MESA_PANFROST_CONF_OPTS = \
 	-Dplatforms= \
 	-Dgallium-drivers=panfrost \
@@ -30,7 +32,7 @@ MESA_PANFROST_CONF_OPTS = \
 	-Dgbm=enabled \
 	-Dgles1=disabled \
 	-Dgles2=enabled \
-	-Dopengl=false \
+	-Dopengl=true \
 	-Dglx=disabled \
 	-Dllvm=disabled \
 	-Dshared-glapi=enabled \

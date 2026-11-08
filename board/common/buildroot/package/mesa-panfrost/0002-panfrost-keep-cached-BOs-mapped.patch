@@ -1,0 +1,46 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] panfrost: keep the CPU mapping of BOs in the BO cache
+
+A BO going back into the cache was unmapped, and mapped again when the
+cache handed it out, so every transient buffer (the staging and shadow
+buffers of glBufferSubData, the pools of each batch) cost an mmap, a
+munmap and a page fault on each page touched. A Direct3D 9 game under
+Wine spent about 15 % of its GL thread there. The mapping now stays
+with a cached BO and panfrost_bo_free() unmaps; a BO the kernel purged
+while in the cache is freed when fetched, as before.
+
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -121,6 +121,8 @@
+    return NULL;
+ }
+ 
++static void panfrost_bo_munmap(struct panfrost_bo *bo);
++
+ static void
+ panfrost_bo_free(struct panfrost_bo *bo)
+ {
+@@ -128,6 +130,9 @@
+    struct pan_kmod_vm *vm = bo->dev->kmod.vm;
+    uint64_t gpu_va = bo->ptr.gpu;
+ 
++   /* BOs keep their CPU mapping in the cache */
++   panfrost_bo_munmap(bo);
++
+    /* BO will be freed with the sparse array, but zero to indicate free */
+    memset(bo, 0, sizeof(*bo));
+ 
+@@ -458,9 +463,10 @@
+     * lock, let's make sure it's still not referenced before freeing it.
+     */
+    if (p_atomic_read(&bo->refcnt) == 0) {
+-      /* When the reference count goes to zero, we need to cleanup */
+-      panfrost_bo_munmap(bo);
+-
++      /* When the reference count goes to zero, we need to cleanup. The
++       * CPU mapping stays with a cached BO: mapping it again on the next
++       * use would cost mmap/munmap and a page fault on every page touched,
++       * for every transient buffer. panfrost_bo_free() unmaps. */
+       if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC))
+          pandecode_inject_free(dev->decode_ctx, bo->ptr.gpu,
+                                panfrost_bo_size(bo));

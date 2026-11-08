@@ -1,0 +1,20 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] [WOWBOX64] Exception address of the x86 instruction
+
+BTCpuResetToConsistentState() turns a fault in JIT code back into the x86
+state (Eip from the dynablock), but left ExceptionRecord->ExceptionAddress
+at the arm64 address in the JIT code, which wow64 then hands to the 32-bit
+guest as is: a vectored handler saw e.g. 0083D338 instead of 004014AA.
+
+---
+--- a/wine/wow64/wowbox64.c
++++ b/wine/wow64/wowbox64.c
+@@ -343,6 +343,8 @@
+         emu->eflags.x64 = (uint32_t)ctx->X[26];
+         CHECK_FLAGS(emu);
+         R_RIP = x64pc ? x64pc : (uint32_t)ctx->X[27];
++        /* The guest sees the address of the x86 instruction, not of the JIT code */
++        rec->ExceptionAddress = (void*)(uintptr_t)R_RIP;
+ 
+         wctx->Eax = R_EAX;
+         wctx->Ecx = R_ECX;

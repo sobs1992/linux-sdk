@@ -76,4 +76,22 @@ config BR2_PACKAGE_BARE_APP_HALFLIFE
 	  oga_defconfig). In the SDK:
 	  APPS_CONFIG += bare-app.HALFLIFE=y
 
+config BR2_PACKAGE_BARE_APP_WINE
+	bool "Windows games (Wine)"
+	depends on BR2_aarch64
+	depends on BR2_HOSTARCH = "x86_64" # prebuilt llvm-mingw
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	select BR2_PACKAGE_WINE_WOW64
+	# OpenGL for Direct3D (WineD3D)
+	select BR2_PACKAGE_MESA_PANFROST if BR2_TOOLCHAIN_HAS_SYNC_4
+	help
+	  Wine for 32-bit x86 Windows games (package wine-wow64, LGPL,
+	  with Box64's wowbox64.dll, MIT) and its winebare.drv driver,
+	  played by bare_app_wine. Each game is a directory of the games
+	  partition (GAMES, /games) with a wine.ini, which names the
+	  program and the controls (apps/bare_app/ports/wine/wine.ini).
+	  bare_app needs GAME_WINE (on in ogu_defconfig). In the SDK:
+	  APPS_CONFIG += bare-app.WINE=y
+
 endif

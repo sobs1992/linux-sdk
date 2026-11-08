@@ -1,0 +1,11 @@
+config BR2_PACKAGE_WOWBOX64
+	bool "wowbox64"
+	depends on BR2_aarch64
+	depends on BR2_HOSTARCH = "x86_64" # prebuilt llvm-mingw
+	help
+	  Box64's WoW64 build, wowbox64.dll: the x86 CPU that runs the
+	  32-bit Windows programs of wine-wow64 on arm64 (Wine's
+	  HKLM\Software\Microsoft\Wow64\x86 names it). Built by
+	  llvm-mingw; installed in /usr/lib/wine/aarch64-windows.
+
+	  https://github.com/ptitSeb/box64

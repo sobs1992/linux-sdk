@@ -1,0 +1,54 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] wowbox64: no x87 register conversion around unix calls
+
+Every unix call of the x86 side (__wine_unix_call: each GL call of
+WineD3D's command stream thread goes through one) saved the emulated FPU
+into the WoW64 context and loaded it back, converting the eight x87
+registers between double and 80-bit both ways. A unix call is a function
+call for the x86 code, and the i386 ABI leaves the x87 and SSE registers
+dead across it; only the control/status words and MXCSR live. Carry just
+those for unix calls (the whole state when the call resets the context).
+Syscalls are unchanged: they may get, set or raise on the context.
+
+In a sea battle of Sid Meier's Pirates! the box64 runtime share of the
+render thread went from 10% to 6%.
+
+---
+--- a/wine/wow64/wowbox64.c
++++ b/wine/wow64/wowbox64.c
+@@ -452,7 +452,19 @@
+         ctx->EFlags = emu->eflags.x64;
+         cpu->Flags = 0;
+ 
+-        box_to_fpu(ctx, emu);
++        /* A unix call is a function call for the x86 code: the x87 and SSE
++         * registers are dead across it by the i386 ABI, only the control
++         * and status words live. Converting the eight 80-bit registers both
++         * ways on every call (each GL call of WineD3D) is a few percent of
++         * a GL-heavy game's render thread. Syscalls (context get/set,
++         * exceptions) still carry the whole FPU state. */
++        if (is_unix_call) {
++            XMM_SAVE_AREA32* fpu = (XMM_SAVE_AREA32*)ctx->ExtendedRegisters;
++            fpu->MxCsr = emu->mxcsr.x32;
++            fpu->ControlWord = emu->cw.x16;
++            fpu->StatusWord = emu->sw.x16;
++        } else
++            box_to_fpu(ctx, emu);
+ 
+         if (is_unix_call) {
+             uintptr_t handle_low = Pop32(emu);
+@@ -466,7 +478,13 @@
+             R_EAX = Wow64SystemServiceEx(id, ULongToPtr(ctx->Esp + 4));
+         }
+ 
+-        fpu_to_box(ctx, emu);
++        if (is_unix_call && !(cpu->Flags & WOW64_CPURESERVED_FLAG_RESET_STATE)) {
++            XMM_SAVE_AREA32* fpu = (XMM_SAVE_AREA32*)ctx->ExtendedRegisters;
++            emu->mxcsr.x32 = fpu->MxCsr;
++            emu->cw.x16 = fpu->ControlWord;
++            emu->sw.x16 = fpu->StatusWord;
++        } else
++            fpu_to_box(ctx, emu);
+ 
+         R_EBX = ctx->Ebx;
+         R_ESI = ctx->Esi;

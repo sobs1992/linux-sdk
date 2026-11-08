@@ -1,0 +1,22 @@
+config BR2_PACKAGE_WINE_WOW64
+	bool "wine-wow64"
+	depends on BR2_aarch64
+	depends on BR2_HOSTARCH = "x86_64" # prebuilt llvm-mingw
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	select BR2_PACKAGE_ALSA_LIB
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_WOWBOX64 # the x86 CPU named by wine.inf (0001)
+	help
+	  Wine 11 for arm64 in the WoW64 mode, for 32-bit x86 Windows
+	  programs: the Unix side and the 64-bit Windows dlls native,
+	  the 32-bit dlls i386, their x86 code run by Box64's
+	  wowbox64.dll. PE dlls built by llvm-mingw, aarch64 ones
+	  aligned to 4 KiB in the file (0002). No X11 or Wayland;
+	  sound by ALSA, OpenGL through EGL with mesa-panfrost.
+
+	  https://www.winehq.org
+
+comment "wine-wow64 needs a toolchain w/ dynamic library, NPTL"
+	depends on BR2_aarch64
+	depends on BR2_STATIC_LIBS || !BR2_TOOLCHAIN_HAS_THREADS_NPTL

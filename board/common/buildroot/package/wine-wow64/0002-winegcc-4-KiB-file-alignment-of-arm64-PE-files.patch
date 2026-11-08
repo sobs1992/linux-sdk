@@ -1,0 +1,26 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] winegcc: 4 KiB file alignment of arm64 PE files
+
+The file alignment followed the 64 KiB section alignment: every section of
+an aarch64 dll was padded to 64 KiB in the file. aarch64-windows took
+505 MB instead of 190, and wineboot copies each dll into the prefix.
+Sections still start 64 KiB apart in memory; on a kernel with 4 KiB pages
+they are mapped from the file as on x86. A kernel with 64 KiB pages would
+read them instead of mapping them.
+
+---
+--- a/tools/winegcc/winegcc.c
++++ b/tools/winegcc/winegcc.c
+@@ -2039,7 +2039,11 @@
+     if (!section_align)
+         section_align = (target.cpu == CPU_ARM64 || target.cpu == CPU_ARM64EC) ? "0x10000" : "0x1000";
+ 
+-    if (!file_align) file_align = section_align;
++    /* arm64 sections are 64 KiB apart for kernels with 64 KiB pages; with 4 KiB
++     * pages they still map from a file aligned to 4 KiB, without the padding
++     * that made the DLLs (and their copies in each prefix) 2.5 times larger */
++    if (!file_align)
++        file_align = (target.cpu == CPU_ARM64 || target.cpu == CPU_ARM64EC) ? "0x1000" : section_align;
+ 
+     if (!is_pe && target.cpu != CPU_i386 && target.cpu != CPU_x86_64)
+         error( "Non-PE builds are not supported on this platform. You need to use something like '--target=%s-windows'.\n",

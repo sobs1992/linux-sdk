@@ -1,0 +1,1514 @@
+From ba0e86edc273f7b2787cc29f5f2db6baff427e7a Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 8 Nov 2026 00:22:30 +0100
+Subject: [PATCH] winebare.drv: the screen and controls of bare_app
+
+A graphics driver for Wine run by bare_app_wine, a game of bare_app on
+handhelds without X11 or Wayland: each Wine process connects to the
+socket in WINEBARE_SOCKET and hands over the pixels of its top-level
+windows (GDI surfaces, and OpenGL drawn into EGL pbuffers on Mesa's
+surfaceless platform) in shared memory. The host composes and scales
+them to bare_app's screen and sends mouse and keyboard input made from
+the gamepad. One monitor whose size is the display mode; any listed mode
+is set at once. explorer tries it first.
+
+A GL swap does not wait for the GPU: the back buffer is blitted, upside
+down, into a texture and fenced, and a thread with a context of its own
+sharing the textures reads it into shared memory once the fence is
+signalled. A synchronous glReadPixels on each swap kept the CPU idle
+while the GPU drew (on panfrost glReadPixels into a pixel buffer object
+is synchronous too: it has no blit-based transfers). WINEBARE_SYNC_READ=1
+goes back to the synchronous read back, WINEBARE_FPS=1 prints frames a
+second and the frame gaps over a quarter of a second on stderr.
+---
+ configure                     |   1 +
+ configure.ac                  |   1 +
+ dlls/winebare.drv/Makefile.in |  12 +
+ dlls/winebare.drv/dllmain.c   |  51 ++++
+ dlls/winebare.drv/main.c      | 324 +++++++++++++++++++++
+ dlls/winebare.drv/opengl.c    | 657 ++++++++++++++++++++++++++++++++++++++++++
+ dlls/winebare.drv/unixlib.h   |  38 +++
+ dlls/winebare.drv/version.rc  |   4 +
+ dlls/winebare.drv/window.c    | 244 ++++++++++++++++
+ dlls/winebare.drv/winebare.h  |  60 ++++
+ programs/explorer/desktop.c   |   2 +-
+ 11 files changed, 1393 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index df4c4a9..63d045c 100755
+--- a/configure
++++ b/configure
+@@ -23213,6 +23213,7 @@ wine_fn_config_makefile dlls/windowscodecsext enable_windowscodecsext
+ wine_fn_config_makefile dlls/windowscodecsext/tests enable_tests
+ wine_fn_config_makefile dlls/winealsa.drv enable_winealsa_drv
+ wine_fn_config_makefile dlls/wineandroid.drv enable_wineandroid_drv
++wine_fn_config_makefile dlls/winebare.drv enable_winebare_drv
+ wine_fn_config_makefile dlls/winebth.sys enable_winebth_sys
+ wine_fn_config_makefile dlls/winebus.sys enable_winebus_sys
+ wine_fn_config_makefile dlls/winecoreaudio.drv enable_winecoreaudio_drv
+diff --git a/configure.ac b/configure.ac
+index b8ae3db..937d04b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3355,6 +3355,7 @@ WINE_CONFIG_MAKEFILE(dlls/windowscodecsext)
+ WINE_CONFIG_MAKEFILE(dlls/windowscodecsext/tests)
+ WINE_CONFIG_MAKEFILE(dlls/winealsa.drv)
+ WINE_CONFIG_MAKEFILE(dlls/wineandroid.drv)
++WINE_CONFIG_MAKEFILE(dlls/winebare.drv)
+ WINE_CONFIG_MAKEFILE(dlls/winebth.sys)
+ WINE_CONFIG_MAKEFILE(dlls/winebus.sys)
+ WINE_CONFIG_MAKEFILE(dlls/winecoreaudio.drv)
+diff --git a/dlls/winebare.drv/Makefile.in b/dlls/winebare.drv/Makefile.in
+new file mode 100644
+index 0000000..2451f91
+--- /dev/null
++++ b/dlls/winebare.drv/Makefile.in
+@@ -0,0 +1,12 @@
++MODULE    = winebare.drv
++UNIXLIB   = winebare.so
++UNIX_CFLAGS = $(EGL_CFLAGS)
++UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
++IMPORTS   = user32 win32u
++
++SOURCES = \
++	dllmain.c \
++	main.c \
++	opengl.c \
++	version.rc \
++	window.c
+diff --git a/dlls/winebare.drv/dllmain.c b/dlls/winebare.drv/dllmain.c
+new file mode 100644
+index 0000000..d3da875
+--- /dev/null
++++ b/dlls/winebare.drv/dllmain.c
+@@ -0,0 +1,51 @@
++/*
++ * winebare.drv: the screen and controls of bare_app (bare_app_wine)
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++
++#include "windef.h"
++#include "winbase.h"
++#include "unixlib.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(winebare);
++
++/* Reads what bare_app_wine sends (input, display mode) until it is gone */
++static DWORD WINAPI read_events_thread(void *arg)
++{
++    WINEBARE_UNIX_CALL(read_events, NULL);
++    /* bare_app_wine has ended: the game goes with it */
++    TerminateProcess(GetCurrentProcess(), 1);
++    return 0;
++}
++
++BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
++{
++    if (reason != DLL_PROCESS_ATTACH) return TRUE;
++
++    DisableThreadLibraryCalls(instance);
++    if (__wine_init_unix_call()) return FALSE;
++    /* fails without WINEBARE_SOCKET: the next driver of the list is tried */
++    if (WINEBARE_UNIX_CALL(init, NULL)) return FALSE;
++
++    CloseHandle(CreateThread(NULL, 0, read_events_thread, NULL, 0, NULL));
++    return TRUE;
++}
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+new file mode 100644
+index 0000000..2b59f76
+--- /dev/null
++++ b/dlls/winebare.drv/main.c
+@@ -0,0 +1,324 @@
++/*
++ * winebare.drv: the connection to bare_app_wine, display modes, input
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "winebare.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(winebare);
++
++#define NEXT_DEVMODEW(mode) ((DEVMODEW *)((char *)((mode) + 1) + (mode)->dmDriverExtra))
++
++static int host_sock = -1;
++static LONG next_id;
++
++static pthread_mutex_t mode_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct wb_mode modes[WB_MAX_MODES];
++static UINT mode_count;
++static struct wb_mode current_mode = { 800, 600 };
++
++void bare_send(const struct wb_msg *msg, int fd)
++{
++    char control[CMSG_SPACE(sizeof(int))];
++    struct iovec iov = { (void *)msg, sizeof(*msg) };
++    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
++
++    if (fd >= 0)
++    {
++        struct cmsghdr *cm;
++
++        memset(control, 0, sizeof(control));
++        mh.msg_control = control;
++        mh.msg_controllen = sizeof(control);
++        cm = CMSG_FIRSTHDR(&mh);
++        cm->cmsg_level = SOL_SOCKET;
++        cm->cmsg_type = SCM_RIGHTS;
++        cm->cmsg_len = CMSG_LEN(sizeof(int));
++        memcpy(CMSG_DATA(cm), &fd, sizeof(int));
++    }
++    while (sendmsg(host_sock, &mh, MSG_NOSIGNAL) < 0)
++    {
++        if (errno == EINTR) continue;
++        WARN("message %u lost: %s\n", msg->type, strerror(errno));
++        break;
++    }
++}
++
++uint32_t bare_new_id(void)
++{
++    return InterlockedIncrement(&next_id);
++}
++
++int bare_shm_create(size_t size, void **map)
++{
++    int fd = memfd_create("winebare", MFD_CLOEXEC);
++
++    if (fd < 0) return -1;
++    if (ftruncate(fd, size) < 0 ||
++        (*map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)
++    {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++void bare_current_mode(UINT *width, UINT *height)
++{
++    pthread_mutex_lock(&mode_mutex);
++    *width = current_mode.width;
++    *height = current_mode.height;
++    pthread_mutex_unlock(&mode_mutex);
++}
++
++static void set_config(const struct wb_msg *msg)
++{
++    pthread_mutex_lock(&mode_mutex);
++    mode_count = min(msg->config.mode_count, WB_MAX_MODES);
++    memcpy(modes, msg->config.modes, mode_count * sizeof(*modes));
++    current_mode = msg->config.current;
++    pthread_mutex_unlock(&mode_mutex);
++    TRACE("%u modes, current %ux%u\n", mode_count, current_mode.width, current_mode.height);
++}
++
++static void fill_devmode(DEVMODEW *mode, const struct wb_mode *m)
++{
++    memset(mode, 0, sizeof(*mode));
++    mode->dmSize = sizeof(*mode);
++    mode->dmFields = DM_DISPLAYORIENTATION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT |
++                     DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY;
++    mode->dmDisplayOrientation = DMDO_DEFAULT;
++    mode->dmBitsPerPel = 32;
++    mode->dmPelsWidth = m->width;
++    mode->dmPelsHeight = m->height;
++    mode->dmDisplayFrequency = 60;
++}
++
++/***********************************************************************
++ *           BARE_UpdateDisplayDevices
++ *
++ * One monitor whose size is the display mode; bare_app_wine scales it
++ * to bare_app's screen.
++ */
++static UINT BARE_UpdateDisplayDevices(const struct gdi_device_manager *manager, void *param)
++{
++    struct pci_id pci_id = {0};
++    struct gdi_monitor monitor = {0};
++    DEVMODEW current, list[WB_MAX_MODES];
++    UINT i, count;
++
++    pthread_mutex_lock(&mode_mutex);
++    fill_devmode(&current, &current_mode);
++    for (i = 0; i < mode_count; i++) fill_devmode(&list[i], &modes[i]);
++    count = mode_count;
++    pthread_mutex_unlock(&mode_mutex);
++
++    current.dmFields |= DM_POSITION;
++    SetRect(&monitor.rc_monitor, 0, 0, current.dmPelsWidth, current.dmPelsHeight);
++    monitor.rc_work = monitor.rc_monitor;
++
++    manager->add_gpu("bare_app", &pci_id, NULL, param);
++    manager->add_source("bare_app", DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
++                        NtUserGetSystemDpiForProcess(NULL), param);
++    manager->add_monitor(&monitor, param);
++    manager->add_modes(&current, count, list, param);
++    return STATUS_SUCCESS;
++}
++
++/***********************************************************************
++ *           BARE_ChangeDisplaySettings
++ *
++ * Any listed mode is accepted at once: the screen is only scaled.
++ */
++static LONG BARE_ChangeDisplaySettings(DEVMODEW *displays, const WCHAR *primary_name, HWND hwnd,
++                                       DWORD flags, void *lparam)
++{
++    struct wb_msg msg = { .type = WB_MODE_SET };
++    DEVMODEW *mode;
++
++    for (mode = displays; mode->dmSize; mode = NEXT_DEVMODEW(mode))
++    {
++        if (!(mode->dmFields & DM_PELSWIDTH) || !(mode->dmFields & DM_PELSHEIGHT)) continue;
++        TRACE("%ux%u\n", (UINT)mode->dmPelsWidth, (UINT)mode->dmPelsHeight);
++        if (flags & CDS_TEST) return DISP_CHANGE_SUCCESSFUL;
++        pthread_mutex_lock(&mode_mutex);
++        current_mode.width = mode->dmPelsWidth;
++        current_mode.height = mode->dmPelsHeight;
++        pthread_mutex_unlock(&mode_mutex);
++        msg.mode_set.width = mode->dmPelsWidth;
++        msg.mode_set.height = mode->dmPelsHeight;
++        bare_send(&msg, -1);
++        break;
++    }
++    return DISP_CHANGE_SUCCESSFUL;
++}
++
++static void send_mouse(const struct wb_msg *msg)
++{
++    static const struct { UINT wb, win; } buttons[] =
++    {
++        { WB_MOUSE_LEFT_DOWN, MOUSEEVENTF_LEFTDOWN },
++        { WB_MOUSE_LEFT_UP, MOUSEEVENTF_LEFTUP },
++        { WB_MOUSE_RIGHT_DOWN, MOUSEEVENTF_RIGHTDOWN },
++        { WB_MOUSE_RIGHT_UP, MOUSEEVENTF_RIGHTUP },
++        { WB_MOUSE_MIDDLE_DOWN, MOUSEEVENTF_MIDDLEDOWN },
++        { WB_MOUSE_MIDDLE_UP, MOUSEEVENTF_MIDDLEUP },
++    };
++    INPUT input = { .type = INPUT_MOUSE };
++    UINT i;
++
++    input.mi.dx = msg->mouse.x;
++    input.mi.dy = msg->mouse.y;
++    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
++    for (i = 0; i < ARRAY_SIZE(buttons); i++)
++        if (msg->mouse.flags & buttons[i].wb) input.mi.dwFlags |= buttons[i].win;
++    NtUserSendHardwareInput(0, 0, &input, 0);
++
++    if ((msg->mouse.flags & WB_MOUSE_WHEEL) && msg->mouse.wheel)
++    {
++        input.mi.dwFlags = MOUSEEVENTF_WHEEL;
++        input.mi.mouseData = msg->mouse.wheel * WHEEL_DELTA;
++        NtUserSendHardwareInput(0, 0, &input, 0);
++    }
++}
++
++static void send_key(const struct wb_msg *msg)
++{
++    INPUT input = { .type = INPUT_KEYBOARD };
++    UINT scan = NtUserMapVirtualKeyEx(msg->key.vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0));
++
++    input.ki.wVk = msg->key.vk;
++    input.ki.wScan = scan & 0xff;
++    if (scan & 0xff00) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
++    if (!msg->key.pressed) input.ki.dwFlags |= KEYEVENTF_KEYUP;
++    NtUserSendHardwareInput(0, 0, &input, 0);
++}
++
++static const struct user_driver_funcs baredrv_funcs =
++{
++    .pChangeDisplaySettings = BARE_ChangeDisplaySettings,
++    .pCreateWindowSurface = BARE_CreateWindowSurface,
++    .pDestroyWindow = BARE_DestroyWindow,
++    .pOpenGLInit = BARE_OpenGLInit,
++    .pSetCursor = BARE_SetCursor,
++    .pSetCursorPos = BARE_SetCursorPos,
++    .pUpdateDisplayDevices = BARE_UpdateDisplayDevices,
++    .pWindowPosChanged = BARE_WindowPosChanged,
++};
++
++static NTSTATUS baredrv_unix_init(void *arg)
++{
++    const char *path = getenv(WINEBARE_SOCKET_ENV);
++    struct sockaddr_un addr = { .sun_family = AF_UNIX };
++    struct wb_msg msg = { .type = WB_HELLO };
++    struct pollfd pfd;
++    ssize_t n;
++
++    if (host_sock >= 0) return STATUS_SUCCESS;
++    if (!path || !*path || strlen(path) >= sizeof(addr.sun_path)) return STATUS_UNSUCCESSFUL;
++    strcpy(addr.sun_path, path);
++    if ((host_sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0)) < 0) return STATUS_UNSUCCESSFUL;
++    if (connect(host_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
++    {
++        ERR("cannot connect to bare_app_wine at %s: %s\n", path, strerror(errno));
++        goto fail;
++    }
++
++    msg.hello.pid = getpid();
++    msg.hello.version = WB_PROTO_VERSION;
++    bare_send(&msg, -1);
++    pfd.fd = host_sock;
++    pfd.events = POLLIN;
++    if (poll(&pfd, 1, 5000) <= 0 || (n = recv(host_sock, &msg, sizeof(msg), 0)) <= 0 ||
++        msg.type != WB_CONFIG)
++    {
++        ERR("no answer from bare_app_wine\n");
++        goto fail;
++    }
++    set_config(&msg);
++
++    __wine_set_user_driver(&baredrv_funcs, WINE_GDI_DRIVER_VERSION);
++    return STATUS_SUCCESS;
++
++fail:
++    close(host_sock);
++    host_sock = -1;
++    return STATUS_UNSUCCESSFUL;
++}
++
++static NTSTATUS baredrv_unix_read_events(void *arg)
++{
++    struct wb_msg msg;
++    ssize_t n;
++
++    for (;;)
++    {
++        n = recv(host_sock, &msg, sizeof(msg), 0);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) break;
++        switch (msg.type)
++        {
++        case WB_CONFIG: set_config(&msg); break;
++        case WB_INPUT_MOUSE: send_mouse(&msg); break;
++        case WB_INPUT_KEY: send_key(&msg); break;
++        default: WARN("unknown message %u\n", msg.type); break;
++        }
++    }
++    TRACE("bare_app_wine is gone\n");
++    return STATUS_UNSUCCESSFUL;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    baredrv_unix_init,
++    baredrv_unix_read_events,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == winebare_unix_func_count);
++
++#ifdef _WIN64
++
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    baredrv_unix_init,
++    baredrv_unix_read_events,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == winebare_unix_func_count);
++
++#endif /* _WIN64 */
+diff --git a/dlls/winebare.drv/opengl.c b/dlls/winebare.drv/opengl.c
+new file mode 100644
+index 0000000..437af18
+--- /dev/null
++++ b/dlls/winebare.drv/opengl.c
+@@ -0,0 +1,657 @@
++/*
++ * winebare.drv: OpenGL, drawn off screen and read back for bare_app_wine
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "winebare.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(winebare);
++
++#include "wine/opengl_driver.h"
++#include "wine/list.h"
++
++static const struct egl_platform *egl;
++static const struct opengl_funcs *funcs;
++static const struct opengl_drawable_funcs bare_drawable_funcs;
++
++/* The GL calls of the read back, beyond what opengl32 has loaded */
++static PFN_glBindBuffer p_glBindBuffer;
++static PFN_glGenFramebuffers p_glGenFramebuffers;
++static PFN_glDeleteFramebuffers p_glDeleteFramebuffers;
++static PFN_glFramebufferTexture2D p_glFramebufferTexture2D;
++static PFN_glCheckFramebufferStatus p_glCheckFramebufferStatus;
++static PFN_glBlitFramebuffer p_glBlitFramebuffer;
++static BOOL async_read;         /* the GPU copies frames out, a thread reads them */
++static BOOL fps_trace;          /* $WINEBARE_FPS: frames a second on stderr */
++
++/* A frame on its way out. The swap has the GPU copy the back buffer into
++ * a texture, upside down, and returns: the CPU makes the next frame while
++ * the GPU draws this one. The copier thread, with a context of its own
++ * sharing the textures, waits for the fence and reads the texture into
++ * the shared memory. */
++#define READ_SLOTS 2
++struct read_slot
++{
++    GLuint texture;             /* of the program's context */
++    GLuint draw_fbo;            /* the program's context: the texture to blit to */
++    GLuint read_fbo;            /* the copier's context: the texture to read */
++    unsigned serial, read_serial; /* of the texture; what read_fbo has */
++    EGLSync sync;
++    BOOL busy;                  /* handed to the copier */
++};
++
++/* A window drawable: an EGL pbuffer of the client area size. Each swap
++ * reads it into one of two buffers shared with bare_app_wine, which shows
++ * it over the window's GDI pixels. */
++struct bare_gl_drawable
++{
++    struct opengl_drawable base;
++    struct list entry;          /* in gl_drawables */
++    HWND hwnd;
++    uint32_t id;                /* the GL layer of bare_app_wine */
++    int fd;
++    void *pixels;               /* 2 buffers */
++    void *read;                 /* glReadPixels lands here, bottom-up */
++    size_t size;
++    UINT width, height, buffer;
++    /* the asynchronous read back */
++    pthread_mutex_t mutex;
++    pthread_cond_t cond;
++    pthread_t copier;
++    BOOL copier_running, quit, copier_failed;
++    struct read_slot slots[READ_SLOTS];
++    unsigned next_slot, copy_slot, serial;
++    UINT slot_width, slot_height; /* of the textures, 0 if none */
++    EGLContext slot_context;    /* they belong to; the copier shares with it */
++    /* $WINEBARE_FPS */
++    unsigned frames;
++    struct timespec fps_start, last_frame;
++};
++
++static pthread_mutex_t gl_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct list gl_drawables = LIST_INIT(gl_drawables);
++
++static struct bare_gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
++{
++    return CONTAINING_RECORD(base, struct bare_gl_drawable, base);
++}
++
++static EGLConfig egl_config_for_format(int format)
++{
++    return egl->configs[(format - 1) % egl->config_count];
++}
++
++/* what the client surfaces do is done by WindowPosChanged */
++static void bare_client_destroy(struct client_surface *client) {}
++static void bare_client_detach(struct client_surface *client) {}
++static void bare_client_update(struct client_surface *client) {}
++static void bare_client_present(struct client_surface *client, HDC hdc) {}
++
++static const struct client_surface_funcs bare_client_funcs =
++{
++    .destroy = bare_client_destroy,
++    .detach = bare_client_detach,
++    .update = bare_client_update,
++    .present = bare_client_present,
++};
++
++static void get_client_size(HWND hwnd, UINT *width, UINT *height)
++{
++    RECT rect = {0};
++
++    NtUserGetClientRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd));
++    *width = max(rect.right - rect.left, 1);
++    *height = max(rect.bottom - rect.top, 1);
++}
++
++static void send_place(struct bare_gl_drawable *gl)
++{
++    struct wb_msg msg = { .type = WB_PLACE };
++    POINT pt = { 0, 0 };
++
++    NtUserClientToScreen(gl->hwnd, &pt);
++    msg.place.id = gl->id;
++    msg.place.hwnd = (UINT_PTR)NtUserGetAncestor(gl->hwnd, GA_ROOT);
++    msg.place.x = pt.x;
++    msg.place.y = pt.y;
++    msg.place.width = gl->width;
++    msg.place.height = gl->height;
++    msg.place.visible = NtUserIsWindowVisible(gl->hwnd);
++    msg.place.layer = WB_LAYER_GL;
++    bare_send(&msg, -1);
++}
++
++/* after a frame has gone into the shared buffer not shown */
++static void frame_done(struct bare_gl_drawable *gl)
++{
++    struct wb_msg msg = { .type = WB_FLUSH };
++
++    msg.flush.id = gl->id;
++    msg.flush.buffer = gl->buffer;
++    msg.flush.right = gl->width;
++    msg.flush.bottom = gl->height;
++    bare_send(&msg, -1);
++    gl->buffer ^= 1;
++
++    if (fps_trace)
++    {
++        struct timespec now;
++        double secs;
++
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        /* the stalls: a scene loading, a hitch */
++        secs = (now.tv_sec - gl->last_frame.tv_sec) + (now.tv_nsec - gl->last_frame.tv_nsec) / 1e9;
++        if (gl->frames && secs >= 0.25) fprintf(stderr, "winebare: no frame for %.2f s\n", secs);
++        gl->last_frame = now;
++        if (!gl->frames++) gl->fps_start = now;
++        secs = (now.tv_sec - gl->fps_start.tv_sec) + (now.tv_nsec - gl->fps_start.tv_nsec) / 1e9;
++        if (secs >= 5)
++        {
++            fprintf(stderr, "winebare: %.1f fps (%ux%u, %s read back)\n", (gl->frames - 1) / secs,
++                    gl->width, gl->height, gl->copier_running ? "asynchronous" : "synchronous");
++            gl->frames = 1;
++            gl->fps_start = now;
++        }
++    }
++}
++
++static char *shown_buffer(struct bare_gl_drawable *gl)
++{
++    return (char *)gl->pixels + gl->buffer * gl->size;
++}
++
++/* the rows, top-down as the GDI pixels */
++static void put_frame(struct bare_gl_drawable *gl, const char *bottom_up)
++{
++    UINT stride = gl->width * 4, y;
++    char *dst = shown_buffer(gl);
++
++    for (y = 0; y < gl->height; y++)
++        memcpy(dst + y * stride, bottom_up + (gl->height - 1 - y) * stride, stride);
++    frame_done(gl);
++}
++
++/* the texture of S, already top-down, into the shared memory */
++static void copy_slot(struct bare_gl_drawable *gl, struct read_slot *s)
++{
++    if (s->read_serial != s->serial)
++    {
++        if (!s->read_fbo) p_glGenFramebuffers(1, &s->read_fbo);
++        funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, s->read_fbo);
++        p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->texture, 0);
++        funcs->p_glReadBuffer(GL_COLOR_ATTACHMENT0);
++        s->read_serial = s->serial;
++    }
++    else funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, s->read_fbo);
++    funcs->p_glReadPixels(0, 0, gl->width, gl->height, GL_BGRA, GL_UNSIGNED_BYTE, shown_buffer(gl));
++    frame_done(gl);
++}
++
++/* Not a Wine thread: no Wine calls, no debug output */
++static void *copier_main(void *arg)
++{
++    struct bare_gl_drawable *gl = arg;
++    EGLContext context = NULL;
++    unsigned i;
++
++    if (funcs->p_eglBindAPI(EGL_OPENGL_API))
++        context = funcs->p_eglCreateContext(egl->display, egl_config_for_format(gl->base.format),
++                                            gl->slot_context, NULL);
++    if (!context || !funcs->p_eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, context))
++    {
++        if (context) funcs->p_eglDestroyContext(egl->display, context);
++        pthread_mutex_lock(&gl->mutex);
++        gl->copier_failed = TRUE;
++        for (i = 0; i < READ_SLOTS; i++) gl->slots[i].busy = FALSE;
++        pthread_cond_broadcast(&gl->cond);
++        pthread_mutex_unlock(&gl->mutex);
++        funcs->p_eglReleaseThread();
++        return NULL;
++    }
++    funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, 4);
++
++    pthread_mutex_lock(&gl->mutex);
++    for (;;)
++    {
++        struct read_slot *s = &gl->slots[gl->copy_slot];
++
++        while (!s->busy && !gl->quit) pthread_cond_wait(&gl->cond, &gl->mutex);
++        if (!s->busy) break;
++        pthread_mutex_unlock(&gl->mutex);
++
++        if (s->sync)
++        {
++            funcs->p_eglClientWaitSync(egl->display, s->sync, 0, EGL_FOREVER);
++            funcs->p_eglDestroySync(egl->display, s->sync);
++        }
++        copy_slot(gl, s);
++
++        pthread_mutex_lock(&gl->mutex);
++        s->sync = NULL;
++        s->busy = FALSE;
++        gl->copy_slot = (gl->copy_slot + 1) % READ_SLOTS;
++        pthread_cond_broadcast(&gl->cond);
++    }
++    pthread_mutex_unlock(&gl->mutex);
++
++    /* its framebuffer objects go with the context */
++    for (i = 0; i < READ_SLOTS; i++) gl->slots[i].read_fbo = gl->slots[i].read_serial = 0;
++    funcs->p_eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    funcs->p_eglDestroyContext(egl->display, context);
++    funcs->p_eglReleaseThread();
++    return NULL;
++}
++
++/* until the copier has put out every frame handed to it */
++static void drain_copier(struct bare_gl_drawable *gl)
++{
++    unsigned i;
++
++    pthread_mutex_lock(&gl->mutex);
++    for (i = 0; i < READ_SLOTS; i++)
++        while (gl->slots[i].busy) pthread_cond_wait(&gl->cond, &gl->mutex);
++    pthread_mutex_unlock(&gl->mutex);
++}
++
++static void stop_copier(struct bare_gl_drawable *gl)
++{
++    if (!gl->copier_running) return;
++    pthread_mutex_lock(&gl->mutex);
++    gl->quit = TRUE;
++    pthread_cond_broadcast(&gl->cond);
++    pthread_mutex_unlock(&gl->mutex);
++    pthread_join(gl->copier, NULL);
++    gl->copier_running = gl->quit = FALSE;
++}
++
++/* Textures of the current context for frames of the drawable's size, with
++ * framebuffer objects to blit into them; the copier, sharing that context,
++ * running. Called with the read and draw framebuffer bindings at 0. Those
++ * of another context are left to it. */
++static BOOL make_slots(struct bare_gl_drawable *gl, EGLContext context)
++{
++    GLint texture, unpack_buffer;
++    BOOL ok = TRUE;
++    unsigned i;
++
++    drain_copier(gl);
++    if (gl->slot_context != context || gl->copier_failed) stop_copier(gl);
++    for (i = 0; i < READ_SLOTS; i++)
++    {
++        struct read_slot *s = &gl->slots[i];
++
++        if (gl->slot_context == context)
++        {
++            if (s->draw_fbo) p_glDeleteFramebuffers(1, &s->draw_fbo);
++            if (s->texture) funcs->p_glDeleteTextures(1, &s->texture);
++        }
++        s->draw_fbo = s->texture = 0;
++    }
++    gl->slot_width = gl->slot_height = 0;
++    gl->next_slot = gl->copy_slot = 0;
++    if (gl->copier_failed)
++    {
++        ERR("the copier has no context of its own, reading back synchronously\n");
++        async_read = FALSE;
++        return FALSE;
++    }
++
++    funcs->p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
++    funcs->p_glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer);
++    if (unpack_buffer) p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++    for (i = 0; i < READ_SLOTS && ok; i++)
++    {
++        struct read_slot *s = &gl->slots[i];
++
++        funcs->p_glGenTextures(1, &s->texture);
++        funcs->p_glBindTexture(GL_TEXTURE_2D, s->texture);
++        funcs->p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        funcs->p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        funcs->p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
++        /* unsized, given as BGRA: stored as BGRA, read without conversion */
++        funcs->p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gl->width, gl->height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
++        p_glGenFramebuffers(1, &s->draw_fbo);
++        funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s->draw_fbo);
++        p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->texture, 0);
++        ok = p_glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
++        s->serial = ++gl->serial;
++    }
++    funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++    if (unpack_buffer) p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_buffer);
++    funcs->p_glBindTexture(GL_TEXTURE_2D, texture);
++    gl->slot_context = context;
++
++    if (ok && !gl->copier_running)
++    {
++        gl->copier_failed = FALSE;
++        gl->copier_running = !pthread_create(&gl->copier, NULL, copier_main, gl);
++        ok = gl->copier_running;
++    }
++    if (!ok)
++    {
++        ERR("no textures of %ux%u to read back from, reading back synchronously\n", gl->width, gl->height);
++        stop_copier(gl);
++        for (i = 0; i < READ_SLOTS; i++)
++        {
++            struct read_slot *s = &gl->slots[i];
++
++            if (s->draw_fbo) p_glDeleteFramebuffers(1, &s->draw_fbo);
++            if (s->texture) funcs->p_glDeleteTextures(1, &s->texture);
++            s->draw_fbo = s->texture = 0;
++        }
++        async_read = FALSE;
++        return FALSE;
++    }
++    gl->slot_width = gl->width;
++    gl->slot_height = gl->height;
++    return TRUE;
++}
++
++static void release_buffers(struct bare_gl_drawable *gl)
++{
++    struct wb_msg msg = { .type = WB_SURFACE_DEL };
++
++    drain_copier(gl);
++    if (gl->fd < 0) return;
++    msg.surface_del.id = gl->id;
++    bare_send(&msg, -1);
++    munmap(gl->pixels, gl->size * 2);
++    close(gl->fd);
++    free(gl->read);
++    gl->fd = -1;
++}
++
++/* the shared buffers and the pbuffer for WIDTH x HEIGHT */
++static BOOL make_buffers(struct bare_gl_drawable *gl, UINT width, UINT height)
++{
++    struct wb_msg msg = { .type = WB_SURFACE };
++    EGLint attribs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
++    EGLSurface surface;
++
++    if (!(surface = funcs->p_eglCreatePbufferSurface(egl->display, egl_config_for_format(gl->base.format), attribs)))
++    {
++        ERR("no %ux%u pbuffer\n", width, height);
++        return FALSE;
++    }
++    if (gl->base.surface)
++    {
++        /* the context drawing into the old one goes on in the new one */
++        if (funcs->p_eglGetCurrentSurface(EGL_DRAW) == gl->base.surface)
++            funcs->p_eglMakeCurrent(egl->display, surface, surface, funcs->p_eglGetCurrentContext());
++        funcs->p_eglDestroySurface(egl->display, gl->base.surface);
++    }
++    gl->base.surface = surface;
++
++    release_buffers(gl);
++    gl->width = width;
++    gl->height = height;
++    gl->size = (size_t)width * height * 4;
++    gl->buffer = 0;
++    if (!(gl->read = malloc(gl->size)) || (gl->fd = bare_shm_create(gl->size * 2, &gl->pixels)) < 0)
++    {
++        ERR("no memory for %ux%u\n", width, height);
++        free(gl->read);
++        gl->read = NULL;
++        gl->fd = -1;
++        return TRUE;
++    }
++    gl->id = bare_new_id();
++    msg.surface.id = gl->id;
++    msg.surface.width = width;
++    msg.surface.height = height;
++    msg.surface.buffers = 2;
++    bare_send(&msg, gl->fd);
++    send_place(gl);
++    return TRUE;
++}
++
++static void bare_drawable_destroy(struct opengl_drawable *base)
++{
++    struct bare_gl_drawable *gl = impl_from_opengl_drawable(base);
++
++    TRACE("%s\n", debugstr_opengl_drawable(base));
++    pthread_mutex_lock(&gl_mutex);
++    list_remove(&gl->entry);
++    pthread_mutex_unlock(&gl_mutex);
++    release_buffers(gl);
++    stop_copier(gl);
++    /* the textures go with their context */
++    pthread_cond_destroy(&gl->cond);
++    pthread_mutex_destroy(&gl->mutex);
++}
++
++static void bare_drawable_flush(struct opengl_drawable *base, UINT flags)
++{
++    struct bare_gl_drawable *gl = impl_from_opengl_drawable(base);
++    UINT width, height;
++
++    if (!(flags & GL_FLUSH_UPDATED)) return;
++    get_client_size(gl->hwnd, &width, &height);
++    if (width != gl->width || height != gl->height) make_buffers(gl, width, height);
++    else send_place(gl);
++}
++
++static void load_read_funcs(void)
++{
++    const char *env;
++
++#define LOAD(f) p_##f = (void *)funcs->p_eglGetProcAddress(#f)
++    LOAD(glBindBuffer);
++    LOAD(glGenFramebuffers);
++    LOAD(glDeleteFramebuffers);
++    LOAD(glFramebufferTexture2D);
++    LOAD(glCheckFramebufferStatus);
++    LOAD(glBlitFramebuffer);
++#undef LOAD
++    async_read = p_glGenFramebuffers && p_glDeleteFramebuffers && p_glFramebufferTexture2D &&
++                 p_glCheckFramebufferStatus && p_glBlitFramebuffer &&
++                 funcs->p_eglCreateSync && funcs->p_eglClientWaitSync && funcs->p_eglDestroySync &&
++                 funcs->p_eglBindAPI && funcs->p_eglCreateContext && funcs->p_eglReleaseThread &&
++                 !((env = getenv("WINEBARE_SYNC_READ")) && *env && *env != '0');
++    fps_trace = (env = getenv("WINEBARE_FPS")) && *env && *env != '0';
++    TRACE("%s read back\n", async_read ? "asynchronous" : "synchronous");
++}
++
++static BOOL bare_drawable_swap(struct opengl_drawable *base)
++{
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    struct bare_gl_drawable *gl = impl_from_opengl_drawable(base);
++    GLint read_fbo, draw_fbo, pack_buffer, read_buffer, alignment, row_length;
++    struct read_slot *slot = NULL;
++
++    pthread_once(&once, load_read_funcs);
++    if (gl->fd < 0 || funcs->p_eglGetCurrentSurface(EGL_READ) != gl->base.surface) return TRUE;
++
++    /* what the program has bound is put back afterwards */
++    funcs->p_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
++    funcs->p_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
++    if (read_fbo) funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++    funcs->p_glGetIntegerv(GL_READ_BUFFER, &read_buffer);
++    funcs->p_glReadBuffer(GL_BACK);
++
++    if (async_read)
++    {
++        EGLContext context = funcs->p_eglGetCurrentContext();
++
++        if (draw_fbo) funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++        if (gl->copier_failed) make_slots(gl, context);
++        else if ((gl->slot_width == gl->width && gl->slot_height == gl->height && gl->slot_context == context) ||
++                 make_slots(gl, context))
++            slot = &gl->slots[gl->next_slot];
++    }
++
++    if (slot)
++    {
++        GLboolean scissor = funcs->p_glIsEnabled(GL_SCISSOR_TEST);
++
++        /* the copier may still have the frame before last */
++        pthread_mutex_lock(&gl->mutex);
++        while (slot->busy) pthread_cond_wait(&gl->cond, &gl->mutex);
++        pthread_mutex_unlock(&gl->mutex);
++
++        if (scissor) funcs->p_glDisable(GL_SCISSOR_TEST);
++        funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, slot->draw_fbo);
++        /* rows top-down, as the GDI pixels */
++        p_glBlitFramebuffer(0, 0, gl->width, gl->height, 0, gl->height, gl->width, 0,
++                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
++        funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
++        if (scissor) funcs->p_glEnable(GL_SCISSOR_TEST);
++        if (!(slot->sync = funcs->p_eglCreateSync(egl->display, EGL_SYNC_FENCE, NULL)))
++            funcs->p_glFinish();
++        funcs->p_glFlush();
++    }
++    else
++    {
++        if (draw_fbo) funcs->p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
++        funcs->p_glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
++        funcs->p_glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
++        funcs->p_glGetIntegerv(GL_PACK_ROW_LENGTH, &row_length);
++        if (pack_buffer) p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++        funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, 4);
++        funcs->p_glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++
++        funcs->p_glReadPixels(0, 0, gl->width, gl->height, GL_BGRA, GL_UNSIGNED_BYTE, gl->read);
++
++        funcs->p_glPixelStorei(GL_PACK_ROW_LENGTH, row_length);
++        funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, alignment);
++        if (pack_buffer) p_glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
++    }
++
++    funcs->p_glReadBuffer(read_buffer);
++    if (read_fbo) funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
++
++    if (slot)
++    {
++        pthread_mutex_lock(&gl->mutex);
++        slot->busy = TRUE;
++        pthread_cond_broadcast(&gl->cond);
++        pthread_mutex_unlock(&gl->mutex);
++        gl->next_slot = (gl->next_slot + 1) % READ_SLOTS;
++    }
++    else put_frame(gl, gl->read);
++    return TRUE;
++}
++
++static const struct opengl_drawable_funcs bare_drawable_funcs =
++{
++    .destroy = bare_drawable_destroy,
++    .flush = bare_drawable_flush,
++    .swap = bare_drawable_swap,
++};
++
++static BOOL bare_surface_create(HWND hwnd, int format, struct opengl_drawable **drawable)
++{
++    struct opengl_drawable *previous;
++    struct client_surface *client;
++    struct bare_gl_drawable *gl;
++    UINT width, height;
++
++    TRACE("hwnd %p format %d\n", hwnd, format);
++
++    if ((previous = *drawable) && previous->format == format) return TRUE;
++
++    if (!(client = client_surface_create(sizeof(*client), &bare_client_funcs, hwnd))) return FALSE;
++    gl = opengl_drawable_create(sizeof(*gl), &bare_drawable_funcs, format, client);
++    client_surface_release(client);
++    if (!gl) return FALSE;
++
++    gl->hwnd = hwnd;
++    gl->fd = -1;
++    pthread_mutex_init(&gl->mutex, NULL);
++    pthread_cond_init(&gl->cond, NULL);
++    gl->base.buffer_map[0] = GL_BACK_LEFT;
++    gl->base.buffer_map[1] = GL_BACK_RIGHT;
++    gl->base.buffer_map[GL_FRONT - GL_FRONT_LEFT] = GL_BACK;
++    gl->base.buffer_map[GL_FRONT_AND_BACK - GL_FRONT_LEFT] = GL_BACK;
++    pthread_mutex_lock(&gl_mutex);
++    list_add_tail(&gl_drawables, &gl->entry);
++    pthread_mutex_unlock(&gl_mutex);
++
++    get_client_size(hwnd, &width, &height);
++    if (!make_buffers(gl, width, height))
++    {
++        opengl_drawable_release(&gl->base);
++        return FALSE;
++    }
++
++    TRACE("created %s %ux%u\n", debugstr_opengl_drawable(&gl->base), width, height);
++    if (previous) opengl_drawable_release(previous);
++    *drawable = &gl->base;
++    return TRUE;
++}
++
++/* the GL layers of HWND follow its client area */
++void bare_gl_window_moved(HWND hwnd)
++{
++    struct bare_gl_drawable *gl;
++
++    pthread_mutex_lock(&gl_mutex);
++    LIST_FOR_EACH_ENTRY(gl, &gl_drawables, struct bare_gl_drawable, entry)
++        if (gl->fd >= 0 && (gl->hwnd == hwnd || NtUserIsChild(hwnd, gl->hwnd))) send_place(gl);
++    pthread_mutex_unlock(&gl_mutex);
++}
++
++static void bare_init_egl_platform(struct egl_platform *platform)
++{
++    platform->type = EGL_PLATFORM_SURFACELESS_MESA;
++    platform->native_display = 0;
++    platform->force_pbuffer_formats = TRUE;
++    egl = platform;
++}
++
++static struct opengl_driver_funcs bare_driver_funcs;
++
++/**********************************************************************
++ *           BARE_OpenGLInit
++ */
++UINT BARE_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs,
++                     const struct opengl_driver_funcs **driver_funcs)
++{
++    if (version != WINE_OPENGL_DRIVER_VERSION)
++    {
++        ERR("version mismatch, opengl32 wants %u but driver has %u\n", version, WINE_OPENGL_DRIVER_VERSION);
++        return STATUS_INVALID_PARAMETER;
++    }
++    if (!opengl_funcs->egl_handle) return STATUS_NOT_SUPPORTED;
++    funcs = opengl_funcs;
++
++    /* win32u's EGL driver, with windows of our own */
++    bare_driver_funcs = **driver_funcs;
++    bare_driver_funcs.p_init_egl_platform = bare_init_egl_platform;
++    bare_driver_funcs.p_surface_create = bare_surface_create;
++    *driver_funcs = &bare_driver_funcs;
++    return STATUS_SUCCESS;
++}
+diff --git a/dlls/winebare.drv/unixlib.h b/dlls/winebare.drv/unixlib.h
+new file mode 100644
+index 0000000..57fcbc9
+--- /dev/null
++++ b/dlls/winebare.drv/unixlib.h
+@@ -0,0 +1,38 @@
++/*
++ * winebare.drv: the screen and controls of bare_app (bare_app_wine)
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_WINEBARE_UNIXLIB_H
++#define __WINE_WINEBARE_UNIXLIB_H
++
++#include <stdarg.h>
++#include "windef.h"
++#include "winternl.h"
++#include "wine/unixlib.h"
++
++enum winebare_unix_func
++{
++    winebare_unix_func_init,
++    winebare_unix_func_read_events,
++    winebare_unix_func_count,
++};
++
++#define WINEBARE_UNIX_CALL(func, params) WINE_UNIX_CALL(winebare_unix_func_ ## func, params)
++
++#endif /* __WINE_WINEBARE_UNIXLIB_H */
+diff --git a/dlls/winebare.drv/version.rc b/dlls/winebare.drv/version.rc
+new file mode 100644
+index 0000000..7b4cd9e
+--- /dev/null
++++ b/dlls/winebare.drv/version.rc
+@@ -0,0 +1,4 @@
++#define WINE_FILEDESCRIPTION_STR "Wine bare_app driver"
++#define WINE_FILENAME_STR "winebare.drv"
++
++#include "wine/wine_common_ver.rc"
+diff --git a/dlls/winebare.drv/window.c b/dlls/winebare.drv/window.c
+new file mode 100644
+index 0000000..761b165
+--- /dev/null
++++ b/dlls/winebare.drv/window.c
+@@ -0,0 +1,244 @@
++/*
++ * winebare.drv: window surfaces
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "winebare.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(winebare);
++
++/* The GDI pixels of a top-level window, in memory shared with
++ * bare_app_wine: what win32u draws into the surface bitmap is copied there
++ * on each flush, dirty rectangle only. */
++struct bare_surface
++{
++    struct window_surface header;
++    uint32_t id;
++    int fd;
++    void *pixels;
++    size_t size;
++    UINT width, height;
++};
++
++static const struct window_surface_funcs bare_surface_funcs;
++
++static struct bare_surface *get_bare_surface(struct window_surface *surface)
++{
++    return CONTAINING_RECORD(surface, struct bare_surface, header);
++}
++
++static void bare_surface_set_clip(struct window_surface *window_surface, const RECT *rects, UINT count)
++{
++}
++
++static BOOL bare_surface_flush(struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
++                               const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
++                               const BITMAPINFO *shape_info, const void *shape_bits)
++{
++    struct bare_surface *surface = get_bare_surface(window_surface);
++    struct wb_msg msg = { .type = WB_FLUSH };
++    UINT stride = surface->width * 4, src_stride = color_info->bmiHeader.biWidth * 4;
++    RECT r;
++    int y;
++
++    /* the dirty rectangle is relative to RECT, the surface bitmap is of RECT's size */
++    r.left = max(dirty->left, 0);
++    r.top = max(dirty->top, 0);
++    r.right = min(dirty->right, (LONG)surface->width);
++    r.bottom = min(dirty->bottom, (LONG)surface->height);
++    if (r.left >= r.right || r.top >= r.bottom) return TRUE;
++    if (color_info->bmiHeader.biBitCount != 32) return FALSE;
++
++    for (y = r.top; y < r.bottom; y++)
++        memcpy((char *)surface->pixels + y * stride + r.left * 4,
++               (const char *)color_bits + y * src_stride + r.left * 4, (r.right - r.left) * 4);
++
++    msg.flush.id = surface->id;
++    msg.flush.left = r.left;
++    msg.flush.top = r.top;
++    msg.flush.right = r.right;
++    msg.flush.bottom = r.bottom;
++    bare_send(&msg, -1);
++    return TRUE;
++}
++
++static void bare_surface_destroy(struct window_surface *window_surface)
++{
++    struct bare_surface *surface = get_bare_surface(window_surface);
++    struct wb_msg msg = { .type = WB_SURFACE_DEL };
++
++    TRACE("surface %p id %u\n", surface, surface->id);
++    msg.surface_del.id = surface->id;
++    bare_send(&msg, -1);
++    if (surface->pixels) munmap(surface->pixels, surface->size);
++    if (surface->fd >= 0) close(surface->fd);
++}
++
++static const struct window_surface_funcs bare_surface_funcs =
++{
++    bare_surface_set_clip,
++    bare_surface_flush,
++    bare_surface_destroy
++};
++
++/***********************************************************************
++ *           BARE_CreateWindowSurface
++ */
++BOOL BARE_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect,
++                              struct window_surface **window_surface)
++{
++    char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
++    BITMAPINFO *info = (BITMAPINFO *)buffer;
++    struct wb_msg msg = { .type = WB_SURFACE };
++    UINT width = surface_rect->right - surface_rect->left;
++    UINT height = surface_rect->bottom - surface_rect->top;
++    struct window_surface *previous;
++    struct bare_surface *surface;
++
++    TRACE("hwnd %p, layered %u, rect %s\n", hwnd, layered, wine_dbgstr_rect(surface_rect));
++
++    if ((previous = *window_surface) && previous->funcs == &bare_surface_funcs) return TRUE;
++
++    memset(info, 0, sizeof(*info));
++    info->bmiHeader.biSize = sizeof(info->bmiHeader);
++    info->bmiHeader.biWidth = width;
++    info->bmiHeader.biHeight = -height; /* top-down */
++    info->bmiHeader.biPlanes = 1;
++    info->bmiHeader.biBitCount = 32;
++    info->bmiHeader.biSizeImage = width * height * 4;
++    info->bmiHeader.biCompression = BI_RGB;
++
++    if (!(previous = window_surface_create(sizeof(*surface), &bare_surface_funcs, hwnd, surface_rect, info, 0)))
++        return TRUE; /* the default surface */
++    surface = get_bare_surface(previous);
++    surface->width = width;
++    surface->height = height;
++    surface->size = (size_t)width * height * 4;
++    if ((surface->fd = bare_shm_create(surface->size, &surface->pixels)) < 0)
++    {
++        ERR("no memory for a %ux%u surface\n", width, height);
++        surface->pixels = NULL;
++        window_surface_release(previous);
++        return TRUE;
++    }
++    surface->id = bare_new_id();
++    msg.surface.id = surface->id;
++    msg.surface.width = width;
++    msg.surface.height = height;
++    msg.surface.buffers = 1;
++    bare_send(&msg, surface->fd);
++
++    if (*window_surface) window_surface_release(*window_surface);
++    *window_surface = previous;
++    return TRUE;
++}
++
++/* Visible top-level windows of all processes, top first */
++void bare_send_zorder(void)
++{
++    struct wb_msg msg = { .type = WB_ZORDER };
++    HWND list[ARRAY_SIZE(msg.zorder.hwnd) + 1];
++    ULONG count = ARRAY_SIZE(list), i;
++
++    if (NtUserBuildHwndList(0, 0, 0, 0, 0, count, list, &count)) return;
++    for (i = 0; i < count && list[i] != HWND_BOTTOM && msg.zorder.count < ARRAY_SIZE(msg.zorder.hwnd); i++)
++        if (NtUserIsWindowVisible(list[i])) msg.zorder.hwnd[msg.zorder.count++] = (UINT_PTR)list[i];
++    bare_send(&msg, -1);
++}
++
++/***********************************************************************
++ *           BARE_WindowPosChanged
++ */
++void BARE_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
++                           const struct window_rects *new_rects, struct window_surface *window_surface)
++{
++    struct wb_msg msg = { .type = WB_PLACE };
++
++    TRACE("hwnd %p rects %s flags %08x surface %p\n", hwnd, debugstr_window_rects(new_rects),
++          swp_flags, window_surface);
++
++    if (window_surface && window_surface->funcs == &bare_surface_funcs)
++    {
++        struct bare_surface *surface = get_bare_surface(window_surface);
++
++        msg.place.id = surface->id;
++        msg.place.hwnd = (UINT_PTR)hwnd;
++        msg.place.x = new_rects->visible.left;
++        msg.place.y = new_rects->visible.top;
++        msg.place.width = min(surface->width, new_rects->visible.right - new_rects->visible.left);
++        msg.place.height = min(surface->height, new_rects->visible.bottom - new_rects->visible.top);
++        msg.place.visible = NtUserIsWindowVisible(hwnd);
++        msg.place.layer = WB_LAYER_GDI;
++        bare_send(&msg, -1);
++    }
++    bare_gl_window_moved(hwnd);
++    bare_send_zorder();
++}
++
++/***********************************************************************
++ *           BARE_DestroyWindow
++ */
++void BARE_DestroyWindow(HWND hwnd)
++{
++    bare_send_zorder();
++}
++
++/***********************************************************************
++ *           BARE_SetCursor
++ *
++ * bare_app_wine draws an arrow while the program shows a cursor at all.
++ */
++void BARE_SetCursor(HWND hwnd, HCURSOR cursor)
++{
++    static int shown = -1;
++    struct wb_msg msg = { .type = WB_CURSOR };
++
++    if (shown == !!cursor) return;
++    shown = !!cursor;
++    msg.cursor.visible = shown;
++    bare_send(&msg, -1);
++}
++
++/***********************************************************************
++ *           BARE_SetCursorPos
++ */
++BOOL BARE_SetCursorPos(INT x, INT y)
++{
++    struct wb_msg msg = { .type = WB_CURSOR_POS };
++
++    msg.cursor_pos.x = x;
++    msg.cursor_pos.y = y;
++    bare_send(&msg, -1);
++    return TRUE;
++}
+diff --git a/dlls/winebare.drv/winebare.h b/dlls/winebare.drv/winebare.h
+new file mode 100644
+index 0000000..030c64b
+--- /dev/null
++++ b/dlls/winebare.drv/winebare.h
+@@ -0,0 +1,60 @@
++/*
++ * winebare.drv: the screen and controls of bare_app (bare_app_wine)
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_WINEBARE_H
++#define __WINE_WINEBARE_H
++
++#include <stdarg.h>
++#include <stdint.h>
++
++#include "windef.h"
++#include "winbase.h"
++#include "ntgdi.h"
++#include "ntuser.h"
++#include "wine/gdi_driver.h"
++#include "unixlib.h"
++
++/* bare_app's ports/wine/winebare_proto.h, copied here by the SDK package */
++#include "winebare_proto.h"
++
++/* main.c: the connection to bare_app_wine */
++void bare_send(const struct wb_msg *msg, int fd);
++uint32_t bare_new_id(void);
++void bare_current_mode(UINT *width, UINT *height);
++
++/* an anonymous shared memory of SIZE bytes for pixels; -1 on failure */
++int bare_shm_create(size_t size, void **map);
++
++/* window.c */
++BOOL BARE_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect,
++                              struct window_surface **surface);
++void BARE_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
++                           const struct window_rects *new_rects, struct window_surface *surface);
++void BARE_DestroyWindow(HWND hwnd);
++void BARE_SetCursor(HWND hwnd, HCURSOR cursor);
++BOOL BARE_SetCursorPos(INT x, INT y);
++void bare_send_zorder(void);
++
++/* opengl.c */
++UINT BARE_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs,
++                     const struct opengl_driver_funcs **driver_funcs);
++void bare_gl_window_moved(HWND hwnd);
++
++#endif /* __WINE_WINEBARE_H */
+diff --git a/programs/explorer/desktop.c b/programs/explorer/desktop.c
+index ce70c5d..fccd775 100644
+--- a/programs/explorer/desktop.c
++++ b/programs/explorer/desktop.c
+@@ -40,7 +40,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
+ #define DESKTOP_CLASS_ATOM ((LPCWSTR)MAKEINTATOM(32769))
+ #define DESKTOP_ALL_ACCESS 0x01ff
+ 
+-static const WCHAR default_driver[] = L"mac,x11,wayland";
++static const WCHAR default_driver[] = L"bare,mac,x11,wayland";
+ 
+ static BOOL using_root = TRUE;
+ 
+-- 
+2.53.0
+

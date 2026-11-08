@@ -1,0 +1,33 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] loader: wowbox64 as the x86 emulator on arm64
+
+32-bit x86 programs on an arm64 Wine need a WoW64 CPU dll; the default
+name, xtajit.dll, is Windows' own and Wine has none. Box64's wowbox64.dll
+(package wowbox64) is it. The key has to exist before the 32-bit part of
+the prefix is installed (Wow64Install runs syswow64\rundll32.exe, and
+syswow64 is filled only while the prefix is bootstrapped), so it is in
+PreInstall, which wineboot runs first in the native rundll32.
+
+---
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -35,7 +35,7 @@
+ 
+ [PreInstall.ntarm64]
+ WineFakeDlls=FakeDllsPreInstall
+-AddReg=Wow64
++AddReg=Wow64,Wow64Arm64
+ 
+ [PreInstall.Services]
+ AddService=MountMgr,0x800,MountMgrService
+@@ -1131,6 +1131,10 @@
+ HKLM,%Control%\Windows,"CSDVersion",0x10003,0
+ HKLM,%Control%\Session Manager\Environment,"OS",2,"Windows_NT"
+ 
++[Wow64Arm64]
++; x86 code runs in Box64's WoW64 build (wowbox64.dll)
++HKLM,Software\Microsoft\Wow64\x86,,,"wowbox64.dll"
++
+ [Wow64]
+ ; Wow6432Node symlinks
+ HKLM,Software\Classes\Wow6432Node\AppId,"SymbolicLinkValue",0x60000,"\Registry\Machine\Software\Classes\AppId"

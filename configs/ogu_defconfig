@@ -65,9 +65,10 @@ APPS           := bare-app
 # 2 s quits it to the console, Quit in its menu turns the device off.
 APPS_AUTOSTART := bare-app
 # bare_app's own Kconfig defconfig (platform ogu), the shareware doom1.wad,
-# the Heroes III engine VCMI (game data on /games, see README)
+# the Heroes III engine VCMI (game data on /games, see README), Wine for
+# Windows games (a wine.ini per game on /games)
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
-                  bare-app.HOMM3=y bare-app.HALFLIFE=y
+                  bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y
 
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,
@@ -82,9 +83,11 @@ IMAGE_BOOT_SIZE_MB   := 128
 IMAGE_ROOTFS_FREE_MB := 256
 # Data partitions, made on the first boot as on the OGA: p3 ext4 "data" on
 # /data, p4 FAT32 "GAMES" on /games to the end of the card. The rootfs
-# must end before p3.
-IMAGE_DATA_START_MB := 4096
-IMAGE_DATA_SIZE_MB  := 1024
+# (p2 from 144 MiB) must end before p3: up to 2 GiB, room for Wine.
+# p4 stays at 5120 MiB, where it was when p3 was 1 GiB at 4096 MiB, so
+# moving p3 here kept the games and formatted a new "data".
+IMAGE_DATA_START_MB := 2192
+IMAGE_DATA_SIZE_MB  := 2928
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f475531
 

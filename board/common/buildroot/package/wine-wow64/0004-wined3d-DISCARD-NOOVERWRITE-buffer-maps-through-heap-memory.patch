@@ -1,0 +1,142 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] wined3d: DISCARD/NOOVERWRITE buffer maps through heap memory
+ ("HeapMaps")
+
+WineD3D accelerates DISCARD and NOOVERWRITE maps of dynamic buffers with
+persistently mapped buffer objects allocated from the application thread.
+Under WoW64 Wine hides GL_ARB_buffer_storage from 32-bit programs unless
+it has a Vulkan device or GL_AMD_pinned_memory, so there every such map
+went through the CS thread and waited for it to drain: in a sea battle
+of Sid Meier's Pirates! about 100 maps a frame, the game's thread
+spinning 15-17% of its time and the render thread idle in between.
+
+With the new setting HeapMaps (WINE_D3D_CONFIG=HeapMaps=1 or the
+Direct3D registry key) such maps return heap memory that the CS thread
+uploads on unmap, as UpdateSubresource() does; a DISCARD map uploads
+the whole buffer (so a busy buffer object is renamed, not waited for).
+The program has to write the whole range it maps. HeapMaps=2 also takes
+write-only maps without flags of buffers not pinned in system memory;
+Pirates! crashes with that (it keeps or reads the pointer), so it is
+only for programs known to work with it. Default 0: unchanged.
+
+Pirates! sea battle: the render thread busy 84% -> 97%, 22-28 -> 25-31
+fps.
+
+---
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -89,6 +89,21 @@
+     memset(&client->addr, 0, sizeof(client->addr));
+ }
+ 
++/* Without persistently mapped buffer objects (e.g. 32-bit programs under
++ * WoW64, where Wine hides GL_ARB_buffer_storage), DISCARD and NOOVERWRITE
++ * maps of buffers would each wait for the CS thread to drain. With the
++ * "HeapMaps" setting the program writes into heap memory instead, uploaded
++ * asynchronously by the CS thread on unmap, like UpdateSubresource(). The
++ * mapped range is uploaded as a whole, so the program has to write all of
++ * it (NOOVERWRITE; DISCARD uploads the whole buffer). HeapMaps >= 2 also
++ * takes write-only maps without flags of buffers that are not pinned in
++ * system memory (see wined3d_device_context_emit_map()). */
++static bool heap_map_buffer(const struct wined3d_resource *resource, uint32_t flags)
++{
++    return wined3d_settings.heap_maps && resource->type == WINED3D_RTYPE_BUFFER
++            && !resource->pin_sysmem && !(flags & WINED3D_MAP_READ);
++}
++
+ enum wined3d_cs_op
+ {
+     WINED3D_CS_OP_NOP,
+@@ -2503,7 +2518,8 @@
+      * increasing the map count would be visible to applications. */
+     wined3d_not_from_cs(context->device->cs);
+ 
+-    if ((flags & (WINED3D_MAP_DISCARD | WINED3D_MAP_NOOVERWRITE))
++    if (((flags & (WINED3D_MAP_DISCARD | WINED3D_MAP_NOOVERWRITE))
++            || (wined3d_settings.heap_maps >= 2 && heap_map_buffer(resource, flags)))
+             && context->ops->map_upload_bo(context, resource, sub_resource_idx, map_desc, box, flags))
+     {
+         TRACE("Returning map pointer %p, row pitch %u, slice pitch %u.\n",
+@@ -3178,7 +3194,11 @@
+         if (flags & WINED3D_MAP_DISCARD)
+         {
+             if (!device->adapter->adapter_ops->adapter_alloc_bo(device, resource, sub_resource_idx, &addr))
++            {
++                if (heap_map_buffer(resource, flags))
++                    goto heap;
+                 return false;
++            }
+ 
+             /* Limit NOOVERWRITE maps to buffers for now; there are too many
+              * ways that a texture can be invalidated to even count. */
+@@ -3203,6 +3223,8 @@
+                 /* adapter_alloc_bo() should have given us a mapped BO if we are
+                  * discarding. */
+                 assert(flags & WINED3D_MAP_NOOVERWRITE);
++                if (heap_map_buffer(resource, flags))
++                    goto heap;
+                 WARN_(d3d_perf)("Not accelerating a NOOVERWRITE map because the BO is not mapped.\n");
+                 return false;
+             }
+@@ -3212,6 +3234,8 @@
+         if (!map_ptr)
+         {
+             assert(flags & WINED3D_MAP_NOOVERWRITE);
++            if (heap_map_buffer(resource, flags))
++                goto heap;
+             WARN_(d3d_perf)("Not accelerating a NOOVERWRITE map because the sub-resource has no valid address.\n");
+             return false;
+         }
+@@ -3242,6 +3266,31 @@
+         return true;
+     }
+ 
++heap:
++    if (resource->type == WINED3D_RTYPE_BUFFER && (flags & WINED3D_MAP_DISCARD))
++    {
++        struct wined3d_box whole;
++        uint8_t *mem;
++
++        /* The whole buffer is replaced: upload all of it, which also lets
++         * the CS thread rename a busy buffer object instead of waiting. */
++        wined3d_box_set(&whole, 0, 0, resource->size, 1, 0, 1);
++        if (!(mem = malloc(resource->size)))
++        {
++            WARN_(d3d_perf)("Failed to allocate a heap memory buffer.\n");
++            return false;
++        }
++        map_desc->row_pitch = map_desc->slice_pitch = resource->size;
++        map_desc->data = mem + box->left;
++        client->mapped_upload.addr.buffer_object = 0;
++        client->mapped_upload.addr.addr = mem;
++        client->mapped_upload.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
++        client->mapped_box = whole;
++        /* Later NOOVERWRITE maps have no client address to write to. */
++        invalidate_client_address(resource);
++        return true;
++    }
++
+     get_map_pitch(format, box, map_desc, &size);
+ 
+     if (!(map_desc->data = malloc(size)))
+--- a/dlls/wined3d/wined3d_main.c
++++ b/dlls/wined3d/wined3d_main.c
+@@ -426,6 +426,8 @@
+             TRACE("Checking relative addressing indices in float constants.\n");
+             wined3d_settings.check_float_constants = TRUE;
+         }
++        if (!get_config_key_dword(hkey, appkey, env, "HeapMaps", &wined3d_settings.heap_maps))
++            ERR_(winediag)("Setting heap maps to %u.\n", wined3d_settings.heap_maps);
+         if (!get_config_key_dword(hkey, appkey, env, "strict_shader_math", &wined3d_settings.strict_shader_math))
+             ERR_(winediag)("Setting strict shader math to %#x.\n", wined3d_settings.strict_shader_math);
+         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -491,6 +491,7 @@
+     bool check_float_constants;
+     bool cb_access_map_w;
+     bool ffp_hlsl;
++    unsigned int heap_maps;
+ };
+ 
+ extern struct wined3d_settings wined3d_settings;
