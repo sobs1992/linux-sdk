@@ -23,18 +23,116 @@ Pirates! sea battle: the render thread busy 84% -> 97%, 22-28 -> 25-31
 fps.
 
 Maps return the buffer's own copy in heap memory, kept until the buffer
-is destroyed, and unmaps upload a copy of the mapped range: programs may
-go on writing through a map pointer after the unmap (into the driver's
-memory on Windows), and d3d9 programs may draw from a buffer they still
-have mapped (wined3d_device_context_flush_mapped_buffer(), which then
-also uploads a copy). Freeing the mapped memory itself made Daemonica
-crash at random in WineD3D (freed resources, the GLSL program tree, the
-GL context) on entering the load menu or loading a level.
+is destroyed, and unmaps upload a copy of the mapped range: d3d9
+programs may draw from a buffer they still have mapped
+(wined3d_device_context_flush_mapped_buffer(), which then also uploads
+a copy).
+
+d3d9 passes a Lock() of size 0, "to the end of the buffer", as an empty
+box, which wined3d lets through for buffers. Daemonica locks its ring
+of text vertices like that, one line of text at a time; uploading the
+empty box sent nothing, so text was drawn from the vertices of an
+earlier lap of the ring (missing shadows, flickering lines), and the
+first version of this, mapping memory of the box's size, let the game
+write past it (random crashes, taken then for writes after the unmap).
+Such maps now cover the rest of the buffer. As the program writes only
+a little of it, a copy of what was uploaded (the mirror, made by the
+first such map) tells what changed; large heap copies are allocated with
+write watches, so only the pages written since are compared.
+
+The uploads of NOOVERWRITE maps, which by contract overwrite nothing
+the GPU may still read, write through an unsynchronised map of just
+their range (GL_ARB_map_buffer_range) instead of glBufferSubData():
+Mesa's panfrost answers a write into a buffer object read by a pending
+batch with a flush and a copy of the whole buffer object into a new
+one. Daemonica's first location: 36 -> 47 fps, its text drawn right.
 
 ---
+--- a/dlls/wined3d/buffer.c
++++ b/dlls/wined3d/buffer.c
+@@ -787,16 +787,19 @@ void wined3d_buffer_acquire_bo_for_write(struct wined3d_buffer *buffer, struct w
+     wined3d_context_copy_bo_address(context, &dst, &src, 1, &range, WINED3D_MAP_WRITE | WINED3D_MAP_DISCARD);
+ }
+ 
++/* map_flags: WINED3D_MAP_NOOVERWRITE if the data does not overwrite
++ * anything in use (HeapMaps uploads of NOOVERWRITE maps), or 0 */
+ void wined3d_buffer_copy_bo_address(struct wined3d_buffer *dst_buffer, struct wined3d_context *context,
+-        unsigned int dst_offset, const struct wined3d_const_bo_address *src_addr, unsigned int size)
++        unsigned int dst_offset, const struct wined3d_const_bo_address *src_addr, unsigned int size,
++        uint32_t map_flags)
+ {
+-    uint32_t map_flags = WINED3D_MAP_WRITE;
+     struct wined3d_bo_address dst_addr;
+     struct wined3d_range range;
+     DWORD dst_location;
+ 
++    map_flags |= WINED3D_MAP_WRITE;
+     if (!dst_offset && size == dst_buffer->resource.size)
+-        map_flags |= WINED3D_MAP_DISCARD;
++        map_flags = (map_flags & ~WINED3D_MAP_NOOVERWRITE) | WINED3D_MAP_DISCARD;
+ 
+     if (map_flags & WINED3D_MAP_DISCARD)
+         wined3d_buffer_acquire_bo_for_write(dst_buffer, context);
+@@ -824,7 +827,7 @@ void wined3d_buffer_copy(struct wined3d_buffer *dst_buffer, unsigned int dst_off
+     wined3d_buffer_get_memory(src_buffer, context, &src);
+     src.addr += src_offset;
+ 
+-    wined3d_buffer_copy_bo_address(dst_buffer, context, dst_offset, wined3d_const_bo_address(&src), size);
++    wined3d_buffer_copy_bo_address(dst_buffer, context, dst_offset, wined3d_const_bo_address(&src), size, 0);
+ 
+     context_release(context);
+ }
+@@ -878,7 +881,8 @@ void wined3d_buffer_update_sub_resource(struct wined3d_buffer *buffer, struct wi
+     }
+     else
+     {
+-        wined3d_buffer_copy_bo_address(buffer, context, offset, &upload_bo->addr, size);
++        wined3d_buffer_copy_bo_address(buffer, context, offset, &upload_bo->addr, size,
++                (upload_bo->flags & UPLOAD_BO_NOOVERWRITE) ? WINED3D_MAP_NOOVERWRITE : 0);
+     }
+ }
+ 
+--- a/dlls/wined3d/context_gl.c
++++ b/dlls/wined3d/context_gl.c
+@@ -3034,6 +3034,35 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
+             memcpy(dst_ptr, src->addr, dst_bo->size);
+             wined3d_context_gl_unmap_bo_address(context_gl, dst, range_count, ranges);
+         }
++        else if ((map_flags & WINED3D_MAP_NOOVERWRITE) && !dst_bo->b.map_ptr && !dst_bo->memory
++                && context_gl->gl_info->supported[ARB_MAP_BUFFER_RANGE])
++        {
++            /* Nothing the GPU may still read is overwritten: an unsynchronised
++             * map of just the ranges. glBufferSubData() into a buffer that a
++             * pending draw reads makes e.g. Mesa's panfrost copy the whole
++             * buffer object; a map of the whole buffer (as above) costs a copy
++             * of all of it under WoW64. */
++            wined3d_context_gl_bind_bo(context_gl, dst_bo->binding, dst_bo->id);
++            for (i = 0; i < range_count; ++i)
++            {
++                GLintptr offset = dst_bo->b.buffer_offset + (GLintptr)dst->addr + ranges[i].offset;
++
++                if ((dst_ptr = GL_EXTCALL(glMapBufferRange(dst_bo->binding, offset, ranges[i].size,
++                        GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT))))
++                {
++                    memcpy(dst_ptr, src->addr + ranges[i].offset, ranges[i].size);
++                    GL_EXTCALL(glUnmapBuffer(dst_bo->binding));
++                }
++                else
++                {
++                    GL_EXTCALL(glBufferSubData(dst_bo->binding, offset, ranges[i].size,
++                            src->addr + ranges[i].offset));
++                }
++            }
++            checkGLcall("unsynchronised buffer upload");
++
++            wined3d_context_gl_reference_bo(context_gl, dst_bo);
++        }
+         else
+         {
+             wined3d_context_gl_bind_bo(context_gl, dst_bo->binding, dst_bo->id);
 --- a/dlls/wined3d/cs.c
 +++ b/dlls/wined3d/cs.c
-@@ -89,6 +89,21 @@
+@@ -89,6 +89,21 @@ static void invalidate_client_address(struct wined3d_resource *resource)
      memset(&client->addr, 0, sizeof(client->addr));
  }
  
@@ -56,7 +154,7 @@ GL context) on entering the load menu or loading a level.
  enum wined3d_cs_op
  {
      WINED3D_CS_OP_NOP,
-@@ -2503,7 +2518,8 @@
+@@ -2503,7 +2518,8 @@ HRESULT wined3d_device_context_emit_map(struct wined3d_device_context *context,
       * increasing the map count would be visible to applications. */
      wined3d_not_from_cs(context->device->cs);
  
@@ -66,7 +164,7 @@ GL context) on entering the load menu or loading a level.
              && context->ops->map_upload_bo(context, resource, sub_resource_idx, map_desc, box, flags))
      {
          TRACE("Returning map pointer %p, row pitch %u, slice pitch %u.\n",
-@@ -3178,7 +3194,11 @@
+@@ -3178,7 +3194,11 @@ static bool wined3d_cs_map_upload_bo(struct wined3d_device_context *context, str
          if (flags & WINED3D_MAP_DISCARD)
          {
              if (!device->adapter->adapter_ops->adapter_alloc_bo(device, resource, sub_resource_idx, &addr))
@@ -78,7 +176,7 @@ GL context) on entering the load menu or loading a level.
  
              /* Limit NOOVERWRITE maps to buffers for now; there are too many
               * ways that a texture can be invalidated to even count. */
-@@ -3203,6 +3223,8 @@
+@@ -3203,6 +3223,8 @@ static bool wined3d_cs_map_upload_bo(struct wined3d_device_context *context, str
                  /* adapter_alloc_bo() should have given us a mapped BO if we are
                   * discarding. */
                  assert(flags & WINED3D_MAP_NOOVERWRITE);
@@ -87,7 +185,7 @@ GL context) on entering the load menu or loading a level.
                  WARN_(d3d_perf)("Not accelerating a NOOVERWRITE map because the BO is not mapped.\n");
                  return false;
              }
-@@ -3212,6 +3234,8 @@
+@@ -3212,6 +3234,8 @@ static bool wined3d_cs_map_upload_bo(struct wined3d_device_context *context, str
          if (!map_ptr)
          {
              assert(flags & WINED3D_MAP_NOOVERWRITE);
@@ -96,27 +194,38 @@ GL context) on entering the load menu or loading a level.
              WARN_(d3d_perf)("Not accelerating a NOOVERWRITE map because the sub-resource has no valid address.\n");
              return false;
          }
-@@ -3242,6 +3266,42 @@
+@@ -3242,6 +3266,72 @@ static bool wined3d_cs_map_upload_bo(struct wined3d_device_context *context, str
          return true;
      }
  
 +heap:
-+    if (resource->type == WINED3D_RTYPE_BUFFER)
++    if (resource->type == WINED3D_RTYPE_BUFFER && wined3d_settings.heap_maps)
 +    {
 +        uint8_t *mem;
 +
 +        /* The program writes into the buffer's heap copy, which stays valid
 +         * after the unmap (programs may go on writing there, as into the
 +         * driver's memory on Windows): the unmap uploads a copy of it. */
-+        if (!(mem = client->heap_shadow) && !(mem = client->heap_shadow = malloc(resource->size)))
++        if (!(mem = client->heap_shadow))
 +        {
-+            WARN_(d3d_perf)("Failed to allocate a heap memory buffer.\n");
-+            return false;
++            /* Large buffers with write watches, for maps "to the end of
++             * the buffer" (see below). */
++            if (resource->size >= 65536 && (mem = VirtualAlloc(NULL, resource->size,
++                    MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE)))
++                client->heap_vm = client->heap_watched = true;
++            else if (!(mem = malloc(resource->size)))
++            {
++                WARN_(d3d_perf)("Failed to allocate a heap memory buffer.\n");
++                return false;
++            }
++            client->heap_shadow = mem;
 +        }
 +        map_desc->row_pitch = map_desc->slice_pitch = resource->size;
 +        map_desc->data = mem + box->left;
 +        client->mapped_upload.addr.buffer_object = 0;
 +        client->mapped_upload.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_HEAP_SHADOW;
++        client->heap_scan = false;
++        client->heap_noov = !!(flags & WINED3D_MAP_NOOVERWRITE);
 +        if (flags & WINED3D_MAP_DISCARD)
 +        {
 +            /* The whole buffer is replaced: upload all of it, which also
@@ -129,9 +238,28 @@ GL context) on entering the load menu or loading a level.
 +        }
 +        else
 +        {
-+            /* NOOVERWRITE (or a write-only map, HeapMaps >= 2): the range only */
++            /* NOOVERWRITE (or a write-only map, HeapMaps >= 2): the range
++             * only. d3d9 passes a buffer Lock() of size 0, "to the end of
++             * the buffer", as an empty box (Daemonica locks its text vertex
++             * buffer like that), which wined3d lets through for buffers. */
 +            client->mapped_upload.addr.addr = mem + box->left;
 +            client->mapped_box = *box;
++            if (box->right <= box->left)
++            {
++                /* Programs write a small part of it (Daemonica: the
++                 * vertices of one line of text, into a ring): what changed
++                 * is found against a copy of what was uploaded, the
++                 * mirror. Made now, so the mirror holds everything uploaded
++                 * by earlier maps. */
++                client->mapped_box.right = resource->size;
++                if (!client->heap_mirror && (client->heap_mirror = malloc(resource->size)))
++                {
++                    memcpy(client->heap_mirror, mem, resource->size);
++                    if (client->heap_watched && ResetWriteWatch(mem, resource->size))
++                        client->heap_watched = false;
++                }
++                client->heap_scan = !!client->heap_mirror;
++            }
 +        }
 +        return true;
 +    }
@@ -139,32 +267,122 @@ GL context) on entering the load menu or loading a level.
      get_map_pitch(format, box, map_desc, &size);
  
      if (!(map_desc->data = malloc(size)))
-@@ -3280,6 +3340,24 @@
+@@ -3261,6 +3351,105 @@ static bool wined3d_bo_address_is_null(struct wined3d_const_bo_address *addr)
+     return !addr->buffer_object && !addr->addr;
+ }
+ 
++/* HeapMaps: the part of [*left, *right) of the heap copy that differs from
++ * the mirror, found in blocks of 256 bytes from both ends; false if none. */
++static bool heap_changed(const uint8_t *shadow, const uint8_t *mirror, unsigned int *left, unsigned int *right)
++{
++    unsigned int l = *left, r = *right, n;
++
++    for (; l < r; l += n)
++    {
++        n = min(256, r - l);
++        if (memcmp(shadow + l, mirror + l, n))
++            break;
++    }
++    for (; r > l; r -= n)
++    {
++        n = min(256, r - l);
++        if (memcmp(shadow + r - n, mirror + r - n, n))
++            break;
++    }
++    *left = l;
++    *right = r;
++    return l < r;
++}
++
++/* HeapMaps: a copy of the mapped range of a buffer's heap copy for the CS
++ * thread to upload (the program keeps the heap copy). With a mirror the
++ * upload is noted there, and maps "to the end of the buffer" (heap_scan)
++ * upload only the part that changed: false if nothing did. A heap copy
++ * with write watches tells which pages were written since the last look,
++ * only those are compared; else the whole range is. */
++static bool heap_upload_copy(struct wined3d_client_resource *client, unsigned int size,
++        struct wined3d_box *box, struct upload_bo *bo)
++{
++    const uint8_t *shadow = client->heap_shadow;
++    uint8_t *mirror = client->heap_mirror;
++    unsigned int left = box->left, right = box->right;
++    void *mem;
++
++    if (mirror && client->heap_scan)
++    {
++        void *pages[64];
++        ULONG_PTR count;
++        ULONG granularity;
++        unsigned int first = right, last = left, i;
++        bool watched = client->heap_watched;
++
++        /* the pages written anywhere in the buffer since the last look */
++        for (unsigned int pos = 0; watched && pos < size; )
++        {
++            count = ARRAY_SIZE(pages);
++            if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (uint8_t *)shadow + pos, size - pos,
++                    pages, &count, &granularity))
++            {
++                WARN("GetWriteWatch failed, error %lu.\n", GetLastError());
++                watched = client->heap_watched = false;
++                break;
++            }
++            for (i = 0; i < count; ++i)
++            {
++                unsigned int l = (const uint8_t *)pages[i] - shadow, r = min(l + granularity, size);
++
++                if (heap_changed(shadow, mirror, &l, &r))
++                {
++                    first = min(first, l);
++                    last = max(last, r);
++                }
++            }
++            if (count < ARRAY_SIZE(pages))
++                break;
++            pos = (const uint8_t *)pages[count - 1] - shadow + granularity;
++        }
++        if (watched)
++        {
++            left = first;
++            right = last;
++            if (left >= right)
++                return false;
++        }
++        else if (!heap_changed(shadow, mirror, &left, &right))
++            return false;
++        box->left = left;
++        box->right = right;
++    }
++
++    if (!(mem = malloc(right - left)))
++    {
++        ERR("Failed to allocate %u bytes for a buffer upload.\n", right - left);
++        return false;
++    }
++    memcpy(mem, shadow + left, right - left);
++    if (mirror)
++        memcpy(mirror + left, mem, right - left);
++    bo->addr.buffer_object = 0;
++    bo->addr.addr = mem;
++    bo->flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
++    if (client->heap_noov)
++        bo->flags |= UPLOAD_BO_NOOVERWRITE;
++    return true;
++}
++
+ static bool wined3d_cs_unmap_upload_bo(struct wined3d_device_context *context, struct wined3d_resource *resource,
+         unsigned int sub_resource_idx, struct wined3d_box *box, struct upload_bo *upload_bo)
+ {
+@@ -3280,6 +3469,8 @@ static bool wined3d_cs_unmap_upload_bo(struct wined3d_device_context *context, s
  
      *upload_bo = client->mapped_upload;
      *box = client->mapped_box;
-+    if (upload_bo->flags & UPLOAD_BO_HEAP_SHADOW)
-+    {
-+        /* The CS thread uploads a copy: the program keeps the shadow. */
-+        size_t size = box->right - box->left;
-+        void *mem;
-+
-+        if (!(mem = malloc(size)))
-+        {
-+            ERR("Failed to allocate %Iu bytes for a buffer upload.\n", size);
-+            upload_bo->flags = 0;
-+        }
-+        else
-+        {
-+            memcpy(mem, upload_bo->addr.addr, size);
-+            upload_bo->addr.addr = mem;
-+            upload_bo->flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
-+        }
-+    }
++    if ((upload_bo->flags & UPLOAD_BO_HEAP_SHADOW) && !heap_upload_copy(client, resource->size, box, upload_bo))
++        upload_bo->flags = 0;
      memset(&client->mapped_upload, 0, sizeof(client->mapped_upload));
      memset(&client->mapped_box, 0, sizeof(client->mapped_box));
      return true;
-@@ -3618,6 +3696,27 @@
+@@ -3618,6 +3809,19 @@ void CDECL wined3d_device_context_flush_mapped_buffer(struct wined3d_device_cont
      if (wined3d_bo_address_is_null(&client->mapped_upload.addr))
          return;
  
@@ -172,20 +390,12 @@ GL context) on entering the load menu or loading a level.
 +    {
 +        /* The buffer's heap copy (HeapMaps): the program goes on writing
 +         * there. Upload a copy of what is there now. */
-+        size_t size = client->mapped_box.right - client->mapped_box.left;
-+        struct upload_bo copy = client->mapped_upload;
-+        void *mem;
++        struct wined3d_box box = client->mapped_box;
++        struct upload_bo copy;
 +
-+        if (!(mem = malloc(size)))
-+        {
-+            ERR("Failed to allocate %Iu bytes for a mapped buffer.\n", size);
-+            return;
-+        }
-+        memcpy(mem, client->mapped_upload.addr.addr, size);
-+        copy.addr.addr = mem;
-+        copy.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
-+        wined3d_device_context_upload_bo(context, &buffer->resource, 0,
-+                &client->mapped_box, &copy, buffer->resource.size, buffer->resource.size);
++        if (heap_upload_copy(client, buffer->resource.size, &box, &copy))
++            wined3d_device_context_upload_bo(context, &buffer->resource, 0,
++                    &box, &copy, buffer->resource.size, buffer->resource.size);
 +        return;
 +    }
 +
@@ -194,17 +404,32 @@ GL context) on entering the load menu or loading a level.
                  &client->mapped_box, &client->mapped_upload, buffer->resource.size, buffer->resource.size);
 --- a/dlls/wined3d/resource.c
 +++ b/dlls/wined3d/resource.c
-@@ -218,6 +218,7 @@
+@@ -218,6 +218,11 @@ static void wined3d_resource_destroy_object(void *object)
      TRACE("resource %p.\n", resource);
  
      wined3d_resource_free_sysmem(resource);
-+    free(resource->client.heap_shadow);
++    if (resource->client.heap_vm)
++        VirtualFree(resource->client.heap_shadow, 0, MEM_RELEASE);
++    else
++        free(resource->client.heap_shadow);
++    free(resource->client.heap_mirror);
      context_resource_released(resource->device, resource);
  }
  
+--- a/dlls/wined3d/view.c
++++ b/dlls/wined3d/view.c
+@@ -1786,7 +1786,7 @@ void wined3d_unordered_access_view_copy_counter(struct wined3d_unordered_access_
+     src.buffer_object = view->counter_bo;
+     src.addr = NULL;
+ 
+-    wined3d_buffer_copy_bo_address(buffer, context, offset, &src, sizeof(uint32_t));
++    wined3d_buffer_copy_bo_address(buffer, context, offset, &src, sizeof(uint32_t), 0);
+ }
+ 
+ void wined3d_unordered_access_view_gl_update(struct wined3d_unordered_access_view_gl *uav_gl,
 --- a/dlls/wined3d/wined3d_main.c
 +++ b/dlls/wined3d/wined3d_main.c
-@@ -426,6 +426,8 @@
+@@ -426,6 +426,8 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
              TRACE("Checking relative addressing indices in float constants.\n");
              wined3d_settings.check_float_constants = TRUE;
          }
@@ -215,7 +440,7 @@ GL context) on entering the load menu or loading a level.
          if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
 --- a/dlls/wined3d/wined3d_private.h
 +++ b/dlls/wined3d/wined3d_private.h
-@@ -491,6 +491,7 @@
+@@ -491,6 +491,7 @@ struct wined3d_settings
      bool check_float_constants;
      bool cb_access_map_w;
      bool ffp_hlsl;
@@ -223,15 +448,16 @@ GL context) on entering the load menu or loading a level.
  };
  
  extern struct wined3d_settings wined3d_settings;
-@@ -2490,6 +2491,7 @@
+@@ -2490,6 +2491,8 @@ bool wined3d_driver_info_init(struct wined3d_driver_info *driver_info,
  #define UPLOAD_BO_UPLOAD_ON_UNMAP   0x1
  #define UPLOAD_BO_RENAME_ON_UNMAP   0x2
  #define UPLOAD_BO_FREE_ON_UNMAP     0x4
 +#define UPLOAD_BO_HEAP_SHADOW       0x8 /* client side only: the address is in heap_shadow */
++#define UPLOAD_BO_NOOVERWRITE       0x10 /* from a NOOVERWRITE map: nothing in use is overwritten */
  
  struct upload_bo
  {
-@@ -3240,6 +3242,10 @@
+@@ -3240,6 +3243,17 @@ struct wined3d_client_resource
      /* The currently mapped upload BO, if applicable, and box. */
      struct upload_bo mapped_upload;
      struct wined3d_box mapped_box;
@@ -239,6 +465,23 @@ GL context) on entering the load menu or loading a level.
 +    /* HeapMaps: the buffer's copy in heap memory that maps return, kept until
 +     * the resource is destroyed (programs may write after unmapping). */
 +    void *heap_shadow;
++    /* What of heap_shadow has been uploaded, for maps "to the end of the
++     * buffer" (made with the first one): only what changed is uploaded. */
++    void *heap_mirror;
++    bool heap_scan;     /* the current map is one of those */
++    bool heap_vm;       /* heap_shadow is from VirtualAlloc() */
++    bool heap_watched;  /* with write watches that work */
++    bool heap_noov;     /* the current map is a NOOVERWRITE one */
  };
  
  static inline BOOL wined3d_resource_access_is_managed(unsigned int access)
+@@ -3947,7 +3961,8 @@ void wined3d_buffer_cleanup(struct wined3d_buffer *buffer);
+ void wined3d_buffer_copy(struct wined3d_buffer *dst_buffer, unsigned int dst_offset,
+         struct wined3d_buffer *src_buffer, unsigned int src_offset, unsigned int size);
+ void wined3d_buffer_copy_bo_address(struct wined3d_buffer *dst_buffer, struct wined3d_context *context,
+-        unsigned int dst_offset, const struct wined3d_const_bo_address *src_addr, unsigned int size);
++        unsigned int dst_offset, const struct wined3d_const_bo_address *src_addr, unsigned int size,
++        uint32_t map_flags);
+ DWORD wined3d_buffer_get_memory(struct wined3d_buffer *buffer, struct wined3d_context *context,
+         struct wined3d_bo_address *data);
+ void wined3d_buffer_invalidate_location(struct wined3d_buffer *buffer, uint32_t location);

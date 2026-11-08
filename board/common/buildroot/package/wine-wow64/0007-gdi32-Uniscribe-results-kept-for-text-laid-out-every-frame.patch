@@ -1,0 +1,381 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] gdi32: Uniscribe: results kept for text laid out every
+ frame
+
+Daemonica (3D GameStudio A6) lays out every text it draws with Uniscribe
+in every frame: ScriptItemize(), ScriptBreak(), ScriptShape() and
+ScriptPlace() of the same strings over and over, about 12% of its main
+thread under Box64 (the BiDi algorithm, line breaking, OpenType shaping,
+the glyph lookups), and its main thread is what limits it.
+
+The results of ScriptItemize() and ScriptBreak(), which do not depend on
+the font, are kept in small tables, those of ScriptShape() and
+ScriptPlace() in a table of the script cache, that is of the font; the
+key is all of the input, compared byte by byte. Only successes are kept.
+Daemonica: first location 47 -> 58 fps, the introduction text 70 -> 94
+fps, the text drawn the same to the pixel.
+
+---
+--- a/dlls/gdi32/uniscribe/usp10.c
++++ b/dlls/gdi32/uniscribe/usp10.c
+@@ -603,6 +603,117 @@ static CRITICAL_SECTION_DEBUG cs_script_cache_dbg =
+ static CRITICAL_SECTION cs_script_cache = { &cs_script_cache_dbg, -1, 0, 0, 0, 0 };
+ static struct list script_cache_list = LIST_INIT(script_cache_list);
+ 
++/* Programs that lay out their text with Uniscribe every frame (Daemonica)
++ * itemize, break, shape and place the same strings over and over: the
++ * results of ScriptItemize(), ScriptBreak() (any font) and of ScriptShape()
++ * and ScriptPlace() (per script cache, that is per font) are kept in small
++ * tables, keyed by all of their input. Only successes are kept. */
++#define USP_MEMO_SIZE 128
++#define USP_MEMO_MAX_INPUT 4096
++
++struct usp_memo_entry
++{
++    UINT hash;
++    UINT in_size, out_size;
++    BYTE *data; /* the input, then the output */
++};
++
++struct usp_memo
++{
++    struct usp_memo_entry entries[USP_MEMO_SIZE];
++};
++
++static CRITICAL_SECTION cs_memo;
++static CRITICAL_SECTION_DEBUG cs_memo_dbg =
++{
++    0, 0, &cs_memo,
++    { &cs_memo_dbg.ProcessLocksList, &cs_memo_dbg.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": memo") }
++};
++static CRITICAL_SECTION cs_memo = { &cs_memo_dbg, -1, 0, 0, 0, 0 };
++static struct usp_memo itemize_memo, break_memo;
++
++/* An input made of a header and up to two arrays */
++struct usp_memo_key
++{
++    BYTE buf[USP_MEMO_MAX_INPUT];
++    UINT size;
++    UINT hash;
++};
++
++static BOOL memo_key( struct usp_memo_key *key, const void *head, UINT head_size,
++                      const void *a, UINT a_size, const void *b, UINT b_size )
++{
++    const UINT *p;
++    UINT i, h = 2166136261u;
++
++    if (head_size + a_size + b_size > sizeof(key->buf) - 3) return FALSE;
++    memcpy( key->buf, head, head_size );
++    if (a_size) memcpy( key->buf + head_size, a, a_size );
++    if (b_size) memcpy( key->buf + head_size + a_size, b, b_size );
++    key->size = head_size + a_size + b_size;
++    memset( key->buf + key->size, 0, 3 );
++    for (i = 0, p = (const UINT *)key->buf; i < (key->size + 3) / 4; i++)
++        h = (h ^ p[i]) * 16777619u;
++    key->hash = h;
++    return TRUE;
++}
++
++/* the size of the output kept for a key, copied into out, or 0 */
++static UINT memo_find( struct usp_memo *memo, const struct usp_memo_key *key, void *out, UINT capacity )
++{
++    struct usp_memo_entry *e;
++    UINT size = 0;
++
++    if (!memo) return 0;
++    EnterCriticalSection( &cs_memo );
++    e = &memo->entries[key->hash % USP_MEMO_SIZE];
++    if (e->data && e->hash == key->hash && e->in_size == key->size && e->out_size <= capacity
++        && !memcmp( e->data, key->buf, key->size ))
++    {
++        memcpy( out, e->data + key->size, e->out_size );
++        size = e->out_size;
++    }
++    LeaveCriticalSection( &cs_memo );
++    return size;
++}
++
++static void memo_store( struct usp_memo *memo, const struct usp_memo_key *key, const void *out, UINT out_size )
++{
++    struct usp_memo_entry *e;
++    BYTE *data;
++
++    if (!memo || !(data = malloc( key->size + out_size ))) return;
++    memcpy( data, key->buf, key->size );
++    memcpy( data + key->size, out, out_size );
++    EnterCriticalSection( &cs_memo );
++    e = &memo->entries[key->hash % USP_MEMO_SIZE];
++    free( e->data );
++    e->hash = key->hash;
++    e->in_size = key->size;
++    e->out_size = out_size;
++    e->data = data;
++    LeaveCriticalSection( &cs_memo );
++}
++
++static void memo_free( struct usp_memo *memo )
++{
++    UINT i;
++
++    if (!memo) return;
++    for (i = 0; i < USP_MEMO_SIZE; i++) free( memo->entries[i].data );
++    free( memo );
++}
++
++static struct usp_memo *cache_memo( SCRIPT_CACHE *psc )
++{
++    ScriptCache *sc = psc ? *psc : NULL;
++
++    if (!sc) return NULL;
++    if (!sc->memo) sc->memo = calloc( 1, sizeof(*sc->memo) );
++    return sc->memo;
++}
++
+ typedef struct {
+     ScriptCache *sc;
+     int numGlyphs;
+@@ -1043,6 +1154,7 @@ HRESULT WINAPI ScriptFreeCache(SCRIPT_CACHE *psc)
+         }
+         free(sc->scripts);
+         free(sc->otm);
++        memo_free(sc->memo);
+         free(sc);
+         *psc = NULL;
+     }
+@@ -1765,7 +1877,53 @@ HRESULT WINAPI ScriptItemize(const WCHAR *pwcInChars, int cInChars, int cMaxItem
+                              const SCRIPT_CONTROL *psControl, const SCRIPT_STATE *psState,
+                              SCRIPT_ITEM *pItems, int *pcItems)
+ {
+-    return _ItemizeInternal(pwcInChars, cInChars, cMaxItems, psControl, psState, pItems, NULL, pcItems);
++    struct
++    {
++        int count, max_items;
++        SCRIPT_CONTROL control;
++        SCRIPT_STATE state;
++        WORD flags;
++    } head;
++    struct usp_memo_key key;
++    BOOL keyed = FALSE;
++    HRESULT hr;
++    BYTE *out;
++    UINT size;
++
++    if (pwcInChars && cInChars > 0 && pItems && pcItems && cMaxItems >= 2)
++    {
++        memset( &head, 0, sizeof(head) );
++        head.count = cInChars;
++        head.max_items = cMaxItems;
++        if (psControl) head.control = *psControl;
++        if (psState) head.state = *psState;
++        head.flags = (psControl ? 1 : 0) | (psState ? 2 : 0);
++        keyed = memo_key( &key, &head, sizeof(head), pwcInChars, cInChars * sizeof(WCHAR), NULL, 0 );
++    }
++    if (keyed && (out = malloc( sizeof(int) + cMaxItems * sizeof(SCRIPT_ITEM) )))
++    {
++        size = memo_find( &itemize_memo, &key, out, sizeof(int) + cMaxItems * sizeof(SCRIPT_ITEM) );
++        if (size)
++        {
++            *pcItems = *(int *)out;
++            memcpy( pItems, out + sizeof(int), size - sizeof(int) );
++            free( out );
++            return S_OK;
++        }
++        free( out );
++    }
++
++    hr = _ItemizeInternal(pwcInChars, cInChars, cMaxItems, psControl, psState, pItems, NULL, pcItems);
++
++    if (keyed && hr == S_OK && *pcItems >= 0 && *pcItems < cMaxItems
++        && (out = malloc( sizeof(int) + (*pcItems + 1) * sizeof(SCRIPT_ITEM) )))
++    {
++        *(int *)out = *pcItems;
++        memcpy( out + sizeof(int), pItems, (*pcItems + 1) * sizeof(SCRIPT_ITEM) );
++        memo_store( &itemize_memo, &key, out, sizeof(int) + (*pcItems + 1) * sizeof(SCRIPT_ITEM) );
++        free( out );
++    }
++    return hr;
+ }
+ 
+ static inline int getGivenTabWidth(ScriptCache *psc, SCRIPT_TABDEF *pTabdef, int charPos, int current_x)
+@@ -2960,6 +3118,20 @@ HRESULT WINAPI ScriptBreak(const WCHAR *chars, int count, const SCRIPT_ANALYSIS
+     if (count < 0 || !la) return E_INVALIDARG;
+     if (count == 0) return E_FAIL;
+ 
++    if (sa)
++    {
++        struct { int count; SCRIPT_ANALYSIS sa; } head = { count, *sa };
++        struct usp_memo_key key;
++
++        if (memo_key( &key, &head, sizeof(head), chars, count * sizeof(WCHAR), NULL, 0 ))
++        {
++            if (memo_find( &break_memo, &key, la, count * sizeof(*la) )) return S_OK;
++            BREAK_line(chars, count, sa, la);
++            memo_store( &break_memo, &key, la, count * sizeof(*la) );
++            return S_OK;
++        }
++    }
++
+     BREAK_line(chars, count, sa, la);
+ 
+     return S_OK;
+@@ -3237,15 +3409,53 @@ HRESULT WINAPI ScriptShape(HDC hdc, SCRIPT_CACHE *psc, const WCHAR *pwcChars,
+     SCRIPT_CHARPROP *charProps;
+     SCRIPT_GLYPHPROP *glyphProps;
+ 
++    struct { int count, max_glyphs; SCRIPT_ANALYSIS sa; } head;
++    struct usp_memo_key key;
++    BOOL keyed = FALSE;
++    UINT capacity = 0, size;
++    BYTE *out = NULL;
++
+     if (!psva || !pcGlyphs) return E_INVALIDARG;
+     if (cChars > cMaxGlyphs) return E_OUTOFMEMORY;
+ 
++    /* out: the analysis after, the glyph count, glyphs, clusters, attributes */
++    if (psc && *psc && psa && pwcChars && pwOutGlyphs && pwLogClust && cChars > 0)
++    {
++        head.count = cChars;
++        head.max_glyphs = cMaxGlyphs;
++        head.sa = *psa;
++        keyed = memo_key( &key, &head, sizeof(head), pwcChars, cChars * sizeof(WCHAR), NULL, 0 );
++        capacity = sizeof(SCRIPT_ANALYSIS) + sizeof(int) + cMaxGlyphs * (sizeof(WORD) + sizeof(SCRIPT_VISATTR))
++                   + cChars * sizeof(WORD);
++    }
++    if (keyed && (out = malloc( capacity )))
++    {
++        if ((size = memo_find( cache_memo( psc ), &key, out, capacity )))
++        {
++            BYTE *p = out;
++            int n;
++
++            memcpy( psa, p, sizeof(*psa) ); p += sizeof(*psa);
++            memcpy( &n, p, sizeof(n) ); p += sizeof(n);
++            *pcGlyphs = n;
++            memcpy( pwOutGlyphs, p, n * sizeof(WORD) ); p += n * sizeof(WORD);
++            memcpy( pwLogClust, p, cChars * sizeof(WORD) ); p += cChars * sizeof(WORD);
++            memcpy( psva, p, n * sizeof(SCRIPT_VISATTR) );
++            free( out );
++            return S_OK;
++        }
++    }
++
+     if (!(charProps = calloc(cChars, sizeof(*charProps))))
++    {
++        free(out);
+         return E_OUTOFMEMORY;
++    }
+ 
+     if (!(glyphProps = calloc(cMaxGlyphs, sizeof(*glyphProps))))
+     {
+         free(charProps);
++        free(out);
+         return E_OUTOFMEMORY;
+     }
+ 
+@@ -3257,8 +3467,22 @@ HRESULT WINAPI ScriptShape(HDC hdc, SCRIPT_CACHE *psc, const WCHAR *pwcChars,
+             psva[i] = glyphProps[i].sva;
+     }
+ 
++    if (out && hr == S_OK && *pcGlyphs >= 0 && *pcGlyphs <= cMaxGlyphs)
++    {
++        BYTE *p = out;
++        int n = *pcGlyphs;
++
++        memcpy( p, psa, sizeof(*psa) ); p += sizeof(*psa);
++        memcpy( p, &n, sizeof(n) ); p += sizeof(n);
++        memcpy( p, pwOutGlyphs, n * sizeof(WORD) ); p += n * sizeof(WORD);
++        memcpy( p, pwLogClust, cChars * sizeof(WORD) ); p += cChars * sizeof(WORD);
++        memcpy( p, psva, n * sizeof(SCRIPT_VISATTR) ); p += n * sizeof(SCRIPT_VISATTR);
++        memo_store( cache_memo( psc ), &key, out, p - out );
++    }
++
+     free(charProps);
+     free(glyphProps);
++    free(out);
+ 
+     return hr;
+ }
+@@ -3423,6 +3647,12 @@ HRESULT WINAPI ScriptPlace(HDC hdc, SCRIPT_CACHE *psc, const WORD *pwGlyphs,
+     HRESULT hr;
+     SCRIPT_GLYPHPROP *glyphProps;
+     int i;
++    struct { int count; SCRIPT_ANALYSIS sa; } head;
++    struct usp_memo_key key;
++    BOOL keyed = FALSE;
++    UINT size = 0;
++    BYTE *out = NULL;
++    ABC abc;
+ 
+     TRACE("(%p, %p, %p, %d, %p, %p, %p, %p, %p)\n",  hdc, psc, pwGlyphs, cGlyphs, psva, psa,
+           piAdvance, pGoffset, pABC);
+@@ -3430,15 +3660,56 @@ HRESULT WINAPI ScriptPlace(HDC hdc, SCRIPT_CACHE *psc, const WORD *pwGlyphs,
+     if (!psva) return E_INVALIDARG;
+     if (!pGoffset) return E_FAIL;
+ 
++    /* out: the analysis after, the ABC widths, advances, offsets */
++    if (psc && *psc && psa && pwGlyphs && piAdvance && cGlyphs > 0)
++    {
++        head.count = cGlyphs;
++        head.sa = *psa;
++        keyed = memo_key( &key, &head, sizeof(head), pwGlyphs, cGlyphs * sizeof(WORD),
++                          psva, cGlyphs * sizeof(SCRIPT_VISATTR) );
++        size = sizeof(SCRIPT_ANALYSIS) + sizeof(ABC) + cGlyphs * (sizeof(int) + sizeof(GOFFSET));
++    }
++    if (keyed && (out = malloc( size )))
++    {
++        if (memo_find( cache_memo( psc ), &key, out, size ) == size)
++        {
++            BYTE *p = out;
++
++            memcpy( psa, p, sizeof(*psa) ); p += sizeof(*psa);
++            if (pABC) memcpy( pABC, p, sizeof(ABC) );
++            p += sizeof(ABC);
++            memcpy( piAdvance, p, cGlyphs * sizeof(int) ); p += cGlyphs * sizeof(int);
++            memcpy( pGoffset, p, cGlyphs * sizeof(GOFFSET) );
++            free( out );
++            return S_OK;
++        }
++    }
++
+     if (!(glyphProps = calloc(cGlyphs, sizeof(*glyphProps))))
++    {
++        free(out);
+         return E_OUTOFMEMORY;
++    }
+ 
+     for (i = 0; i < cGlyphs; i++)
+         glyphProps[i].sva = psva[i];
+ 
+-    hr = ScriptPlaceOpenType(hdc, psc, psa, scriptInformation[psa->eScript].scriptTag, 0, NULL, NULL, 0, NULL, NULL, NULL, 0, pwGlyphs, glyphProps, cGlyphs, piAdvance, pGoffset, pABC);
++    hr = ScriptPlaceOpenType(hdc, psc, psa, scriptInformation[psa->eScript].scriptTag, 0, NULL, NULL, 0, NULL, NULL, NULL, 0, pwGlyphs, glyphProps, cGlyphs, piAdvance, pGoffset, out ? &abc : pABC);
++
++    if (out && pABC && SUCCEEDED(hr)) *pABC = abc;
++    if (out && hr == S_OK)
++    {
++        BYTE *p = out;
++
++        memcpy( p, psa, sizeof(*psa) ); p += sizeof(*psa);
++        memcpy( p, &abc, sizeof(abc) ); p += sizeof(abc);
++        memcpy( p, piAdvance, cGlyphs * sizeof(int) ); p += cGlyphs * sizeof(int);
++        memcpy( p, pGoffset, cGlyphs * sizeof(GOFFSET) );
++        memo_store( cache_memo( psc ), &key, out, size );
++    }
+ 
+     free(glyphProps);
++    free(out);
+ 
+     return hr;
+ }
+--- a/dlls/gdi32/uniscribe/usp10_internal.h
++++ b/dlls/gdi32/uniscribe/usp10_internal.h
+@@ -207,6 +207,8 @@ typedef struct {
+ 
+     OPENTYPE_TAG userScript;
+     OPENTYPE_TAG userLang;
++
++    struct usp_memo *memo;  /* results of ScriptShape() and ScriptPlace() */
+ } ScriptCache;
+ 
+ typedef struct _scriptData
