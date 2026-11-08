@@ -1,0 +1,132 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] dsound: linear resampling unless "Resampler" is "fir"
+
+The mixer resamples every secondary buffer whose rate is not the
+device's with a windowed-sinc filter of 7907 points: about 66 products
+per output sample and channel, plus as many to interpolate the filter.
+Under WoW64 on arm64 the 32-bit dsound.dll is x86 code run by Box64, and
+there the mixing thread of Daemonica (22/44 kHz sounds on a 48 kHz
+device) was busy all the time: ALSA underruns, and the game's thread
+waiting for the mixer's lock dropped from 145 to 8-13 frames a second
+whenever menu sounds played.
+
+Interpolate linearly between the two nearest input samples instead. The
+filter stays available: HKCU\Software\Wine\DirectSound (or the
+application's AppDefaults key) "Resampler" = "fir".
+---
+ dlls/dsound/dsound_main.c    |  9 ++++++-
+ dlls/dsound/dsound_private.h |  1 +
+ dlls/dsound/mixer.c          | 52 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/dsound/dsound_main.c b/dlls/dsound/dsound_main.c
+index 8936b43..5f996a3 100644
+--- a/dlls/dsound/dsound_main.c
++++ b/dlls/dsound/dsound_main.c
+@@ -81,6 +81,7 @@ GUID *DSOUND_capture_guids;
+ 
+ /* All default settings, you most likely don't want to touch these, see wiki on UsefulRegistryKeys */
+ int ds_hel_buflen = 32768 * 2;
++BOOL ds_fir_resampler = FALSE;
+ 
+ /*
+  * Get a config key from either the app-specific or the default config
+@@ -132,10 +133,16 @@ void setup_dsound_options(void)
+     if (!get_config_key( hkey, appkey, "HelBuflen", buffer, MAX_PATH ))
+         ds_hel_buflen = atoi(buffer);
+ 
++    /* "fir": the windowed-sinc filter, ~66 products per sample and channel,
++     * too slow where i386 code is emulated (WoW64 on arm64); "linear" (the
++     * default): interpolation between the two nearest samples */
++    if (!get_config_key( hkey, appkey, "Resampler", buffer, MAX_PATH ))
++        ds_fir_resampler = !strcmp( buffer, "fir" );
++
+     if (appkey) RegCloseKey( appkey );
+     if (hkey) RegCloseKey( hkey );
+ 
+-    TRACE("ds_hel_buflen = %d\n", ds_hel_buflen);
++    TRACE("ds_hel_buflen = %d, resampler %s\n", ds_hel_buflen, ds_fir_resampler ? "fir" : "linear");
+ }
+ 
+ static const char * get_device_id(LPCGUID pGuid)
+diff --git a/dlls/dsound/dsound_private.h b/dlls/dsound/dsound_private.h
+index 647f227..da23cde 100644
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -35,6 +35,7 @@
+ #define DS_MAX_CHANNELS 6
+ 
+ extern int ds_hel_buflen;
++extern BOOL ds_fir_resampler;
+ 
+ /*****************************************************************************
+  * Predeclare the interface implementation structures
+diff --git a/dlls/dsound/mixer.c b/dlls/dsound/mixer.c
+index dbc84cb..c5fa0bc 100644
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -394,12 +394,64 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *
+     return max_ipos;
+ }
+ 
++/* Sample idx of the input from the mixing position, as cp_fields_resample() reads it */
++static inline float get_input_sample(const IDirectSoundBufferImpl *dsb, UINT idx, UINT committed_samples,
++        UINT istride, DWORD channel)
++{
++    if (idx < committed_samples)
++        return get_current_sample(dsb, dsb->committedbuff, dsb->writelead,
++                dsb->committed_mixpos + idx * istride, channel);
++    return get_current_sample(dsb, dsb->buffer->memory, dsb->buflen,
++            dsb->sec_mixpos + idx * istride, channel);
++}
++
++/* Linear interpolation: two samples and a product per output sample */
++static UINT cp_fields_resample_linear(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
++{
++    UINT istride = dsb->pwfx->nBlockAlign;
++    UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
++    LONG64 freqAcc_start = *freqAccNum;
++    UINT max_ipos = (freqAcc_start + count * dsb->freqAdjustNum) / dsb->freqAdjustDen;
++    UINT committed_samples = 0, i, channel;
++    float scale = 1.0f / dsb->freqAdjustDen;
++
++    *freqAccNum = (freqAcc_start + count * dsb->freqAdjustNum) % dsb->freqAdjustDen;
++
++    if (!secondarybuffer_is_audible(dsb))
++        return max_ipos;
++
++    if (dsb->use_committed)
++    {
++        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
++        committed_samples = committed_samples <= max_ipos + 1 ? committed_samples : max_ipos + 1;
++    }
++
++    for (i = 0; i < count; i++)
++    {
++        LONG64 pos = freqAcc_start + i * dsb->freqAdjustNum;
++        UINT ipos = pos / dsb->freqAdjustDen;
++        float frac = (pos % dsb->freqAdjustDen) * scale;
++
++        for (channel = 0; channel < dsb->mix_channels; channel++)
++        {
++            float s0 = get_input_sample(dsb, ipos, committed_samples, istride, channel);
++            float s1 = get_input_sample(dsb, ipos + 1, committed_samples, istride, channel);
++
++            dsb->put(dsb, i * ostride, channel, s0 + (s1 - s0) * frac);
++        }
++    }
++
++    return max_ipos;
++}
++
+ static void cp_fields(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+ {
+     DWORD ipos, adv;
+ 
+     if (dsb->freqAdjustNum == dsb->freqAdjustDen)
+         adv = cp_fields_noresample(dsb, count); /* *freqAccNum is unmodified */
++    else if (!ds_fir_resampler)
++        adv = cp_fields_resample_linear(dsb, count, freqAccNum);
+     else
+         adv = cp_fields_resample(dsb, count, freqAccNum);
+ 

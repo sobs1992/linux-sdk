@@ -22,6 +22,15 @@ only for programs known to work with it. Default 0: unchanged.
 Pirates! sea battle: the render thread busy 84% -> 97%, 22-28 -> 25-31
 fps.
 
+Maps return the buffer's own copy in heap memory, kept until the buffer
+is destroyed, and unmaps upload a copy of the mapped range: programs may
+go on writing through a map pointer after the unmap (into the driver's
+memory on Windows), and d3d9 programs may draw from a buffer they still
+have mapped (wined3d_device_context_flush_mapped_buffer(), which then
+also uploads a copy). Freeing the mapped memory itself made Daemonica
+crash at random in WineD3D (freed resources, the GLSL program tree, the
+GL context) on entering the load menu or loading a level.
+
 ---
 --- a/dlls/wined3d/cs.c
 +++ b/dlls/wined3d/cs.c
@@ -87,20 +96,19 @@ fps.
              WARN_(d3d_perf)("Not accelerating a NOOVERWRITE map because the sub-resource has no valid address.\n");
              return false;
          }
-@@ -3242,6 +3266,31 @@
+@@ -3242,6 +3266,42 @@
          return true;
      }
  
 +heap:
-+    if (resource->type == WINED3D_RTYPE_BUFFER && (flags & WINED3D_MAP_DISCARD))
++    if (resource->type == WINED3D_RTYPE_BUFFER)
 +    {
-+        struct wined3d_box whole;
 +        uint8_t *mem;
 +
-+        /* The whole buffer is replaced: upload all of it, which also lets
-+         * the CS thread rename a busy buffer object instead of waiting. */
-+        wined3d_box_set(&whole, 0, 0, resource->size, 1, 0, 1);
-+        if (!(mem = malloc(resource->size)))
++        /* The program writes into the buffer's heap copy, which stays valid
++         * after the unmap (programs may go on writing there, as into the
++         * driver's memory on Windows): the unmap uploads a copy of it. */
++        if (!(mem = client->heap_shadow) && !(mem = client->heap_shadow = malloc(resource->size)))
 +        {
 +            WARN_(d3d_perf)("Failed to allocate a heap memory buffer.\n");
 +            return false;
@@ -108,17 +116,92 @@ fps.
 +        map_desc->row_pitch = map_desc->slice_pitch = resource->size;
 +        map_desc->data = mem + box->left;
 +        client->mapped_upload.addr.buffer_object = 0;
-+        client->mapped_upload.addr.addr = mem;
-+        client->mapped_upload.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
-+        client->mapped_box = whole;
-+        /* Later NOOVERWRITE maps have no client address to write to. */
-+        invalidate_client_address(resource);
++        client->mapped_upload.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_HEAP_SHADOW;
++        if (flags & WINED3D_MAP_DISCARD)
++        {
++            /* The whole buffer is replaced: upload all of it, which also
++             * lets the CS thread rename a busy buffer object instead of
++             * waiting. */
++            client->mapped_upload.addr.addr = mem;
++            wined3d_box_set(&client->mapped_box, 0, 0, resource->size, 1, 0, 1);
++            /* Later NOOVERWRITE maps have no client address to write to. */
++            invalidate_client_address(resource);
++        }
++        else
++        {
++            /* NOOVERWRITE (or a write-only map, HeapMaps >= 2): the range only */
++            client->mapped_upload.addr.addr = mem + box->left;
++            client->mapped_box = *box;
++        }
 +        return true;
 +    }
 +
      get_map_pitch(format, box, map_desc, &size);
  
      if (!(map_desc->data = malloc(size)))
+@@ -3280,6 +3340,24 @@
+ 
+     *upload_bo = client->mapped_upload;
+     *box = client->mapped_box;
++    if (upload_bo->flags & UPLOAD_BO_HEAP_SHADOW)
++    {
++        /* The CS thread uploads a copy: the program keeps the shadow. */
++        size_t size = box->right - box->left;
++        void *mem;
++
++        if (!(mem = malloc(size)))
++        {
++            ERR("Failed to allocate %Iu bytes for a buffer upload.\n", size);
++            upload_bo->flags = 0;
++        }
++        else
++        {
++            memcpy(mem, upload_bo->addr.addr, size);
++            upload_bo->addr.addr = mem;
++            upload_bo->flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
++        }
++    }
+     memset(&client->mapped_upload, 0, sizeof(client->mapped_upload));
+     memset(&client->mapped_box, 0, sizeof(client->mapped_box));
+     return true;
+@@ -3618,6 +3696,27 @@
+     if (wined3d_bo_address_is_null(&client->mapped_upload.addr))
+         return;
+ 
++    if (client->mapped_upload.flags & UPLOAD_BO_HEAP_SHADOW)
++    {
++        /* The buffer's heap copy (HeapMaps): the program goes on writing
++         * there. Upload a copy of what is there now. */
++        size_t size = client->mapped_box.right - client->mapped_box.left;
++        struct upload_bo copy = client->mapped_upload;
++        void *mem;
++
++        if (!(mem = malloc(size)))
++        {
++            ERR("Failed to allocate %Iu bytes for a mapped buffer.\n", size);
++            return;
++        }
++        memcpy(mem, client->mapped_upload.addr.addr, size);
++        copy.addr.addr = mem;
++        copy.flags = UPLOAD_BO_UPLOAD_ON_UNMAP | UPLOAD_BO_FREE_ON_UNMAP;
++        wined3d_device_context_upload_bo(context, &buffer->resource, 0,
++                &client->mapped_box, &copy, buffer->resource.size, buffer->resource.size);
++        return;
++    }
++
+     if (client->mapped_upload.flags & UPLOAD_BO_UPLOAD_ON_UNMAP)
+         wined3d_device_context_upload_bo(context, &buffer->resource, 0,
+                 &client->mapped_box, &client->mapped_upload, buffer->resource.size, buffer->resource.size);
+--- a/dlls/wined3d/resource.c
++++ b/dlls/wined3d/resource.c
+@@ -218,6 +218,7 @@
+     TRACE("resource %p.\n", resource);
+ 
+     wined3d_resource_free_sysmem(resource);
++    free(resource->client.heap_shadow);
+     context_resource_released(resource->device, resource);
+ }
+ 
 --- a/dlls/wined3d/wined3d_main.c
 +++ b/dlls/wined3d/wined3d_main.c
 @@ -426,6 +426,8 @@
@@ -140,3 +223,22 @@ fps.
  };
  
  extern struct wined3d_settings wined3d_settings;
+@@ -2490,6 +2491,7 @@
+ #define UPLOAD_BO_UPLOAD_ON_UNMAP   0x1
+ #define UPLOAD_BO_RENAME_ON_UNMAP   0x2
+ #define UPLOAD_BO_FREE_ON_UNMAP     0x4
++#define UPLOAD_BO_HEAP_SHADOW       0x8 /* client side only: the address is in heap_shadow */
+ 
+ struct upload_bo
+ {
+@@ -3240,6 +3242,10 @@
+     /* The currently mapped upload BO, if applicable, and box. */
+     struct upload_bo mapped_upload;
+     struct wined3d_box mapped_box;
++
++    /* HeapMaps: the buffer's copy in heap memory that maps return, kept until
++     * the resource is destroyed (programs may write after unmapping). */
++    void *heap_shadow;
+ };
+ 
+ static inline BOOL wined3d_resource_access_is_managed(unsigned int access)

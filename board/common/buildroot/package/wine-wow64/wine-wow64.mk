@@ -67,16 +67,17 @@ define HOST_WINE_WOW64_INSTALL_CMDS
 endef
 
 WINE_WOW64_DEPENDENCIES = host-bison host-flex host-wine-wow64 host-llvm-mingw \
-	alsa-lib freetype
+	alsa-lib freetype gstreamer1 gst1-plugins-base
 
 WINE_WOW64_PATH = $(HOST_DIR)/llvm-mingw/bin:$(BR_PATH)
 WINE_WOW64_CONF_ENV = PATH=$(WINE_WOW64_PATH) CROSSCFLAGS="-O2"
 WINE_WOW64_MAKE_ENV = PATH=$(WINE_WOW64_PATH)
 
 # No window system: the graphics driver is winebare.drv (0003). Sound by
-# ALSA, fonts by FreeType, no network services. --enable-nls undoes
-# Buildroot's --disable-nls, which for Wine means "skip the nls directory"
-# (its code pages and locale tables: wineserver does not start without).
+# ALSA, fonts by FreeType, media by GStreamer, no network services.
+# --enable-nls undoes Buildroot's --disable-nls, which for Wine means "skip
+# the nls directory" (its code pages and locale tables: wineserver does not
+# start without).
 WINE_WOW64_CONF_OPTS = \
 	--with-wine-tools=$(HOST_WINE_WOW64_DIR) \
 	--enable-nls \
@@ -96,7 +97,7 @@ WINE_WOW64_CONF_OPTS = \
 	--without-gnutls \
 	--without-gphoto \
 	--without-gssapi \
-	--without-gstreamer \
+	--with-gstreamer \
 	--without-krb5 \
 	--without-netapi \
 	--without-opencl \
@@ -113,6 +114,20 @@ WINE_WOW64_CONF_OPTS = \
 	--without-vulkan \
 	--without-wayland \
 	--without-x
+
+# winegstreamer decodes with gst1-libav, which needs libavfilter and the
+# codecs of old games' sound and videos. VCMI cuts FFmpeg down to Bink and
+# Smacker (--disable-everything --disable-avfilter); this file comes after
+# vcmi.mk, so these options win (FFmpeg's configure: the last one counts).
+FFMPEG_CONF_OPTS += \
+	--enable-avfilter \
+	--enable-decoder=wmav1,wmav2,wmapro,wmavoice,wmalossless \
+	--enable-decoder=mp1,mp1float,mp2,mp2float,mp3,mp3float,vorbis \
+	--enable-decoder=adpcm_ms,adpcm_ima_wav,gsm_ms \
+	--enable-decoder=wmv1,wmv2,wmv3,vc1,msmpeg4v1,msmpeg4v2,msmpeg4v3 \
+	--enable-decoder=mpeg1video,mpeg2video,mpeg4,theora,vp3,vp5,vp6,vp6a,vp6f \
+	--enable-decoder=cinepak,msvideo1,msrle,indeo2,indeo3,indeo4,indeo5 \
+	--enable-decoder=truemotion1,truemotion2
 
 # OpenGL through EGL (opengl32 needs no libGL)
 ifeq ($(BR2_PACKAGE_MESA_PANFROST),y)
