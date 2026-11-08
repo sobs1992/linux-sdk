@@ -26,6 +26,37 @@ BARE_APP_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 BARE_APP_CONF_OPTS = \
 	-DBARE_APP_DEFCONFIG=$(call qstrip,$(BR2_PACKAGE_BARE_APP_DEFCONFIG))
 
+# The games whose engines this image has, over that defconfig: a game is
+# switched on in one place, the firmware's APPS_CONFIG (bare-app.HOMM3=y)
+BARE_APP_YN = $(if $(1),y,n)
+BARE_APP_KCONFIG = \
+	CONFIG_GAME_HOMM3=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_HOMM3)) \
+	CONFIG_GAME_HALFLIFE=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_HALFLIFE)) \
+	CONFIG_GAME_WINE=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_WINE))
+# SDL2 games come by game.ini; other programs may too, so only "on"
+ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)
+BARE_APP_KCONFIG += CONFIG_GAME_NATIVE=y
+endif
+BARE_APP_CONF_OPTS += \
+	-DBARE_APP_CONFIG_EXTRA="$(subst $(space),;,$(strip $(BARE_APP_KCONFIG)))"
+
+# bare_app's side of its games for the packages that build them (vcmi,
+# xash3d-fwgs, wine-wow64, SDL2's bareapp drivers): the protocol
+# (games/game_ipc.h, the game side games/game_ipc_client.h), the gamepad
+# names (core/input.h) and winebare.drv's protocol, in
+# $(STAGING_DIR)/usr/include/bare_app with the layout of bare_app's src/.
+# Those packages depend on bare-app; the rest of it goes to the target only.
+BARE_APP_INSTALL_STAGING = YES
+BARE_APP_HEADERS = games/game_ipc.h games/game_ipc_client.h core/input.h
+BARE_APP_INCLUDE = $(STAGING_DIR)/usr/include/bare_app
+
+define BARE_APP_INSTALL_STAGING_CMDS
+	$(foreach h,$(BARE_APP_HEADERS),\
+		$(INSTALL) -D -m 0644 $(@D)/src/$(h) $(BARE_APP_INCLUDE)/$(h)$(sep))
+	$(INSTALL) -D -m 0644 $(@D)/ports/wine/winebare_proto.h \
+		$(BARE_APP_INCLUDE)/wine/winebare_proto.h
+endef
+
 ifeq ($(BR2_PACKAGE_BARE_APP_AUTOSTART),y)
 define BARE_APP_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(BARE_APP_PKGDIR)/S90bare-app \
@@ -40,15 +71,24 @@ endif
 ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)
 define BARE_APP_SDL2_DRIVERS
 	$(APPLY_PATCHES) $(SDL2_DIR) $(BARE_APP_PKGDIR)/sdl2 \*.patch
-	$(INSTALL) -m 0644 $(BARE_APP_SITE)/src/games/game_ipc.h \
-		$(BARE_APP_SITE)/src/core/input.h $(SDL2_DIR)/src/video/bareapp/
 endef
 SDL2_POST_PATCH_HOOKS += BARE_APP_SDL2_DRIVERS
+# the headers once bare-app is in staging: dependencies come before configure
+define BARE_APP_SDL2_HEADERS
+	$(INSTALL) -m 0644 $(addprefix $(BARE_APP_INCLUDE)/,$(BARE_APP_HEADERS)) \
+		$(SDL2_DIR)/src/video/bareapp/
+endef
+SDL2_PRE_CONFIGURE_HOOKS += BARE_APP_SDL2_HEADERS
 SDL2_CONF_OPTS += --enable-bareapp
+# SDL2_DEPENDENCIES += would come too late: Buildroot makes a package's
+# rules when it reads its .mk, before this one. So SDL2 is configured
+# after bare-app (the headers) and Mesa (OpenGL ES) by a rule of our own.
+BARE_APP_SDL2_AFTER = bare-app
 ifeq ($(BR2_PACKAGE_MESA_PANFROST),y)
-SDL2_DEPENDENCIES += mesa-panfrost
+BARE_APP_SDL2_AFTER += mesa-panfrost
 SDL2_CONF_OPTS += --enable-video-opengles --enable-video-opengles2 --disable-video-opengles1
 endif
+$(SDL2_TARGET_CONFIGURE): | $(BARE_APP_SDL2_AFTER)
 endif
 
 # The game.ini of the SDL2 games we bring: bare_app's menu entries

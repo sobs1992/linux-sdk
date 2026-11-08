@@ -13,9 +13,9 @@ XASH3D_FWGS_GIT_SUBMODULES = YES
 # No licence file in the tree: every source carries the GPLv3+ header
 XASH3D_FWGS_LICENSE = GPL-3.0+
 XASH3D_FWGS_LICENSE_FILES = Documentation/gpl_copyright_header.h
-XASH3D_FWGS_DEPENDENCIES = alsa-lib zlib
+XASH3D_FWGS_DEPENDENCIES = alsa-lib zlib bare-app
 
-# 0001 adds the bare_app platform; game_ipc.h is read from the SDK's apps/.
+# 0001 adds the bare_app platform; games/game_ipc.h comes from bare-app's staging.
 # -P (packaging): the launcher in /usr/bin, the libraries in
 # /usr/lib/xash3d, extras.pk3 in /usr/share/xash3d. Fonts by stb_truetype
 # (no freetype), codecs from the bundled submodules, not what staging has.
@@ -23,7 +23,7 @@ XASH3D_FWGS_CONF_OPTS = \
 	-T release \
 	-P \
 	--disable-werror \
-	--enable-bare-app=$(BR2_EXTERNAL_SDK_PATH)/../../../apps/bare_app/src \
+	--enable-bare-app=$(STAGING_DIR)/usr/include/bare_app \
 	--enable-soft \
 	--disable-gl \
 	--enable-stbtt \

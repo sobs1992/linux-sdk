@@ -4,6 +4,7 @@ config BR2_PACKAGE_WINE_WOW64
 	depends on BR2_HOSTARCH = "x86_64" # prebuilt llvm-mingw
 	depends on !BR2_STATIC_LIBS
 	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL
+	depends on BR2_PACKAGE_BARE_APP # winebare.drv's protocol
 	select BR2_PACKAGE_ALSA_LIB
 	select BR2_PACKAGE_FREETYPE
 	select BR2_PACKAGE_WOWBOX64 # the x86 CPU named by wine.inf (0001)

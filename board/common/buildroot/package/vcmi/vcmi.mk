@@ -77,10 +77,10 @@ VCMI_CONF_OPTS = \
 	-DFORCE_BUNDLED_FL=ON
 
 # As a game of bare_app (0001-client-link-to-bare_app.patch): frames and
-# gamepad over bare_app's src/games/game_ipc.h, read from the SDK's apps/
+# gamepad over bare_app's games/game_ipc.h, installed in staging by bare-app
 ifeq ($(BR2_PACKAGE_BARE_APP_HOMM3),y)
-VCMI_CONF_OPTS += \
-	-DVCMI_BARE_APP_IPC=$(BR2_EXTERNAL_SDK_PATH)/../../../apps/bare_app/src
+VCMI_DEPENDENCIES += bare-app
+VCMI_CONF_OPTS += -DVCMI_BARE_APP_IPC=$(STAGING_DIR)/usr/include/bare_app
 endif
 
 # Every C++ unit pulls in Boost and VCMI's big headers, about 1 GB of RAM

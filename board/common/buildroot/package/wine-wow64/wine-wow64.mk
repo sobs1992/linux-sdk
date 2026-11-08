@@ -123,13 +123,15 @@ WINE_WOW64_CONF_OPTS += --without-opengl
 endif
 
 # winebare.drv (0003) speaks the protocol of bare_app's ports/wine: its
-# header is put next to the driver (makedep looks for includes only in
-# the tree, not in CPPFLAGS)
+# header, in staging from bare-app, is put next to the driver (makedep
+# looks for includes only in the tree, not in CPPFLAGS). Before configure:
+# dependencies are built by then, not before the patches.
+WINE_WOW64_DEPENDENCIES += bare-app
 define WINE_WOW64_WINEBARE_PROTO
-	$(INSTALL) -m 0644 $(BR2_EXTERNAL_SDK_PATH)/../../../apps/bare_app/ports/wine/winebare_proto.h \
+	$(INSTALL) -m 0644 $(STAGING_DIR)/usr/include/bare_app/wine/winebare_proto.h \
 		$(@D)/dlls/winebare.drv/
 endef
-WINE_WOW64_POST_PATCH_HOOKS += WINE_WOW64_WINEBARE_PROTO
+WINE_WOW64_PRE_CONFIGURE_HOOKS += WINE_WOW64_WINEBARE_PROTO
 
 # install-lib: the programs and dlls, not the headers and build tools.
 # It makes bin/winecfg etc. links to "wine" but not bin/wine itself.

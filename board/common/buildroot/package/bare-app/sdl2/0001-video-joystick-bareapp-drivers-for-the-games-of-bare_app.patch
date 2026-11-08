@@ -3,9 +3,10 @@ Subject: [PATCH] video, joystick: bareapp drivers for the games of bare_app
 
 bare_app, the launcher of the OdroidLinux SDK, starts each game as a
 program of its own and hands it a socket and shared memory as
-descriptors 3 and 4 (bare_app's src/games/game_ipc.h, copied next to the
-drivers at build time with its gamepad names, core/input.h). With these
-drivers an SDL game runs under bare_app unchanged:
+descriptors 3 and 4 (bare_app's src/games/game_ipc.h and its game side
+game_ipc_client.h, copied next to the drivers at build time with the
+gamepad names of core/input.h). With these drivers an SDL game runs
+under bare_app unchanged:
 
 - video "bareapp": picked by itself when the descriptors are there (and
   SDL_VIDEODRIVER names no other driver). The desktop mode is the size of
@@ -36,14 +37,14 @@ Signed-off-by: Sobs <antohasobne@gmail.com>
   include/SDL_config.h.in                    |   2 +
   src/joystick/SDL_joystick.c                |   3 +
   src/joystick/SDL_sysjoystick.h             |   1 +
-  src/joystick/bareapp/SDL_bareappjoystick.c | 342 ++++++++++++++++++++
+  src/joystick/bareapp/SDL_bareappjoystick.c | 342 ++++++++++++++++++++++
   src/joystick/linux/SDL_sysjoystick.c       |  19 +-
   src/video/SDL_sysvideo.h                   |   1 +
   src/video/SDL_video.c                      |   3 +
-  src/video/bareapp/SDL_bareapp.h            |  84 +++++
-  src/video/bareapp/SDL_bareapplink.c        | 481 +++++++++++++++++++++++++++++
-  src/video/bareapp/SDL_bareappvideo.c       | 439 ++++++++++++++++++++++++++
-  12 files changed, 1424 insertions(+), 1 deletion(-)
+  src/video/bareapp/SDL_bareapp.h            |  85 ++++++
+  src/video/bareapp/SDL_bareapplink.c        | 436 ++++++++++++++++++++++++++++
+  src/video/bareapp/SDL_bareappvideo.c       | 439 +++++++++++++++++++++++++++++
+  12 files changed, 1380 insertions(+), 1 deletion(-)
 
 diff --git a/configure b/configure
 index c6c94e1..7096d1d 100755
@@ -618,10 +619,10 @@ index 2f6c631..a403932 100644
  #endif
 diff --git a/src/video/bareapp/SDL_bareapp.h b/src/video/bareapp/SDL_bareapp.h
 new file mode 100644
-index 0000000..6be1377
+index 0000000..47c796b
 --- /dev/null
 +++ b/src/video/bareapp/SDL_bareapp.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
@@ -646,8 +647,9 @@ index 0000000..6be1377
 +/*
 + * The link to bare_app, the launcher of the OdroidLinux SDK, when it
 + * started this program as one of its games: a socket and shared memory
-+ * inherited as descriptors 3 and 4 (game_ipc.h, copied from bare_app's
-+ * src/games/ at build time, with its gamepad names in input.h). Frames go
++ * inherited as descriptors 3 and 4 (game_ipc.h and its game side
++ * game_ipc_client.h, copied from bare_app at build time, with its gamepad
++ * names in input.h). Frames go
 + * to bare_app's video layer, its gamepad comes back as messages. Shared by
 + * the video driver (frames, keyboard) and the joystick driver.
 + */
@@ -659,7 +661,7 @@ index 0000000..6be1377
 +#include "SDL_error.h"
 +#include "SDL_rect.h"
 +
-+#include "game_ipc.h"
++#include "game_ipc_client.h"
 +#include "input.h"
 +
 +/* Whether bare_app started us and we may take its link: the descriptors are
@@ -708,10 +710,10 @@ index 0000000..6be1377
 +#endif /* SDL_bareapp_h_ */
 diff --git a/src/video/bareapp/SDL_bareapplink.c b/src/video/bareapp/SDL_bareapplink.c
 new file mode 100644
-index 0000000..567aba8
+index 0000000..3922c03
 --- /dev/null
 +++ b/src/video/bareapp/SDL_bareapplink.c
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,436 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
@@ -737,13 +739,8 @@ index 0000000..567aba8
 +#ifdef SDL_VIDEO_DRIVER_BAREAPP
 +
 +#include <errno.h>
-+#include <fcntl.h>
 +#include <string.h>
-+#include <sys/mman.h>
-+#include <sys/socket.h>
-+#include <sys/stat.h>
 +#include <time.h>
-+#include <unistd.h>
 +
 +#include "SDL_hints.h"
 +#include "SDL_log.h"
@@ -764,9 +761,8 @@ index 0000000..567aba8
 +{
 +    int checked;            /* the descriptors were looked at */
 +    SDL_bool there;         /* ...and are bare_app's */
-+    struct game_shm *shm;   /* mapped by BAREAPP_Open() */
-+    size_t shm_size;
-+    unsigned back;          /* the frame we draw into */
++    struct game_link app;   /* opened by BAREAPP_Open() */
++    SDL_bool open;
 +    SDL_bool gone;
 +    struct game_msg ring[RING];
 +    Uint32 head;
@@ -787,24 +783,6 @@ index 0000000..567aba8
 +    "power",
 +};
 +
-+static SDL_bool DescriptorsAreBareApp(void)
-+{
-+    struct stat st;
-+    int type = 0;
-+    socklen_t len = sizeof(type);
-+    Uint32 magic = 0;
-+
-+    if (fstat(GAME_IPC_SOCK, &st) < 0 || !S_ISSOCK(st.st_mode) ||
-+        getsockopt(GAME_IPC_SOCK, SOL_SOCKET, SO_TYPE, &type, &len) < 0 || type != SOCK_SEQPACKET) {
-+        return SDL_FALSE;
-+    }
-+    if (fstat(GAME_IPC_SHM, &st) < 0 || st.st_size < GAME_SHM_HEADER ||
-+        pread(GAME_IPC_SHM, &magic, sizeof(magic), 0) != sizeof(magic) || magic != GAME_SHM_MAGIC) {
-+        return SDL_FALSE;
-+    }
-+    return SDL_TRUE;
-+}
-+
 +SDL_bool BAREAPP_Available(void)
 +{
 +    const char *driver = SDL_GetHint(SDL_HINT_VIDEODRIVER);
@@ -813,7 +791,7 @@ index 0000000..567aba8
 +        return SDL_FALSE;
 +    }
 +    if (!ba.checked) {
-+        ba.there = DescriptorsAreBareApp();
++        ba.there = game_link_there() ? SDL_TRUE : SDL_FALSE;
 +        ba.checked = 1;
 +    }
 +    return ba.there;
@@ -828,36 +806,21 @@ index 0000000..567aba8
 +
 +int BAREAPP_Open(void)
 +{
-+    struct stat st;
 +    const char *scale = SDL_getenv("SDL_BAREAPP_SCALE");
 +    const char *filter = SDL_getenv("SDL_BAREAPP_FILTER");
 +    int fps;
-+    void *map;
 +
-+    if (ba.shm) {
++    if (ba.open) {
 +        return 0;
 +    }
 +    if (!BAREAPP_Available()) {
 +        return SDL_SetError("bareapp: not started by bare_app");
 +    }
-+    if (fstat(GAME_IPC_SHM, &st) < 0) {
++    /* programs this game starts do not keep bare_app's link open */
++    if (game_link_open(&ba.app, false) < 0) {
 +        return SDL_SetError("bareapp: shared memory: %s", strerror(errno));
 +    }
-+    map = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, GAME_IPC_SHM, 0);
-+    if (map == MAP_FAILED) {
-+        return SDL_SetError("bareapp: mmap: %s", strerror(errno));
-+    }
-+    ba.shm = map;
-+    ba.shm_size = (size_t)st.st_size;
-+    if (game_shm_size(ba.shm) > ba.shm_size) {
-+        munmap(map, ba.shm_size);
-+        ba.shm = NULL;
-+        return SDL_SetError("bareapp: shared memory too small for its frames");
-+    }
-+    /* programs this game starts do not keep bare_app's link open */
-+    fcntl(GAME_IPC_SOCK, F_SETFD, FD_CLOEXEC);
-+    fcntl(GAME_IPC_SHM, F_SETFD, FD_CLOEXEC);
-+    ba.back = 0; /* the producer starts with buffer 0 (game_ipc.h) */
++    ba.open = SDL_TRUE;
 +
 +    ba.scale = SCALE_FIT;
 +    if (scale && SDL_strcasecmp(scale, "stretch") == 0) {
@@ -869,7 +832,7 @@ index 0000000..567aba8
 +    fps = EnvInt("SDL_BAREAPP_FPS", 60);
 +    ba.period_ns = fps > 0 ? 1000000000ull / (Uint64)fps : 0;
 +    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "bareapp: frames %ux%u, %s, %s, %d fps at most",
-+                ba.shm->width, ba.shm->height,
++                ba.app.shm->width, ba.app.shm->height,
 +                ba.scale == SCALE_STRETCH ? "stretched" : ba.scale == SCALE_INTEGER ? "whole multiples" : "fitted",
 +                ba.nearest ? "nearest" : "linear", fps);
 +    return 0;
@@ -877,28 +840,26 @@ index 0000000..567aba8
 +
 +int BAREAPP_FrameWidth(void)
 +{
-+    return ba.shm ? (int)ba.shm->width : 0;
++    return ba.open ? (int)ba.app.shm->width : 0;
 +}
 +
 +int BAREAPP_FrameHeight(void)
 +{
-+    return ba.shm ? (int)ba.shm->height : 0;
++    return ba.open ? (int)ba.app.shm->height : 0;
 +}
 +
 +SDL_bool BAREAPP_Poll(void)
 +{
 +    struct game_msg msg;
-+    ssize_t n;
++    int n;
 +
-+    if (!ba.shm || ba.gone) {
++    if (!ba.open || ba.gone) {
 +        return SDL_FALSE;
 +    }
-+    while ((n = recv(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT)) > 0) {
-+        if (n == sizeof(msg)) {
-+            ba.ring[ba.head++ % RING] = msg;
-+        }
++    while ((n = game_link_recv(&msg)) > 0) {
++        ba.ring[ba.head++ % RING] = msg;
 +    }
-+    if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
++    if (n < 0) {
 +        ba.gone = SDL_TRUE;
 +        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "bareapp: bare_app is gone");
 +    }
@@ -1101,19 +1062,18 @@ index 0000000..567aba8
 +
 +void BAREAPP_Present(const void *pixels, int w, int h, int pitch, BAREAPP_Format format)
 +{
-+    struct game_shm *shm = ba.shm;
-+    struct game_msg msg;
++    struct game_shm *shm = ba.app.shm;
 +    int fw, fh, stride;
 +    Uint8 *frame;
 +    SDL_Rect r;
 +
-+    if (!shm || ba.gone || w <= 0 || h <= 0) {
++    if (!ba.open || ba.gone || w <= 0 || h <= 0) {
 +        return;
 +    }
 +    fw = (int)shm->width;
 +    fh = (int)shm->height;
 +    stride = (int)shm->stride;
-+    frame = game_shm_frame(shm, ba.back);
++    frame = game_link_frame(&ba.app);
 +    Place(w, h, fw, fh, &r);
 +    Fill(frame, stride, 0, 0, fw, r.y);
 +    Fill(frame, stride, 0, r.y + r.h, fw, fh - r.y - r.h);
@@ -1122,10 +1082,7 @@ index 0000000..567aba8
 +    Draw(pixels, w, h, pitch, format, frame, stride, &r);
 +
 +    Pace();
-+    ba.back = atomic_exchange(&shm->middle, ba.back | GAME_SHM_FRESH) & ~GAME_SHM_FRESH;
-+    SDL_zero(msg);
-+    msg.type = GAME_MSG_FRAME;
-+    if (send(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 && errno == EPIPE) {
++    if (game_link_publish(&ba.app) < 0) {
 +        ba.gone = SDL_TRUE;
 +    }
 +}

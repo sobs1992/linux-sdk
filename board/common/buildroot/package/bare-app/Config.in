@@ -51,7 +51,8 @@ config BR2_PACKAGE_BARE_APP_HOMM3
 	  The VCMI engine (package vcmi, GPLv2) for Heroes III. The game
 	  data is not included: copy Data, Maps and Mp3 of an original
 	  installation to heroes3/ of the games partition (GAMES, /games),
-	  from a PC or with scripts/homm3-install.sh. In the SDK:
+	  from a PC or with scripts/homm3-install.sh. Also switches
+	  bare_app's GAME_HOMM3 on. In the SDK:
 	  APPS_CONFIG += bare-app.HOMM3=y
 
 config BR2_PACKAGE_BARE_APP_HALFLIFE
@@ -72,8 +73,7 @@ config BR2_PACKAGE_BARE_APP_HALFLIFE
 	  and valve_russian for Russian menus, to halflife/ of the games
 	  partition (GAMES, /games), from a PC or with
 	  scripts/halflife-install.sh.
-	  bare_app needs GAME_HALFLIFE (on in ogu_defconfig and
-	  oga_defconfig). In the SDK:
+	  Also switches bare_app's GAME_HALFLIFE on. In the SDK:
 	  APPS_CONFIG += bare-app.HALFLIFE=y
 
 config BR2_PACKAGE_BARE_APP_WINE
@@ -91,7 +91,7 @@ config BR2_PACKAGE_BARE_APP_WINE
 	  played by bare_app_wine. Each game is a directory of the games
 	  partition (GAMES, /games) with a wine.ini, which names the
 	  program and the controls (apps/bare_app/ports/wine/wine.ini).
-	  bare_app needs GAME_WINE (on in ogu_defconfig). In the SDK:
+	  Also switches bare_app's GAME_WINE on. In the SDK:
 	  APPS_CONFIG += bare-app.WINE=y
 
 config BR2_PACKAGE_BARE_APP_SDL
