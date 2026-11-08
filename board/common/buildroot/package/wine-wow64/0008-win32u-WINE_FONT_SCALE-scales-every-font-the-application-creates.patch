@@ -1,0 +1,63 @@
+From ceba03476de6d1bdb60be17b6fd67f557c30dd58 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 8 Nov 2026 21:33:16 +0100
+Subject: [PATCH] win32u: $WINE_FONT_SCALE scales every font the application
+ creates
+
+For games whose text is too small on a small screen: the heights (and
+widths) of the fonts CreateFont() makes are multiplied by the factor.
+---
+ dlls/win32u/font.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/dlls/win32u/font.c b/dlls/win32u/font.c
+index ed2ef52..4da16e2 100644
+--- a/dlls/win32u/font.c
++++ b/dlls/win32u/font.c
+@@ -4899,6 +4899,35 @@ UINT WINAPI NtGdiGetTextCharsetInfo( HDC hdc, FONTSIGNATURE *fs, DWORD flags )
+     return ret;
+ }
+ 
++/* $WINE_FONT_SCALE: every font the application creates this much bigger
++ * (1.25: a 16 pixel font is made 20 pixels), for games whose text is too
++ * small on a small screen. A game that spaces its lines and breaks its
++ * text by its own numbers rather than the font's metrics only has room
++ * for a little of it (Daemonica: 1.25). 0 = off. */
++static double font_scale(void)
++{
++    static double scale = -1.0;
++
++    if (scale < 0)
++    {
++        const char *env = getenv( "WINE_FONT_SCALE" );
++        double v = env ? atof( env ) : 0.0;
++
++        scale = v > 0.0 && v != 1.0 ? v : 0.0;
++        if (scale) TRACE( "fonts scaled by %g\n", scale );
++    }
++    return scale;
++}
++
++static void scale_logfont( LOGFONTW *lf )
++{
++    double scale = font_scale();
++
++    if (!scale) return;
++    if (lf->lfHeight) lf->lfHeight = lf->lfHeight * scale + (lf->lfHeight < 0 ? -0.5 : 0.5);
++    if (lf->lfWidth) lf->lfWidth = lf->lfWidth * scale + 0.5;
++}
++
+ /***********************************************************************
+  *           NtGdiHfontCreate   (win32u.@)
+  */
+@@ -4934,6 +4963,7 @@ HFONT WINAPI NtGdiHfontCreate( const void *logfont, ULONG size, ULONG type,
+     if (!(fontPtr = malloc( sizeof(*fontPtr) ))) return 0;
+ 
+     fontPtr->logfont = *plf;
++    scale_logfont( &fontPtr->logfont );
+ 
+     if (!(hFont = alloc_gdi_handle( &fontPtr->obj, NTGDI_OBJ_FONT, &fontobj_funcs )))
+     {
+-- 
+2.53.0
+
