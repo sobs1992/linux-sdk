@@ -122,23 +122,50 @@ def sources(spec):
     return found
 
 
-def make_cover(spec, dst, crop):
-    """spec: a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py);
-    crop: center, top, bottom, left, right, "X Y SIZE" in its pixels, or fit
-    (all of it, on a blurred, darker copy of itself)"""
-    try:
-        from PIL import Image, ImageEnhance, ImageFilter
-    except ImportError:
-        die("covers need Python's PIL (apt install python3-pil)")
-    m = re.match(r"^(.+\.(?:lod|wad)):([^/:]+)$", spec, re.I)
+def load_picture(spec, alpha=False):
+    """a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py)"""
+    from PIL import Image
+    m = re.match(r"^(.+\.(?:lod|wad|exe|dll)):([^/:]+)$", spec, re.I)
     try:
         if m:
             import game_pictures
             im = game_pictures.picture(sdk_path(m.group(1)), m.group(2))
         else:
-            im = Image.open(sdk_path(spec)).convert("RGB")
+            im = Image.open(sdk_path(spec))
+        return im.convert("RGBA" if alpha else "RGB")
     except Exception as e:
         die("cover %s: %s" % (spec, e))
+
+
+def make_cover(spec, dst, crop, back_spec=None):
+    """spec: a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py);
+    crop: center, top, bottom, left, right, "X Y SIZE" in its pixels, or fit
+    (all of it, on a blurred, darker copy of itself). With back_spec (a
+    picture likewise) the picture, transparent around (an icon), is put
+    whole on that one blurred and darker, with a shadow."""
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+    except ImportError:
+        die("covers need Python's PIL (apt install python3-pil)")
+    if back_spec:
+        back = load_picture(back_spec)
+        w, h = back.size
+        s = min(w, h)
+        back = back.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))
+        back = back.resize((COVER, COVER), Image.LANCZOS).filter(ImageFilter.GaussianBlur(6))
+        back = ImageEnhance.Brightness(back).enhance(0.5).convert("RGBA")
+        fg = load_picture(spec, alpha=True)
+        k = COVER * 0.8 / max(fg.size)
+        fg = fg.resize((round(fg.width * k), round(fg.height * k)), Image.LANCZOS)
+        shadow = Image.new("RGBA", fg.size, (0, 0, 0, 0))
+        shadow.putalpha(fg.getchannel("A").point(lambda a: a * 7 // 10))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(6))
+        x, y = (COVER - fg.width) // 2, (COVER - fg.height) // 2
+        back.alpha_composite(shadow, (x + 4, y + 6))
+        back.alpha_composite(fg, (x, y))
+        back.convert("RGB").save(dst, optimize=True)
+        return
+    im = load_picture(spec)
     w, h = im.size
     if crop == "fit":
         k = COVER / max(w, h)
@@ -208,7 +235,8 @@ def install_game(name, g, games, data):
             die("[%s] overlay %s: not a directory" % (name, o))
         shutil.copytree(o, dest, dirs_exist_ok=True)
     if g.get("cover"):
-        make_cover(g["cover"], os.path.join(dest, "cover.png"), g.get("cover_crop", "center"))
+        make_cover(g["cover"], os.path.join(dest, "cover.png"), g.get("cover_crop", "center"),
+                   g.get("cover_back"))
     if g.get("run"):
         env = dict(os.environ, GAME_DIR=dest, SOURCE=src or "", SDK_DIR=SDK, DATA_DIR=data)
         run([sdk_path(g["run"])], env=env, cwd=SDK)

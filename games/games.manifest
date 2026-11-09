@@ -42,10 +42,13 @@ games_free_mb = 1024
 ;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
 ;   cover      a picture for bare_app's home screen: a picture file, or
 ;              ARCHIVE:ENTRY, a picture inside the game's .lod (Heroes III)
-;              or .wad (Doom), see scripts/game_pictures.py; cropped square
-;              (cover_crop: center, top, bottom, left, right, "X Y SIZE" in
-;              the picture's pixels, or fit: all of it on a blurred copy),
-;              240x240, saved as cover.png in the game's directory
+;              or .wad (Doom), or PROGRAM.exe:icon, its biggest icon, see
+;              scripts/game_pictures.py; cropped square (cover_crop: center,
+;              top, bottom, left, right, "X Y SIZE" in the picture's
+;              pixels, or fit: all of it on a blurred copy), 240x240, saved
+;              as cover.png in the game's directory
+;   cover_back a picture (as cover) blurred and darker under the cover, which
+;              is then put whole on it: for an icon
 ; ---------------------------------------------------------------------------
 
 [heroes3]
@@ -70,9 +73,10 @@ exclude = patcher_x86 log.txt
 exclude = patcher_x86 dump.txt
 overlay = games/hota/overlay
 run = games/hota/prepare.sh
-; a battle of the original's loading screen (HotA.lod is encrypted)
-cover = /media/D/Games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:loadbar.pcx
-cover_crop = right
+; HotA's horn (the HD exe's icon) on the original's dark game selection
+; background (HotA.lod, with HotA's own pictures, is encrypted)
+cover = /media/D/Games/HoMM3_HotA/game_info/data/h3hota HD.exe:icon
+cover_back = /media/D/Games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:GamSelBk.pcx
 
 [doom]
 ; Doom: the firmware has doom1.wad (bare-app.DOOM_WAD=y); /games/doom gets

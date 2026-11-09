@@ -10,6 +10,8 @@ scripts/games-image.py ("cover = ARCHIVE:ENTRY" in games/games.manifest).
         8-bit with a palette or 24-bit. HotA.lod is encrypted: not readable.
   .wad  Doom (doom1.wad, doom.wad...): a picture lump (TITLEPIC, a patch)
         in the PLAYPAL colours, stretched to Doom's 1.2-high pixels.
+  .exe  A Windows program (or .dll): entry "icon", its biggest icon picture
+        (PNG or 32-bit), with its transparency (RGBA).
 
 Only the directory and the one entry are read, and every size taken from
 a file is checked first: a damaged or encrypted archive is an error, never
@@ -118,8 +120,73 @@ def _doom_patch(data, palette, what):
     return im.convert("RGB").resize((w, h * 6 // 5), Image.LANCZOS)
 
 
+def _pe_icons(path):
+    """the icon pictures (RT_ICON resources) of a PE file: their data"""
+    with open(path, "rb") as f:
+        d = f.read(MAX_ENTRY * 4)
+    _check(d[:2] == b"MZ" and len(d) >= 0x40, path + ": not a Windows program")
+    pe = struct.unpack_from("<I", d, 0x3C)[0]
+    _check(pe + 26 <= len(d) and d[pe:pe + 4] == b"PE\0\0", path + ": not a PE file")
+    nsec, optsz = struct.unpack_from("<HH", d, pe + 6)[0], struct.unpack_from("<H", d, pe + 20)[0]
+    magic = struct.unpack_from("<H", d, pe + 24)[0]
+    dd = pe + 24 + (96 if magic == 0x10B else 112) + 8 * 2	# IMAGE_DIRECTORY_ENTRY_RESOURCE
+    _check(dd + 8 <= len(d), path + ": no resources")
+    rva = struct.unpack_from("<I", d, dd)[0]
+    secs = []
+    for i in range(nsec):
+        o = pe + 24 + optsz + 40 * i
+        _check(o + 40 <= len(d), path + ": damaged sections")
+        vs, va, rs, ra = struct.unpack_from("<IIII", d, o + 8)
+        secs.append((va, max(vs, rs), ra))
+
+    def off(r):
+        for va, size, ra in secs:
+            if va <= r < va + size and ra + r - va < len(d):
+                return ra + r - va
+        raise PictureError(path + ": damaged resources")
+
+    base = off(rva)
+
+    def entries(o):
+        _check(o + 16 <= len(d), path + ": damaged resources")
+        n = sum(struct.unpack_from("<HH", d, o + 12))
+        _check(n < 4096 and o + 16 + 8 * n <= len(d), path + ": damaged resources")
+        return [struct.unpack_from("<II", d, o + 16 + 8 * i) for i in range(n)]
+
+    icons = []
+    for kind, p1 in entries(base):
+        if kind != 3 or not p1 & 0x80000000:	# RT_ICON
+            continue
+        for _name, p2 in entries(base + (p1 & 0x7FFFFFFF)):
+            for _lang, p3 in entries(base + (p2 & 0x7FFFFFFF)):
+                _check(base + p3 + 8 <= len(d), path + ": damaged resources")
+                drva, size = struct.unpack_from("<II", d, base + p3)
+                o = off(drva)
+                _check(size <= MAX_ENTRY and o + size <= len(d), path + ": damaged icon")
+                icons.append(d[o:o + size])
+    return icons
+
+
+def _icon(data, what):
+    """an RT_ICON picture: PNG, or a 32-bit DIB (bottom-up, twice as high)"""
+    import io
+    from PIL import Image
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        im = Image.open(io.BytesIO(data))
+        _check(im.width * im.height <= MAX_PIXELS, what + ": too big")
+        return im.convert("RGBA")
+    _check(len(data) >= 40, what + ": damaged icon")
+    hsize, w, h2, _planes, bpp = struct.unpack_from("<IiiHH", data, 0)
+    h = h2 // 2
+    _check(bpp == 32 and 0 < w <= 1024 and 0 < h <= 1024 and hsize + w * h * 4 <= len(data),
+           what + ": only 32-bit icons")
+    im = Image.frombuffer("RGBA", (w, h), data[hsize:hsize + w * h * 4], "raw", "BGRA", 0, -1)
+    return im.copy()
+
+
 def picture(archive, entry):
-    """the picture ENTRY of ARCHIVE (.lod, .wad) as an RGB PIL image"""
+    """the picture ENTRY of ARCHIVE (.lod, .wad, .exe) as a PIL image: RGB,
+    an icon RGBA"""
     try:
         import PIL  # noqa: F401
     except ImportError:
@@ -133,7 +200,17 @@ def picture(archive, entry):
         _check("PLAYPAL" in lumps and len(lumps["PLAYPAL"]) >= 768, archive + ": no PLAYPAL")
         _check(entry.upper() in lumps, "%s: no %s" % (archive, entry))
         return _doom_patch(lumps[entry.upper()], lumps["PLAYPAL"][:768], what)
-    raise PictureError("%s: .lod or .wad only" % archive)
+    if ext in (".exe", ".dll"):
+        _check(entry.lower() == "icon", "%s: only \"icon\"" % what)
+        icons = []
+        for data in _pe_icons(archive):
+            try:
+                icons.append(_icon(data, what))
+            except PictureError:
+                pass	# 8-bit and smaller ones
+        _check(icons, archive + ": no 32-bit icon")
+        return max(icons, key=lambda im: im.width * im.height)
+    raise PictureError("%s: .lod, .wad or .exe only" % archive)
 
 
 def entries(archive):

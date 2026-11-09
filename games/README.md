@@ -51,7 +51,8 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
 | `overlay` | каталог SDK, который кладётся поверх игры (`wine.ini`, настройки) |
 | `run` | программа после копирования, с `GAME_DIR`, `SOURCE`, `SDK_DIR`, `DATA_DIR` |
 | `data` | `SRC -> DST`: файлы на `/data` (путь от `/data`), можно несколько |
-| `cover` | картинка для главного экрана bare_app: обрезается в квадрат (`cover_crop`: `center`, `top`, `bottom`, `left`, `right`), 240×240, `cover.png` в каталоге игры |
+| `cover` | картинка для главного экрана bare_app: файл, `АРХИВ:ЗАПИСЬ` из `.lod`/`.wad` игры или `ПРОГРАММА.exe:icon` (её самый большой значок); обрезается в квадрат (`cover_crop`: `center`, `top`, `bottom`, `left`, `right`, `fit`), 240×240, `cover.png` в каталоге игры |
+| `cover_back` | картинка-фон для значка: размывается и затемняется, `cover` кладётся на неё целиком с тенью |
 
 Пути без `/` в начале — от корня SDK; в `file`, `data`, `cover` работают шаблоны.
 
@@ -61,8 +62,10 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
   русский перевод) через `scripts/homm3-install.sh`.
 - **hota** — та же установка Heroes III: Horn of the Abyss целиком, оригинальная
   игра (HotA 1.8 + HD-мод) под Wine: `hota/overlay/wine.ini` — экран 854×600 на весь
-  дисплей (по ширине 1:1, по высоте 600 → 480), лупа 1:1 на L1, крестовина ходит
-  героем; `hota/prepare.sh` ставит HD-моду разрешение 854×600 и вывод через GDI.
+  дисплей (по ширине 1:1, по высоте 600 → 480), L1 включает и выключает лупу 1:1,
+  правый стик прокручивает карту, крестовина ходит героем; `hota/prepare.sh` ставит
+  HD-моду разрешение 854×600 и вывод через GDI; обложка — рог из значка exe на фоне
+  из `H3bitmap.lod` (`cover_back`).
 - **halflife** — Half-Life из Steam через `scripts/halflife-install.sh`.
 - **pirates** — Sid Meier's Pirates! (Wine): `wine.ini` — пример из bare_app
   (`apps/bare_app/ports/wine/wine.ini`).
