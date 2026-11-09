@@ -1,0 +1,569 @@
+From 4c228bb447951ee1b7532c9baae6c73f8dbaf803 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 09:10:44 +0100
+Subject: [PATCH 10/11] kernelbase: WINE_FAST_MUTEX=1: unnamed mutexes taken
+ and released in user space
+
+Under WoW64 with an emulated x86 CPU a WaitForSingleObject() +
+ReleaseMutex() pair costs ~2.4 us on the GO Ultra: two system calls,
+each through Box64, wow64, ntdll and ntsync. Sid Meier's Pirates! wraps
+every small read of its pack files in such a pair: ~23000 of them when a
+ship comes into view at sea, ~100 ms of a 210 ms frame.
+
+With WINE_FAST_MUTEX=1 in the environment, the unnamed, non-inheritable
+mutexes of the program live in user space: taking and releasing one is
+an atomic operation, 0.2-0.3 us. The kernel mutex is still created and
+stays unowned while the fast path runs it. A thread that has to wait
+sleeps on an auto-reset event set by releases while someone waits;
+WaitAny of fast mutexes and other objects waits for both. Waits that
+cannot be done there (WaitAll, alertable ones, a duplicate for another
+process, RegisterWaitForSingleObjectEx) hand the mutex over to the
+kernel for good, with its owner's ownership when the owner asks, else
+once it is free. Waiters look every 500 ms whether the owner died owning
+it and then get it as abandoned.
+
+Opt-in per program: MsgWaitForMultipleObjects(), kernel32's
+RegisterWaitForSingleObject(), SetThreadpoolWait() and direct ntdll calls
+do not know fast mutexes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/kernelbase/kernelbase.h |   4 +
+ dlls/kernelbase/process.c    |  10 +-
+ dlls/kernelbase/sync.c       | 415 ++++++++++++++++++++++++++++++++++-
+ 3 files changed, 425 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/kernelbase/kernelbase.h b/dlls/kernelbase/kernelbase.h
+index e46ca0f..95d2ddd 100644
+--- a/dlls/kernelbase/kernelbase.h
++++ b/dlls/kernelbase/kernelbase.h
+@@ -56,4 +56,8 @@ static inline BOOL set_ntstatus( NTSTATUS status )
+ #define HeapReAlloc(heap, flags, ptr, size) RtlReAllocateHeap(heap, flags, ptr, size)
+ #define HeapFree(heap, flags, ptr) RtlFreeHeap(heap, flags, ptr)
+ 
++extern void fast_mutex_close( HANDLE handle );
++extern void *fast_mutex_duplicate( HANDLE source_process, HANDLE source, HANDLE dest_process, BOOL inherit );
++extern void fast_mutex_duplicated( void *fm, HANDLE source, HANDLE dest, DWORD options );
++
+ #endif /* __WINE_KERNELBASE_H */
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index 3656e40..2340bf5 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -425,6 +425,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CloseHandle( HANDLE handle )
+     else if (handle == (HANDLE)STD_ERROR_HANDLE)
+         handle = InterlockedExchangePointer( &NtCurrentTeb()->Peb->ProcessParameters->hStdError, 0 );
+ 
++    fast_mutex_close( handle );
+     return set_ntstatus( NtClose( handle ));
+ }
+ 
+@@ -744,8 +745,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH DuplicateHandle( HANDLE source_process, HANDLE sou
+                                                HANDLE dest_process, HANDLE *dest,
+                                                DWORD access, BOOL inherit, DWORD options )
+ {
+-    return set_ntstatus( NtDuplicateObject( source_process, source, dest_process, dest,
+-                                            access, inherit ? OBJ_INHERIT : 0, options ));
++    void *fm = fast_mutex_duplicate( source_process, source, dest_process, inherit );
++
++    if (!set_ntstatus( NtDuplicateObject( source_process, source, dest_process, dest,
++                                          access, inherit ? OBJ_INHERIT : 0, options )))
++        return FALSE;
++    if (fm) fast_mutex_duplicated( fm, source, dest ? *dest : 0, options );
++    return TRUE;
+ }
+ 
+ 
+diff --git a/dlls/kernelbase/sync.c b/dlls/kernelbase/sync.c
+index 3948f7e..2ceb3c8 100644
+--- a/dlls/kernelbase/sync.c
++++ b/dlls/kernelbase/sync.c
+@@ -319,6 +319,348 @@ static HANDLE normalize_std_handle( HANDLE handle )
+ }
+ 
+ 
++/***********************************************************************
++ * Fast mutexes
++ ***********************************************************************/
++
++/* With WINE_FAST_MUTEX=1 in the environment, the unnamed, non-inheritable
++ * mutexes of a program are taken and released in user space: a
++ * WaitForSingleObject() + ReleaseMutex() pair makes no system call. Under
++ * WoW64 with an emulated x86 CPU such a pair costs microseconds; Sid
++ * Meier's Pirates! wraps every small read of its pack files in one, ~23000
++ * of them when a ship comes into view at sea.
++ *
++ * The kernel mutex is still created but stays unowned while the fast path
++ * runs the mutex. A thread that has to wait sleeps on an auto-reset event
++ * that releases set while someone waits. Waits that cannot be done here
++ * (WaitAll, alertable waits, the mutex given to another process or to a
++ * thread pool wait) hand the mutex over to the kernel for good ("demote"
++ * it): once it is free, or with the ownership of its owner when the owner
++ * itself asks. A mutex whose owner died owning it is found by its waiters
++ * (they look every 500 ms) and given out as abandoned.
++ *
++ * Only for programs known to use their mutexes through these functions:
++ * MsgWaitForMultipleObjects(), kernel32's RegisterWaitForSingleObject(),
++ * SetThreadpoolWait() and direct ntdll calls do not know fast mutexes. */
++
++struct fast_mutex
++{
++    HANDLE kernel;      /* the kernel mutex */
++    LONG owner;         /* owning thread id; 0: free; FM_DEMOTED: the kernel's */
++    LONG count;         /* recursion count, the owner's */
++    LONG waiters;       /* threads sleeping on the event, or about to */
++    LONG abandoned;     /* its owner died owning it */
++    HANDLE event;       /* auto-reset, set by releases while someone waits */
++};
++
++#define FM_DEMOTED   ((LONG)-1)
++#define FM_SLOTS     1024
++#define FM_REMOVED   ((HANDLE)(ULONG_PTR)3)   /* never a handle */
++#define FM_POLL_MS   500
++
++static struct
++{
++    HANDLE handle;      /* 0: never used, FM_REMOVED: free again */
++    struct fast_mutex *fm;
++} fm_slots[FM_SLOTS];
++static LONG fm_used;
++static int fm_enabled = -1;
++
++static CRITICAL_SECTION fm_section;
++static CRITICAL_SECTION_DEBUG fm_section_debug =
++{
++    0, 0, &fm_section,
++    { &fm_section_debug.ProcessLocksList, &fm_section_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": fm_section") }
++};
++static CRITICAL_SECTION fm_section = { &fm_section_debug, -1, 0, 0, 0, 0 };
++
++static BOOL fast_mutexes(void)
++{
++    if (fm_enabled < 0)
++    {
++        WCHAR buf[4];
++        DWORD len = GetEnvironmentVariableW( L"WINE_FAST_MUTEX", buf, ARRAY_SIZE(buf) );
++
++        fm_enabled = len && len < ARRAY_SIZE(buf) && buf[0] != '0';
++        if (fm_enabled) TRACE( "fast mutexes\n" );
++    }
++    return fm_enabled;
++}
++
++static inline LONG fm_tid(void)
++{
++    return HandleToLong( NtCurrentTeb()->ClientId.UniqueThread );
++}
++
++static inline unsigned int fm_hash( HANDLE handle )
++{
++    return ((ULONG_PTR)handle >> 2) & (FM_SLOTS - 1);
++}
++
++static struct fast_mutex *fm_get( HANDLE handle )
++{
++    unsigned int i, n;
++    HANDLE h;
++
++    if (!*(volatile LONG *)&fm_used || !handle) return NULL;
++    for (i = fm_hash( handle ), n = 0; n < FM_SLOTS; i = (i + 1) & (FM_SLOTS - 1), n++)
++    {
++        if (!(h = *(HANDLE volatile *)&fm_slots[i].handle)) return NULL;
++        if (h == handle)
++        {
++            MemoryBarrier();
++            return fm_slots[i].fm;
++        }
++    }
++    return NULL;
++}
++
++static BOOL fm_add( HANDLE handle, struct fast_mutex *fm )
++{
++    unsigned int i, n;
++    BOOL ret = FALSE;
++
++    RtlEnterCriticalSection( &fm_section );
++    for (i = fm_hash( handle ), n = 0; n < FM_SLOTS; i = (i + 1) & (FM_SLOTS - 1), n++)
++    {
++        if (fm_slots[i].handle && fm_slots[i].handle != FM_REMOVED) continue;
++        fm_slots[i].fm = fm;
++        MemoryBarrier();
++        fm_slots[i].handle = handle;
++        InterlockedIncrement( &fm_used );
++        ret = TRUE;
++        break;
++    }
++    RtlLeaveCriticalSection( &fm_section );
++    return ret;
++}
++
++/* the mutex itself is not freed: other threads may still be waiting for it */
++static void fm_remove( HANDLE handle )
++{
++    unsigned int i, n;
++
++    RtlEnterCriticalSection( &fm_section );
++    for (i = fm_hash( handle ), n = 0; n < FM_SLOTS; i = (i + 1) & (FM_SLOTS - 1), n++)
++    {
++        if (!fm_slots[i].handle) break;
++        if (fm_slots[i].handle != handle) continue;
++        fm_slots[i].handle = FM_REMOVED;
++        break;
++    }
++    RtlLeaveCriticalSection( &fm_section );
++}
++
++static HANDLE fm_create( OBJECT_ATTRIBUTES *attr, DWORD access, BOOL owned )
++{
++    struct fast_mutex *fm;
++    HANDLE handle;
++
++    if (!(fm = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*fm) ))) return 0;
++    if (NtCreateMutant( &handle, access, attr, FALSE ))
++    {
++        RtlFreeHeap( GetProcessHeap(), 0, fm );
++        return 0;
++    }
++    fm->kernel = handle;
++    if (owned)
++    {
++        fm->owner = fm_tid();
++        fm->count = 1;
++    }
++    if (!fm_add( handle, fm ))
++    {
++        /* no room: an ordinary mutex */
++        if (owned) NtWaitForSingleObject( handle, FALSE, NULL );
++        RtlFreeHeap( GetProcessHeap(), 0, fm );
++    }
++    return handle;
++}
++
++static HANDLE fm_event( struct fast_mutex *fm )
++{
++    HANDLE event;
++
++    if (!fm->event && !NtCreateEvent( &event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE )
++            && InterlockedCompareExchangePointer( &fm->event, event, NULL ))
++        NtClose( event );
++    return fm->event;
++}
++
++/* WAIT_OBJECT_0, WAIT_ABANDONED_0, WAIT_TIMEOUT if another thread owns it,
++ * WAIT_FAILED if the kernel runs it now */
++static DWORD fm_try( struct fast_mutex *fm, LONG tid )
++{
++    LONG owner = *(volatile LONG *)&fm->owner;
++
++    if (owner == tid)
++    {
++        fm->count++;
++        return WAIT_OBJECT_0;
++    }
++    if (owner == FM_DEMOTED)
++    {
++        /* pass the news on to the next waiter */
++        if (*(volatile LONG *)&fm->waiters) NtSetEvent( fm->event, NULL );
++        return WAIT_FAILED;
++    }
++    if (owner || InterlockedCompareExchange( &fm->owner, tid, 0 )) return WAIT_TIMEOUT;
++    fm->count = 1;
++    if (!fm->abandoned) return WAIT_OBJECT_0;
++    fm->abandoned = 0;
++    return WAIT_ABANDONED_0;
++}
++
++static NTSTATUS fm_release( struct fast_mutex *fm )
++{
++    if (*(volatile LONG *)&fm->owner != fm_tid()) return STATUS_MUTANT_NOT_OWNED;
++    if (--fm->count) return STATUS_SUCCESS;
++    InterlockedExchange( &fm->owner, 0 );
++    if (*(volatile LONG *)&fm->waiters) NtSetEvent( fm->event, NULL );
++    return STATUS_SUCCESS;
++}
++
++/* frees a mutex whose owner thread is gone, as abandoned */
++static void fm_check_owner( struct fast_mutex *fm )
++{
++    LONG owner = *(volatile LONG *)&fm->owner;
++    HANDLE thread;
++    BOOL dead;
++
++    if (owner <= 0 || owner == fm_tid()) return;
++    if ((thread = OpenThread( SYNCHRONIZE, FALSE, owner )))
++    {
++        dead = !NtWaitForSingleObject( thread, FALSE, &(LARGE_INTEGER){ .QuadPart = 0 } );
++        NtClose( thread );
++    }
++    else dead = GetLastError() == ERROR_INVALID_PARAMETER;
++    if (!dead) return;
++    fm->abandoned = 1;
++    if (InterlockedCompareExchange( &fm->owner, 0, owner ) != owner) return;
++    WARN( "mutex %p abandoned by thread %04lx\n", fm->kernel, owner );
++    if (*(volatile LONG *)&fm->waiters) NtSetEvent( fm->event, NULL );
++}
++
++/* hands a mutex over to the kernel for good; FALSE if another thread owns it */
++static BOOL fm_demote( struct fast_mutex *fm )
++{
++    LONG tid = fm_tid(), owner = *(volatile LONG *)&fm->owner;
++
++    if (owner == FM_DEMOTED) return TRUE;
++    if (owner == tid)
++    {
++        /* the kernel mutex, never owned so far, takes our ownership */
++        LONG n;
++
++        for (n = fm->count; n > 0; n--) NtWaitForSingleObject( fm->kernel, FALSE, NULL );
++        fm->count = 0;
++        InterlockedExchange( &fm->owner, FM_DEMOTED );
++    }
++    else if (owner || InterlockedCompareExchange( &fm->owner, FM_DEMOTED, 0 )) return FALSE;
++    TRACE( "mutex %p demoted\n", fm->kernel );
++    if (*(volatile LONG *)&fm->waiters) NtSetEvent( fm->event, NULL );
++    return TRUE;
++}
++
++static void fm_demote_wait( struct fast_mutex *fm )
++{
++    LARGE_INTEGER poll = { .QuadPart = -FM_POLL_MS * 10000 };
++
++    while (!fm_demote( fm ))
++    {
++        if (!fm_event( fm )) return;
++        InterlockedIncrement( &fm->waiters );
++        if (*(volatile LONG *)&fm->owner > 0) NtWaitForSingleObject( fm->event, FALSE, &poll );
++        InterlockedDecrement( &fm->waiters );
++        fm_check_owner( fm );
++    }
++}
++
++/* WaitAny, not alertable, on handles of which some are fast mutexes (fms[i]) */
++static DWORD fm_wait_any( DWORD count, const HANDLE *handles, struct fast_mutex **fms, DWORD timeout )
++{
++    LONG tid = fm_tid();
++    HANDLE harr[MAXIMUM_WAIT_OBJECTS];
++    ULONGLONG end = 0;
++    LARGE_INTEGER time;
++    NTSTATUS status;
++    DWORD i, ret, slice;
++
++    for (;;)
++    {
++        for (i = 0; i < count; i++)
++        {
++            if (!fms[i]) continue;
++            if ((ret = fm_try( fms[i], tid )) == WAIT_FAILED) fms[i] = NULL;
++            else if (ret != WAIT_TIMEOUT) return ret + i;
++        }
++        if (!end) end = timeout == INFINITE ? ~(ULONGLONG)0 : GetTickCount64() + timeout;
++
++        for (i = 0; i < count; i++)
++        {
++            if (!fms[i])
++                harr[i] = handles[i];
++            else if (!(harr[i] = fm_event( fms[i] )))
++            {
++                SetLastError( ERROR_NOT_ENOUGH_MEMORY );
++                return WAIT_FAILED;
++            }
++        }
++        /* waiters first, then a last look: a release in between sets the event */
++        for (i = 0; i < count; i++) if (fms[i]) InterlockedIncrement( &fms[i]->waiters );
++        ret = WAIT_TIMEOUT;
++        for (i = 0; i < count && ret == WAIT_TIMEOUT; i++)
++            if (fms[i] && (ret = fm_try( fms[i], tid )) == WAIT_FAILED) ret = WAIT_TIMEOUT;
++        status = STATUS_WAIT_0 + count;
++        if (ret == WAIT_TIMEOUT)
++        {
++            ULONGLONG now = GetTickCount64();
++
++            slice = now >= end ? 0 : min( end - now, FM_POLL_MS );
++            status = NtWaitForMultipleObjects( count, harr, WaitAny, FALSE, get_nt_timeout( &time, slice ));
++        }
++        for (i = 0; i < count; i++) if (fms[i]) InterlockedDecrement( &fms[i]->waiters );
++
++        if (ret != WAIT_TIMEOUT) return ret + i - 1;
++        if (status < STATUS_WAIT_0 + count)
++        {
++            if (!fms[status]) return status;
++            continue;  /* a release */
++        }
++        if (status >= STATUS_ABANDONED_WAIT_0 && status < STATUS_ABANDONED_WAIT_0 + count) return status;
++        if (status == STATUS_TIMEOUT)
++        {
++            if (GetTickCount64() >= end) return WAIT_TIMEOUT;
++            for (i = 0; i < count; i++) if (fms[i]) fm_check_owner( fms[i] );
++            continue;
++        }
++        SetLastError( RtlNtStatusToDosError( status ));
++        return WAIT_FAILED;
++    }
++}
++
++/* fast mutexes among handles in fms[]; demotes them if the wait cannot use them */
++static BOOL fm_find( DWORD count, const HANDLE *handles, struct fast_mutex **fms, BOOL kernel_wait )
++{
++    BOOL found = FALSE;
++    DWORD i;
++
++    if (!*(volatile LONG *)&fm_used) return FALSE;
++    for (i = 0; i < count; i++)
++    {
++        if (!(fms[i] = fm_get( handles[i] ))) continue;
++        if (kernel_wait)
++        {
++            fm_demote_wait( fms[i] );
++            fms[i] = NULL;
++        }
++        else found = TRUE;
++    }
++    return found;
++}
++
++
+ /***********************************************************************
+  *           RegisterWaitForSingleObjectEx   (kernelbase.@)
+  */
+@@ -327,9 +669,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH RegisterWaitForSingleObjectEx( HANDLE handle, WA
+ {
+     HANDLE ret;
+ 
++    struct fast_mutex *fm;
++
+     TRACE( "%p %p %p %ld %ld\n", handle, callback, context, timeout, flags );
+ 
+     handle = normalize_std_handle( handle );
++    if ((fm = fm_get( handle ))) fm_demote_wait( fm );
+     if (!set_ntstatus( RtlRegisterWait( &ret, handle, callback, context, timeout, flags ))) return NULL;
+     return ret;
+ }
+@@ -341,11 +686,19 @@ HANDLE WINAPI DECLSPEC_HOTPATCH RegisterWaitForSingleObjectEx( HANDLE handle, WA
+ DWORD WINAPI DECLSPEC_HOTPATCH SignalObjectAndWait( HANDLE signal, HANDLE wait,
+                                                     DWORD timeout, BOOL alertable )
+ {
++    struct fast_mutex *fm;
+     NTSTATUS status;
+     LARGE_INTEGER time;
+ 
+     TRACE( "%p %p %ld %d\n", signal, wait, timeout, alertable );
+ 
++    if ((fm = fm_get( signal )) && *(volatile LONG *)&fm->owner != FM_DEMOTED)
++    {
++        if (!set_ntstatus( fm_release( fm ))) return WAIT_FAILED;
++        return WaitForSingleObjectEx( wait, timeout, alertable );
++    }
++    if ((fm = fm_get( wait ))) fm_demote_wait( fm );
++
+     status = NtSignalAndWaitForSingleObject( signal, wait, alertable, get_nt_timeout( &time, timeout ) );
+     if (HIWORD(status))
+     {
+@@ -404,11 +757,14 @@ DWORD WINAPI DECLSPEC_HOTPATCH WaitForSingleObject( HANDLE handle, DWORD timeout
+  */
+ DWORD WINAPI DECLSPEC_HOTPATCH WaitForSingleObjectEx( HANDLE handle, DWORD timeout, BOOL alertable )
+ {
++    struct fast_mutex *fm;
+     NTSTATUS status;
+     LARGE_INTEGER time;
+ 
+-    status = NtWaitForSingleObject( normalize_std_handle( handle ), alertable,
+-                                    get_nt_timeout( &time, timeout ) );
++    handle = normalize_std_handle( handle );
++    if (fm_find( 1, &handle, &fm, alertable )) return fm_wait_any( 1, &handle, &fm, timeout );
++
++    status = NtWaitForSingleObject( handle, alertable, get_nt_timeout( &time, timeout ) );
+ 
+     if (NT_ERROR(status))
+     {
+@@ -435,6 +791,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH WaitForMultipleObjects( DWORD count, const HANDLE
+ DWORD WINAPI DECLSPEC_HOTPATCH WaitForMultipleObjectsEx( DWORD count, const HANDLE *handles,
+                                                          BOOL wait_all, DWORD timeout, BOOL alertable )
+ {
++    struct fast_mutex *fms[MAXIMUM_WAIT_OBJECTS];
+     NTSTATUS status;
+     HANDLE hloc[MAXIMUM_WAIT_OBJECTS];
+     LARGE_INTEGER time;
+@@ -446,6 +803,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH WaitForMultipleObjectsEx( DWORD count, const HAND
+         return WAIT_FAILED;
+     }
+     for (i = 0; i < count; i++) hloc[i] = normalize_std_handle( handles[i] );
++    if (fm_find( count, hloc, fms, wait_all || alertable )) return fm_wait_any( count, hloc, fms, timeout );
+ 
+     status = NtWaitForMultipleObjects( count, hloc, wait_all ? WaitAll : WaitAny, alertable,
+                                        get_nt_timeout( &time, timeout ) );
+@@ -750,6 +1108,13 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateMutexExW( SECURITY_ATTRIBUTES *sa, LPCWSTR
+ 
+     get_create_object_attributes( &attr, &nameW, sa, name );
+ 
++    if (!name && !(sa && sa->bInheritHandle) && (access & SYNCHRONIZE) && fast_mutexes()
++            && (ret = fm_create( &attr, access, (flags & CREATE_MUTEX_INITIAL_OWNER) != 0 )))
++    {
++        SetLastError( ERROR_SUCCESS );
++        return ret;
++    }
++
+     status = NtCreateMutant( &ret, access, &attr, (flags & CREATE_MUTEX_INITIAL_OWNER) != 0 );
+     if (status == STATUS_OBJECT_NAME_EXISTS)
+         SetLastError( ERROR_ALREADY_EXISTS );
+@@ -782,10 +1147,56 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenMutexW( DWORD access, BOOL inherit, LPCWSTR
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH ReleaseMutex( HANDLE handle )
+ {
++    struct fast_mutex *fm;
++
++    if ((fm = fm_get( handle )) && *(volatile LONG *)&fm->owner != FM_DEMOTED)
++        return set_ntstatus( fm_release( fm ));
+     return set_ntstatus( NtReleaseMutant( handle, NULL ));
+ }
+ 
+ 
++/***********************************************************************
++ *           fast_mutex_close
++ *
++ * CloseHandle(): forgets a fast mutex handle.
++ */
++void fast_mutex_close( HANDLE handle )
++{
++    if (fm_get( handle )) fm_remove( handle );
++}
++
++
++/***********************************************************************
++ *           fast_mutex_duplicate
++ *
++ * DuplicateHandle(): returns the fast mutex of a handle to duplicate in
++ * this process, or NULL (a duplicate for another process demotes it).
++ */
++void *fast_mutex_duplicate( HANDLE source_process, HANDLE source, HANDLE dest_process, BOOL inherit )
++{
++    struct fast_mutex *fm;
++
++    if (source_process != GetCurrentProcess() || !(fm = fm_get( source ))) return NULL;
++    if (dest_process == GetCurrentProcess() && !inherit) return fm;
++    fm_demote_wait( fm );
++    return NULL;
++}
++
++
++/***********************************************************************
++ *           fast_mutex_duplicated
++ *
++ * DuplicateHandle(): the duplicate of a fast mutex is one too.
++ */
++void fast_mutex_duplicated( void *ptr, HANDLE source, HANDLE dest, DWORD options )
++{
++    struct fast_mutex *fm = ptr;
++
++    if (dest && !fm_add( dest, fm )) fm_demote_wait( fm );
++    if (options & DUPLICATE_CLOSE_SOURCE) fm_remove( source );
++}
++
++
+ /***********************************************************************
+  * Semaphores
+  ***********************************************************************/
+-- 
+2.53.0
+

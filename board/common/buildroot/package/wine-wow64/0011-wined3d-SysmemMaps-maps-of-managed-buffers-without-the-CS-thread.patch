@@ -1,0 +1,239 @@
+From 7d9e5139af511157abc4e08f5781448b66074e8f Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 09:10:44 +0100
+Subject: [PATCH 11/11] wined3d: SysmemMaps: maps of buffers pinned in system
+ memory without the CS thread
+
+A map of a buffer pinned in system memory (D3DPOOL_MANAGED, or any with
+software vertex processing) went through the CS thread and waited for
+it, and so did the unmap: two round trips. Pirates! makes ~40 small
+managed index buffers a frame (~86 round trips, ~7 ms of the main
+thread's frame on the GO Ultra) and ~200 buffers when a ship comes into
+view (~30 ms).
+
+With the setting SysmemMaps (WINE_D3D_CONFIG=SysmemMaps=1), once the CS
+thread is done with the buffer, as a map through it waits for too, the
+client thread hands out its system memory copy itself, and the unmap
+queues what the map would have done on the CS thread: the written range
+marked for upload. Nested maps of a buffer are counted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/wined3d/buffer.c          |  8 +++
+ dlls/wined3d/cs.c              | 91 ++++++++++++++++++++++++++++++++++
+ dlls/wined3d/wined3d_main.c    |  2 +
+ dlls/wined3d/wined3d_private.h |  8 +++
+ 4 files changed, 109 insertions(+)
+
+diff --git a/dlls/wined3d/buffer.c b/dlls/wined3d/buffer.c
+index c95f424..55fc6db 100644
+--- a/dlls/wined3d/buffer.c
++++ b/dlls/wined3d/buffer.c
+@@ -128,6 +128,14 @@ static void wined3d_buffer_invalidate_range(struct wined3d_buffer *buffer, DWORD
+         ERR("Buffer %p does not have any up to date location.\n", buffer);
+ }
+ 
++/* SysmemMaps: what a write map of a buffer pinned in system memory does on
++ * the CS thread (see buffer_resource_sub_resource_map()), for a map made by
++ * the client thread. */
++void wined3d_buffer_invalidate_sysmem_range(struct wined3d_buffer *buffer, unsigned int offset, unsigned int size)
++{
++    wined3d_buffer_invalidate_range(buffer, ~WINED3D_LOCATION_SYSMEM, offset, size);
++}
++
+ void wined3d_buffer_invalidate_location(struct wined3d_buffer *buffer, uint32_t location)
+ {
+     wined3d_buffer_invalidate_range(buffer, location, 0, 0);
+diff --git a/dlls/wined3d/cs.c b/dlls/wined3d/cs.c
+index 54a1d3c..350f7d1 100644
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -157,6 +157,7 @@ enum wined3d_cs_op
+     WINED3D_CS_OP_GENERATE_MIPMAPS,
+     WINED3D_CS_OP_DECODE,
+     WINED3D_CS_OP_EXECUTE_COMMAND_LIST,
++    WINED3D_CS_OP_SYSMEM_DIRTY,
+     WINED3D_CS_OP_STOP,
+ };
+ 
+@@ -477,6 +478,13 @@ struct wined3d_cs_map
+     HRESULT *hr;
+ };
+ 
++struct wined3d_cs_sysmem_dirty
++{
++    enum wined3d_cs_op opcode;
++    struct wined3d_resource *resource;
++    unsigned int offset, size;
++};
++
+ struct wined3d_cs_unmap
+ {
+     enum wined3d_cs_op opcode;
+@@ -650,6 +658,7 @@ static const char *debug_cs_op(enum wined3d_cs_op op)
+         WINED3D_TO_STR(WINED3D_CS_OP_GENERATE_MIPMAPS);
+         WINED3D_TO_STR(WINED3D_CS_OP_DECODE);
+         WINED3D_TO_STR(WINED3D_CS_OP_EXECUTE_COMMAND_LIST);
++        WINED3D_TO_STR(WINED3D_CS_OP_SYSMEM_DIRTY);
+         WINED3D_TO_STR(WINED3D_CS_OP_STOP);
+ #undef WINED3D_TO_STR
+     }
+@@ -2507,6 +2516,78 @@ static void wined3d_cs_exec_map(struct wined3d_cs *cs, const void *data)
+             op->sub_resource_idx, op->map_ptr, op->box, op->flags);
+ }
+ 
++static void wined3d_cs_exec_sysmem_dirty(struct wined3d_cs *cs, const void *data)
++{
++    const struct wined3d_cs_sysmem_dirty *op = data;
++
++    wined3d_buffer_invalidate_sysmem_range(buffer_from_resource(op->resource), op->offset, op->size);
++}
++
++/* SysmemMaps: maps of buffers pinned in system memory (D3DPOOL_MANAGED ones,
++ * or all buffers with software vertex processing) without a round trip to
++ * the CS thread for the map and another one for the unmap. Once the CS
++ * thread is done with the buffer (a map through it waits for that too), its
++ * system memory copy stays valid and in place: the client thread hands it
++ * out itself, and the unmap queues what the map would have done on the CS
++ * thread, marking the written range for upload. Programs that make new
++ * buffers every frame waited for each round trip (Sid Meier's Pirates! makes
++ * ~40 small index buffers a frame and ~200 buffers when a ship comes into
++ * view: ~30 ms of waiting on the GO Ultra). */
++static bool sysmem_map_buffer(struct wined3d_device_context *context, struct wined3d_resource *resource,
++        struct wined3d_map_desc *map_desc, const struct wined3d_box *box, uint32_t flags)
++{
++    struct wined3d_client_resource *client = &resource->client;
++    struct wined3d_buffer *buffer;
++
++    if (!wined3d_settings.sysmem_maps || resource->type != WINED3D_RTYPE_BUFFER || !resource->pin_sysmem
++            || (flags & WINED3D_MAP_DISCARD) || context != &context->device->cs->c)
++        return false;
++
++    if (!client->sysmem_mapped)
++    {
++        buffer = buffer_from_resource(resource);
++        wined3d_resource_wait_idle(resource);
++        /* No CS command uses the buffer any more: its state holds still. */
++        if (!(buffer->locations & WINED3D_LOCATION_SYSMEM) || !resource->heap_memory || resource->map_count)
++            return false;
++        client->sysmem_box = *box;
++        client->sysmem_write = false;
++    }
++    else if (box->right <= box->left || client->sysmem_box.right <= client->sysmem_box.left)
++    {
++        client->sysmem_box.left = client->sysmem_box.right = 0;
++    }
++    else
++    {
++        client->sysmem_box.left = min(client->sysmem_box.left, box->left);
++        client->sysmem_box.right = max(client->sysmem_box.right, box->right);
++    }
++
++    map_desc->data = (uint8_t *)resource->heap_memory + box->left;
++    map_desc->row_pitch = map_desc->slice_pitch = resource->size;
++    client->sysmem_write |= !!(flags & WINED3D_MAP_WRITE);
++    ++client->sysmem_mapped;
++    return true;
++}
++
++static void sysmem_unmap_buffer(struct wined3d_device_context *context, struct wined3d_resource *resource)
++{
++    struct wined3d_client_resource *client = &resource->client;
++    const struct wined3d_box *box = &client->sysmem_box;
++    struct wined3d_cs_sysmem_dirty *op;
++
++    if (--client->sysmem_mapped || !client->sysmem_write)
++        return;
++    if (!(op = wined3d_device_context_require_space(context, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT)))
++        return;
++    op->opcode = WINED3D_CS_OP_SYSMEM_DIRTY;
++    op->resource = resource;
++    op->offset = box->left;
++    op->size = box->right - box->left;
++    wined3d_device_context_reference_resource(context, resource);
++    wined3d_device_context_submit(context, WINED3D_CS_QUEUE_DEFAULT);
++}
++
+ HRESULT wined3d_device_context_emit_map(struct wined3d_device_context *context,
+         struct wined3d_resource *resource, unsigned int sub_resource_idx,
+         struct wined3d_map_desc *map_desc, const struct wined3d_box *box, unsigned int flags)
+@@ -2518,6 +2599,9 @@ HRESULT wined3d_device_context_emit_map(struct wined3d_device_context *context,
+      * increasing the map count would be visible to applications. */
+     wined3d_not_from_cs(context->device->cs);
+ 
++    if (sysmem_map_buffer(context, resource, map_desc, box, flags))
++        return WINED3D_OK;
++
+     if (((flags & (WINED3D_MAP_DISCARD | WINED3D_MAP_NOOVERWRITE))
+             || (wined3d_settings.heap_maps >= 2 && heap_map_buffer(resource, flags)))
+             && context->ops->map_upload_bo(context, resource, sub_resource_idx, map_desc, box, flags))
+@@ -2569,6 +2653,12 @@ HRESULT wined3d_device_context_emit_unmap(struct wined3d_device_context *context
+     struct upload_bo bo;
+     HRESULT hr;
+ 
++    if (resource->client.sysmem_mapped && context == &context->device->cs->c)
++    {
++        sysmem_unmap_buffer(context, resource);
++        return WINED3D_OK;
++    }
++
+     if (context->ops->unmap_upload_bo(context, resource, sub_resource_idx, &box, &bo))
+     {
+         unsigned int row_pitch, slice_pitch;
+@@ -3071,6 +3161,7 @@ static void (* const wined3d_cs_op_handlers[])(struct wined3d_cs *cs, const void
+     /* WINED3D_CS_OP_GENERATE_MIPMAPS            */ wined3d_cs_exec_generate_mipmaps,
+     /* WINED3D_CS_OP_DECODE                      */ wined3d_cs_exec_decode,
+     /* WINED3D_CS_OP_EXECUTE_COMMAND_LIST        */ wined3d_cs_exec_execute_command_list,
++    /* WINED3D_CS_OP_SYSMEM_DIRTY                */ wined3d_cs_exec_sysmem_dirty,
+ };
+ 
+ void wined3d_device_context_emit_execute_command_list(struct wined3d_device_context *context,
+diff --git a/dlls/wined3d/wined3d_main.c b/dlls/wined3d/wined3d_main.c
+index dd13912..ab15cfb 100644
+--- a/dlls/wined3d/wined3d_main.c
++++ b/dlls/wined3d/wined3d_main.c
+@@ -428,6 +428,8 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
+         }
+         if (!get_config_key_dword(hkey, appkey, env, "HeapMaps", &wined3d_settings.heap_maps))
+             ERR_(winediag)("Setting heap maps to %u.\n", wined3d_settings.heap_maps);
++        if (!get_config_key_dword(hkey, appkey, env, "SysmemMaps", &wined3d_settings.sysmem_maps))
++            ERR_(winediag)("Setting system memory maps to %u.\n", wined3d_settings.sysmem_maps);
+         if (!get_config_key_dword(hkey, appkey, env, "strict_shader_math", &wined3d_settings.strict_shader_math))
+             ERR_(winediag)("Setting strict shader math to %#x.\n", wined3d_settings.strict_shader_math);
+         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
+diff --git a/dlls/wined3d/wined3d_private.h b/dlls/wined3d/wined3d_private.h
+index c5945a3..662c6e7 100644
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -492,6 +492,7 @@ struct wined3d_settings
+     bool cb_access_map_w;
+     bool ffp_hlsl;
+     unsigned int heap_maps;
++    unsigned int sysmem_maps;
+ };
+ 
+ extern struct wined3d_settings wined3d_settings;
+@@ -3254,6 +3255,12 @@ struct wined3d_client_resource
+     bool heap_vm;       /* heap_shadow is from VirtualAlloc() */
+     bool heap_watched;  /* with write watches that work */
+     bool heap_noov;     /* the current map is a NOOVERWRITE one */
++
++    /* SysmemMaps: maps of a buffer pinned in system memory made by the
++     * client thread itself (see sysmem_map_buffer() in cs.c). */
++    struct wined3d_box sysmem_box;  /* written, of all the maps; empty: all */
++    unsigned int sysmem_mapped;     /* map count */
++    bool sysmem_write;
+ };
+ 
+ static inline BOOL wined3d_resource_access_is_managed(unsigned int access)
+@@ -3966,6 +3973,7 @@ void wined3d_buffer_copy_bo_address(struct wined3d_buffer *dst_buffer, struct wi
+ DWORD wined3d_buffer_get_memory(struct wined3d_buffer *buffer, struct wined3d_context *context,
+         struct wined3d_bo_address *data);
+ void wined3d_buffer_invalidate_location(struct wined3d_buffer *buffer, uint32_t location);
++void wined3d_buffer_invalidate_sysmem_range(struct wined3d_buffer *buffer, unsigned int offset, unsigned int size);
+ void wined3d_buffer_load(struct wined3d_buffer *buffer, struct wined3d_context *context,
+         const struct wined3d_state *state);
+ BOOL wined3d_buffer_load_location(struct wined3d_buffer *buffer,
+-- 
+2.53.0
+
