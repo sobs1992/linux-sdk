@@ -94,6 +94,19 @@ config BR2_PACKAGE_BARE_APP_WINE
 	  Also switches bare_app's GAME_WINE on. In the SDK:
 	  APPS_CONFIG += bare-app.WINE=y
 
+config BR2_PACKAGE_BARE_APP_STREAM
+	bool "stream the screen and the sound (RTSP)"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_LIBOPENH264
+	help
+	  bare_app's RTSP server (switched on in Settings > Internet):
+	  the screen as H.264 by OpenH264 (BSD licence) and the games'
+	  sound through the ALSA loopback (snd-aloop in the kernel).
+	  Open rtsp://<device>:8554/live in VLC. Switches bare_app's
+	  STREAM on. In the SDK: APPS_CONFIG += bare-app.STREAM=y
+
 config BR2_PACKAGE_BARE_APP_SDL
 	bool "SDL2 games (SDL's bareapp drivers)"
 	depends on !BR2_STATIC_LIBS # sdl2
