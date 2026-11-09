@@ -59,6 +59,10 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
 
 - **heroes3** — Heroes III: `Data`, `Maps`, `MP3` установки и моды VCMI (HotA,
   русский перевод) через `scripts/homm3-install.sh`.
+- **hota** — та же установка Heroes III: Horn of the Abyss целиком, оригинальная
+  игра (HotA 1.8 + HD-мод) под Wine: `hota/overlay/wine.ini` — экран 854×600 на весь
+  дисплей (по ширине 1:1, по высоте 600 → 480), лупа 1:1 на L1, крестовина ходит
+  героем; `hota/prepare.sh` ставит HD-моду разрешение 854×600 и вывод через GDI.
 - **halflife** — Half-Life из Steam через `scripts/halflife-install.sh`.
 - **pirates** — Sid Meier's Pirates! (Wine): `wine.ini` — пример из bare_app
   (`apps/bare_app/ports/wine/wine.ini`).

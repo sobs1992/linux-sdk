@@ -1,0 +1,177 @@
+From 6bb53a7ecaa1e310d08e3d7a65ac367c54c9ba7d Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 21:42:55 +0100
+Subject: [PATCH] winebare.drv: cursor pictures
+
+The cursor's picture (colour with its alpha or its mask, or monochrome)
+goes to bare_app_wine in a memfd with WB_CURSOR (protocol version 3),
+which draws it at the pointer instead of an arrow: Heroes III's hand,
+sword and horse.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/winebare.drv/window.c | 143 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 137 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/winebare.drv/window.c b/dlls/winebare.drv/window.c
+index 761b165..23be22a 100644
+--- a/dlls/winebare.drv/window.c
++++ b/dlls/winebare.drv/window.c
+@@ -214,20 +214,151 @@ void BARE_DestroyWindow(HWND hwnd)
+     bare_send_zorder();
+ }
+ 
++#define MAX_CURSOR 256
++
++/* A colour cursor's pixels into BITS (BGRA, straight alpha): its own alpha,
++ * or opaque where the AND mask is clear */
++static BOOL color_cursor_bits(HBITMAP color, HBITMAP mask, const BITMAP *bm, UINT *bits)
++{
++    char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
++    BITMAPINFO *info = (BITMAPINFO *)buffer;
++    unsigned int width_bytes = (bm->bmWidth + 31) / 32 * 4, i, j;
++    unsigned char *mask_bits;
++    BOOL has_alpha = FALSE, ret = FALSE;
++    HDC hdc = NtGdiCreateCompatibleDC(0);
++
++    memset(info, 0, sizeof(info->bmiHeader));
++    info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++    info->bmiHeader.biWidth = bm->bmWidth;
++    info->bmiHeader.biHeight = -bm->bmHeight;
++    info->bmiHeader.biPlanes = 1;
++    info->bmiHeader.biBitCount = 32;
++    info->bmiHeader.biCompression = BI_RGB;
++    info->bmiHeader.biSizeImage = bm->bmWidth * bm->bmHeight * 4;
++    if (!NtGdiGetDIBitsInternal(hdc, color, 0, bm->bmHeight, bits, info, DIB_RGB_COLORS, 0, 0))
++        goto done;
++    for (i = 0; i < bm->bmWidth * bm->bmHeight && !has_alpha; i++)
++        has_alpha = (bits[i] & 0xff000000) != 0;
++    if (!has_alpha)
++    {
++        info->bmiHeader.biBitCount = 1;
++        info->bmiHeader.biSizeImage = width_bytes * bm->bmHeight;
++        if (!(mask_bits = malloc(info->bmiHeader.biSizeImage))) goto done;
++        if (mask && NtGdiGetDIBitsInternal(hdc, mask, 0, bm->bmHeight, mask_bits, info,
++                                           DIB_RGB_COLORS, 0, 0))
++        {
++            for (i = 0; i < bm->bmHeight; i++)
++                for (j = 0; j < bm->bmWidth; j++)
++                    if (!((mask_bits[i * width_bytes + j / 8] << (j % 8)) & 0x80))
++                        bits[i * bm->bmWidth + j] |= 0xff000000;
++        }
++        else
++            for (i = 0; i < bm->bmWidth * bm->bmHeight; i++) bits[i] |= 0xff000000;
++        free(mask_bits);
++    }
++    ret = TRUE;
++done:
++    NtGdiDeleteObjectApp(hdc);
++    return ret;
++}
++
++/* A monochrome cursor (AND mask over XOR mask, twice as high) into BITS:
++ * pixels that invert the screen are drawn black */
++static void mono_cursor_bits(const unsigned char *mask, unsigned int stride, unsigned int width,
++                             unsigned int height, UINT *bits)
++{
++    unsigned int i, j;
++
++    for (i = 0; i < height; i++)
++        for (j = 0; j < width; j++)
++        {
++            int and = (mask[i * stride + j / 8] << (j % 8)) & 0x80;
++            int xor = (mask[(i + height) * stride + j / 8] << (j % 8)) & 0x80;
++
++            *bits++ = and && !xor ? 0 : xor && !and ? 0xffffffff : 0xff000000;
++        }
++}
++
++/* The cursor's picture into a memfd for bare_app_wine; -1 if it has none */
++static int cursor_picture(HCURSOR cursor, struct wb_msg *msg)
++{
++    UNICODE_STRING module = { 0 }, res_name = { 0 };
++    ICONINFO info;
++    BITMAP bm;
++    UINT *bits = NULL, i;
++    size_t size;
++    int fd = -1;
++    BOOL visible = FALSE;
++
++    if (!NtUserGetIconInfo(cursor, &info, &module, &res_name, NULL, 0)) return -1;
++    if (!NtGdiExtGetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(bm), &bm))
++        goto done;
++    if (!info.hbmColor) bm.bmHeight /= 2;
++    if (bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > MAX_CURSOR || bm.bmHeight > MAX_CURSOR)
++        goto done;
++    size = (size_t)bm.bmWidth * bm.bmHeight * 4;
++    if ((fd = bare_shm_create(size, (void **)&bits)) < 0) goto done;
++    if (info.hbmColor)
++    {
++        if (!color_cursor_bits(info.hbmColor, info.hbmMask, &bm, bits)) goto failed;
++    }
++    else
++    {
++        unsigned int stride = ((bm.bmWidth + 15) >> 3) & ~1;
++        unsigned char *mask = malloc(stride * bm.bmHeight * 2);
++
++        if (!mask) goto failed;
++        if (!NtGdiGetBitmapBits(info.hbmMask, stride * bm.bmHeight * 2, mask))
++        {
++            free(mask);
++            goto failed;
++        }
++        mono_cursor_bits(mask, stride, bm.bmWidth, bm.bmHeight, bits);
++        free(mask);
++    }
++    for (i = 0; i < bm.bmWidth * bm.bmHeight && !visible; i++)
++        visible = (bits[i] >> 24) != 0;
++    msg->cursor.visible = visible;
++    msg->cursor.width = bm.bmWidth;
++    msg->cursor.height = bm.bmHeight;
++    msg->cursor.hot_x = min(info.xHotspot, bm.bmWidth - 1);
++    msg->cursor.hot_y = min(info.yHotspot, bm.bmHeight - 1);
++    munmap(bits, size);
++    goto done;
++
++failed:
++    munmap(bits, size);
++    close(fd);
++    fd = -1;
++done:
++    if (info.hbmColor) NtGdiDeleteObjectApp(info.hbmColor);
++    if (info.hbmMask) NtGdiDeleteObjectApp(info.hbmMask);
++    return fd;
++}
++
+ /***********************************************************************
+  *           BARE_SetCursor
+  *
+- * bare_app_wine draws an arrow while the program shows a cursor at all.
++ * bare_app_wine draws the cursor's picture (an arrow if it has none) at
++ * the pointer while the program shows a cursor at all.
+  */
+ void BARE_SetCursor(HWND hwnd, HCURSOR cursor)
+ {
+-    static int shown = -1;
++    static HCURSOR last = (HCURSOR)~(UINT_PTR)0;
+     struct wb_msg msg = { .type = WB_CURSOR };
++    int fd = -1;
+ 
+-    if (shown == !!cursor) return;
+-    shown = !!cursor;
+-    msg.cursor.visible = shown;
+-    bare_send(&msg, -1);
++    if (cursor == last) return;
++    last = cursor;
++    if (cursor && (fd = cursor_picture(cursor, &msg)) < 0)
++    {
++        msg.cursor.visible = 1;
++        msg.cursor.width = msg.cursor.height = 0;
++    }
++    TRACE("cursor %p: %ux%u hotspot %d,%d visible %u\n", cursor, msg.cursor.width,
++          msg.cursor.height, msg.cursor.hot_x, msg.cursor.hot_y, msg.cursor.visible);
++    bare_send(&msg, fd);
++    if (fd >= 0) close(fd);
+ }
+ 
+ /***********************************************************************

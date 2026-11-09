@@ -5,7 +5,8 @@ USB-C port (S42usbnet: the board is 192.168.7.2; OGU_HOST to change it).
 
   ogu-ctl.py shot:FILE.png        screenshot of bare_app's layers (SIGUSR1)
   ogu-ctl.py a wait:2000 down a   buttons: up down left right a b x y l r l2 r2 f1..f6,
-                                  NAME:MS holds one for MS (default 100)
+                                  NAME:MS holds one for MS (default 100; over 150
+                                  written again every 2 ms by ogu-hold)
   ogu-ctl.py stick:1,0.5,800      left stick at X,Y (-1..1, up and left negative)
                                   for MS (default 300), then back to the center
   ogu-ctl.py rstick:0,-1          the right stick
@@ -110,6 +111,10 @@ def run(steps):
             need_hold()
             script.append("%s $%s %d %d %d %d %d; sleep 0.15" %
                           (HOLD, dev, ms, ax[0], val(ax, v[0]), ay[0], val(ay, v[1])))
+        elif name.lower() in KEYS and int(arg or 100) > 150:
+            # held longer than a poll of gpio-keys-polled: written again and again
+            need_hold()
+            script.append("%s $K %d k%d 1; sleep 0.15" % (HOLD, int(arg), KEYS[name.lower()]))
         elif name.lower() in KEYS:
             code = KEYS[name.lower()]
             press, release = event(1, code, 1) + event(0, 0, 0), event(1, code, 0) + event(0, 0, 0)

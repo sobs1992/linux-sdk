@@ -1,0 +1,37 @@
+From cf3ea75068b8175c29e95eb6bd8a6d40745066b5 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 9 Nov 2026 21:38:42 +0100
+Subject: [PATCH] server: existing files of read-only file systems opened for
+ reading when asked for writing too
+
+Old games open their data files read-write and only read them (Heroes of
+Might and Magic III opens its LOD archives so and quits when that fails).
+A game's directory mounted read-only made them fail with access denied:
+such an open now gets a read-only file; writes to it fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ server/fd.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/server/fd.c b/server/fd.c
+index f70bec3..9918039 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -1982,6 +1982,16 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+             if ((access & FILE_UNIX_WRITE_ACCESS) || (flags & O_CREAT))
+                 fd->unix_fd = open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
+         }
++        /* an existing file of a read-only file system (a game's directory
++         * mounted read-only) asked for writing too: opened for reading, as
++         * old games open their data files read-write and only read them;
++         * writes to it fail */
++        else if (errno == EROFS && rw_mode != O_RDONLY && !(flags & (O_TRUNC | O_EXCL)) &&
++                 !(options & (FILE_DELETE_ON_CLOSE | FILE_DIRECTORY_FILE)))
++        {
++            if ((fd->unix_fd = open( name, O_RDONLY | (flags & ~O_CREAT), *mode )) == -1)
++                errno = EROFS;
++        }
+ 
+         if (fd->unix_fd == -1)
+         {
