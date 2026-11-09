@@ -1,0 +1,38 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app: frames that did not change are reported
+
+VCMI redraws at its frame rate whether anything changed or not, and the
+link publishes only frames that changed. Over a still picture (the
+adventure map at rest, a menu) bare_app got no frames at all, and its
+frame time graph took that for a stall: off the scale and red. The link
+now tells bare_app of each such frame with GAME_MSG_FRAME and the flag
+GAME_FRAME_SAME (game_ipc.h), nothing is published for it.
+
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -38,6 +38,9 @@
+ 
+ // bare_app's headers: the exchange and its gamepad button names
+ #include "games/game_ipc.h"
++#ifndef GAME_FRAME_SAME	// bare_app's headers before it
++#define GAME_FRAME_SAME 1u
++#endif
+ #include "core/input.h"
+ 
+ namespace
+@@ -648,7 +651,15 @@
+ 	for(uint32_t y = 0; y < shm->height && same; y++)
+ 		same = !std::memcmp(&last[y * shm->width], reinterpret_cast<uint8_t *>(frame) + y * shm->stride, rowBytes);
+ 	if(same)
++	{
++		// a frame all the same: bare_app counts it, a still picture is no stall
++		game_msg msg = {};
++		msg.type = GAME_MSG_FRAME;
++		msg.flags = GAME_FRAME_SAME;
++		if(send(GAME_IPC_SOCK, &msg, sizeof(msg), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 && errno == EPIPE)
++			leave();
+ 		return;
++	}
+ 	for(uint32_t y = 0; y < shm->height; y++)
+ 		std::memcpy(&last[y * shm->width], reinterpret_cast<uint8_t *>(frame) + y * shm->stride, rowBytes);
+ 
