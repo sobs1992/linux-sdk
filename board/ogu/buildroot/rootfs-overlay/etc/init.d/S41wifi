@@ -28,9 +28,16 @@ up() {
 			sleep 1
 		done
 		wpa_supplicant -B -i $IFACE -c $CONF -P $WPA_PID
-		# the client first: the action script only restarts or renews it
-		udhcpc -b -S -i $IFACE -p $DHCP_PID
+		# wpa_cli runs the action script on every connection, which starts
+		# or renews the DHCP client. Joining a network takes a scan
+		# (seconds), so wpa_cli is there in time; a DHCP client started
+		# before it would ask in vain and wait 20 s to ask again.
 		wpa_cli -B -i $IFACE -a /etc/wpa_cli.action -P $CLI_PID
+		# a network joined before wpa_cli was there to see it
+		if wpa_cli -i $IFACE status 2>/dev/null | grep -qx wpa_state=COMPLETED; then
+			WPA_ID=$(wpa_cli -i $IFACE status | sed -n 's/^id=//p') \
+				/etc/wpa_cli.action $IFACE CONNECTED
+		fi
 	) </dev/null >/dev/null 2>&1 &
 }
 
