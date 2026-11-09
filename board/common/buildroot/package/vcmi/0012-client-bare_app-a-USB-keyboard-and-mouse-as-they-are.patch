@@ -1,0 +1,452 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app: a USB keyboard and mouse as they are
+
+bare_app sends a game started with a keyboard and a mouse (Heroes III)
+the keys of a USB keyboard as Linux key codes (GAME_MSG_KEY) and a USB
+mouse's buttons and moves (GAME_MSG_MOUSE_*). The link makes SDL's
+events of them, so VCMI's own keyboard and mouse handling drives the
+game, its hotkeys included:
+
+- keys: SDL key events (the Linux codes mapped to SDL scancodes), and
+  while a text input waits, the characters they type on a US layout as
+  SDL text input. SDL's keyboard state does not see events pushed this
+  way, so the modifiers held come from the link (ctrlDown, shiftDown,
+  altDown) in InputHandler and InputSourceKeyboard. Once a USB keyboard
+  has been used, text inputs take its keys instead of opening the
+  on-screen keyboard.
+- the mouse: one SDL motion per poll, the counts as screen pixels from
+  where the cursor is (the stick moves it too; VCMI keeps its own
+  position while a button drags, so the link keeps the mouse's), presses
+  at the cursor with double clicks counted as SDL does (500 ms, 4 px),
+  the wheel. A move brings a magnifier the D-pad moved away back to the
+  cursor, as the stick does.
+
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -11,6 +11,8 @@
+ 
+ #include "../../lib/Point.h"
+ 
++#include <SDL_keyboard.h>
++
+ struct SDL_Surface;
+ struct game_shm;
+ enum class ColorScheme : int8_t;
+@@ -32,7 +34,9 @@
+ /// SDL game controller events, so VCMI's own controller support drives the
+ /// game. The D-pad moves the magnifier, or in the overview scrolls the
+ /// adventure map (elsewhere it swipes, as VCMI's right stick). F1 and F2
+-/// stand for the Ctrl and Shift keys while held.
++/// stand for the Ctrl and Shift keys while held. A USB keyboard and mouse
++/// plugged into the console come as they are (bare_app's GAME_MSG_KEY and
++/// GAME_MSG_MOUSE_*) and become SDL's keyboard, text and mouse events.
+ class BareAppLink
+ {
+ public:
+@@ -81,10 +85,15 @@
+ 	/// swiping meanwhile. The on-screen keyboard steps with it too.
+ 	Point mapScrollDirection();
+ 
+-	/// F1 and F2 held (GO Ultra keys: F2 and F3): the keyboard's Ctrl and
+-	/// Shift for VCMI
+-	bool ctrlDown() const { return ctrl; }
+-	bool shiftDown() const { return shift; }
++	/// F1 and F2 held (GO Ultra keys: F2 and F3), or a USB keyboard's: the
++	/// keyboard's Ctrl and Shift for VCMI (SDL's keyboard state does not
++	/// see keys the link sends)
++	bool ctrlDown() const { return ctrl || (keyMods & KMOD_CTRL); }
++	bool shiftDown() const { return shift || (keyMods & KMOD_SHIFT); }
++	bool altDown() const { return keyMods & KMOD_ALT; }
++	/// A USB keyboard has been used: text is typed on it, not on the
++	/// on-screen keyboard
++	bool hasKeyboard() const { return keyboardUsed; }
+ 
+ 	/// Moves VCMI's cursor, as its own controller cursor moves
+ 	static void moveCursor(const Point & position);
+@@ -110,6 +119,11 @@
+ 	static bool ultraKeysSet();
+ 	bool onUltraButton(int button, bool pressed);
+ 	void onRightStick(int axis, int value);
++	void onKey(int code, bool pressed);
++	void onMouseButton(int button, bool pressed);
++	void onMouseMove(int axis, int value);
++	void flushMouseMove();
++	Point mousePosition();
+ 	void pushButton(int sdlButton, bool pressed);
+ 	void pushKey(int scancode, bool pressed);
+ 	void pushAxis(int sdlAxis, int value);
+@@ -139,6 +153,16 @@
+ 	Point stick;		///< last left stick values
+ 	bool ctrl = false;	///< F1 held
+ 	bool shift = false;	///< F2 held
++	bool keyboardUsed = false;	///< a USB keyboard's key has come
++	uint16_t keyMods = KMOD_NONE;	///< SDL_Keymod of a USB keyboard's modifiers held
++	uint32_t mouseButtons = 0;	///< SDL_BUTTON() bits of a USB mouse's buttons held
++	Point mouseMoved;	///< a USB mouse's move not yet sent, in counts
++	Point mousePos;		///< where the USB mouse has put the cursor, in screen pixels
++	Point mouseEnginePos;	///< VCMI's cursor position then: when it moves otherwise (the stick), mousePos follows
++	uint32_t clickAt = 0;	///< SDL_GetTicks() of a USB mouse's last press
++	Point clickPos;
++	int clickButton = 0;
++	uint8_t clicks = 0;	///< presses in a row (a double click)
+ 	/// BARE_APP_VCMI_KEYS=ogu: the ODROID-GO Ultra's F keys (onUltraButton)
+ 	const bool ultraKeys = ultraKeysSet();
+ 	bool f5EndsTurn = false;	///< GO Ultra keys: F5 was pressed as end turn, not Escape
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -26,6 +26,7 @@
+ 
+ #include <SDL.h>
+ #include <tbb/parallel_for.h>
++#include <linux/input-event-codes.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+@@ -53,6 +54,84 @@
+ constexpr int stickDpadPress = GAME_AXIS_MAX / 2;
+ constexpr int stickDpadRelease = GAME_AXIS_MAX * 35 / 100;
+ constexpr uint32_t statsPeriodMs = 10000;
++/// A USB mouse's second press as quick and as near as this is a double click (SDL's own)
++constexpr uint32_t doubleClickMs = 500;
++constexpr int doubleClickDistance = 4;
++
++/// A USB keyboard's keys (Linux key codes) as SDL's, with the characters
++/// they type on a US layout, without and with Shift (0: none)
++struct UsbKey
++{
++	uint16_t code;
++	SDL_Scancode scancode;
++	char lower;
++	char upper;
++};
++
++constexpr UsbKey usbKeys[] = {
++	{ KEY_A, SDL_SCANCODE_A, 'a', 'A' }, { KEY_B, SDL_SCANCODE_B, 'b', 'B' }, { KEY_C, SDL_SCANCODE_C, 'c', 'C' },
++	{ KEY_D, SDL_SCANCODE_D, 'd', 'D' }, { KEY_E, SDL_SCANCODE_E, 'e', 'E' }, { KEY_F, SDL_SCANCODE_F, 'f', 'F' },
++	{ KEY_G, SDL_SCANCODE_G, 'g', 'G' }, { KEY_H, SDL_SCANCODE_H, 'h', 'H' }, { KEY_I, SDL_SCANCODE_I, 'i', 'I' },
++	{ KEY_J, SDL_SCANCODE_J, 'j', 'J' }, { KEY_K, SDL_SCANCODE_K, 'k', 'K' }, { KEY_L, SDL_SCANCODE_L, 'l', 'L' },
++	{ KEY_M, SDL_SCANCODE_M, 'm', 'M' }, { KEY_N, SDL_SCANCODE_N, 'n', 'N' }, { KEY_O, SDL_SCANCODE_O, 'o', 'O' },
++	{ KEY_P, SDL_SCANCODE_P, 'p', 'P' }, { KEY_Q, SDL_SCANCODE_Q, 'q', 'Q' }, { KEY_R, SDL_SCANCODE_R, 'r', 'R' },
++	{ KEY_S, SDL_SCANCODE_S, 's', 'S' }, { KEY_T, SDL_SCANCODE_T, 't', 'T' }, { KEY_U, SDL_SCANCODE_U, 'u', 'U' },
++	{ KEY_V, SDL_SCANCODE_V, 'v', 'V' }, { KEY_W, SDL_SCANCODE_W, 'w', 'W' }, { KEY_X, SDL_SCANCODE_X, 'x', 'X' },
++	{ KEY_Y, SDL_SCANCODE_Y, 'y', 'Y' }, { KEY_Z, SDL_SCANCODE_Z, 'z', 'Z' },
++	{ KEY_1, SDL_SCANCODE_1, '1', '!' }, { KEY_2, SDL_SCANCODE_2, '2', '@' }, { KEY_3, SDL_SCANCODE_3, '3', '#' },
++	{ KEY_4, SDL_SCANCODE_4, '4', '$' }, { KEY_5, SDL_SCANCODE_5, '5', '%' }, { KEY_6, SDL_SCANCODE_6, '6', '^' },
++	{ KEY_7, SDL_SCANCODE_7, '7', '&' }, { KEY_8, SDL_SCANCODE_8, '8', '*' }, { KEY_9, SDL_SCANCODE_9, '9', '(' },
++	{ KEY_0, SDL_SCANCODE_0, '0', ')' },
++	{ KEY_MINUS, SDL_SCANCODE_MINUS, '-', '_' }, { KEY_EQUAL, SDL_SCANCODE_EQUALS, '=', '+' },
++	{ KEY_LEFTBRACE, SDL_SCANCODE_LEFTBRACKET, '[', '{' }, { KEY_RIGHTBRACE, SDL_SCANCODE_RIGHTBRACKET, ']', '}' },
++	{ KEY_BACKSLASH, SDL_SCANCODE_BACKSLASH, '\\', '|' }, { KEY_SEMICOLON, SDL_SCANCODE_SEMICOLON, ';', ':' },
++	{ KEY_APOSTROPHE, SDL_SCANCODE_APOSTROPHE, '\'', '"' }, { KEY_GRAVE, SDL_SCANCODE_GRAVE, '`', '~' },
++	{ KEY_COMMA, SDL_SCANCODE_COMMA, ',', '<' }, { KEY_DOT, SDL_SCANCODE_PERIOD, '.', '>' },
++	{ KEY_SLASH, SDL_SCANCODE_SLASH, '/', '?' }, { KEY_SPACE, SDL_SCANCODE_SPACE, ' ', ' ' },
++	{ KEY_ENTER, SDL_SCANCODE_RETURN, 0, 0 }, { KEY_ESC, SDL_SCANCODE_ESCAPE, 0, 0 },
++	{ KEY_BACKSPACE, SDL_SCANCODE_BACKSPACE, 0, 0 }, { KEY_TAB, SDL_SCANCODE_TAB, 0, 0 },
++	{ KEY_CAPSLOCK, SDL_SCANCODE_CAPSLOCK, 0, 0 },
++	{ KEY_F1, SDL_SCANCODE_F1, 0, 0 }, { KEY_F2, SDL_SCANCODE_F2, 0, 0 }, { KEY_F3, SDL_SCANCODE_F3, 0, 0 },
++	{ KEY_F4, SDL_SCANCODE_F4, 0, 0 }, { KEY_F5, SDL_SCANCODE_F5, 0, 0 }, { KEY_F6, SDL_SCANCODE_F6, 0, 0 },
++	{ KEY_F7, SDL_SCANCODE_F7, 0, 0 }, { KEY_F8, SDL_SCANCODE_F8, 0, 0 }, { KEY_F9, SDL_SCANCODE_F9, 0, 0 },
++	{ KEY_F10, SDL_SCANCODE_F10, 0, 0 }, { KEY_F11, SDL_SCANCODE_F11, 0, 0 }, { KEY_F12, SDL_SCANCODE_F12, 0, 0 },
++	{ KEY_SYSRQ, SDL_SCANCODE_PRINTSCREEN, 0, 0 }, { KEY_SCROLLLOCK, SDL_SCANCODE_SCROLLLOCK, 0, 0 },
++	{ KEY_PAUSE, SDL_SCANCODE_PAUSE, 0, 0 }, { KEY_INSERT, SDL_SCANCODE_INSERT, 0, 0 },
++	{ KEY_HOME, SDL_SCANCODE_HOME, 0, 0 }, { KEY_PAGEUP, SDL_SCANCODE_PAGEUP, 0, 0 },
++	{ KEY_DELETE, SDL_SCANCODE_DELETE, 0, 0 }, { KEY_END, SDL_SCANCODE_END, 0, 0 },
++	{ KEY_PAGEDOWN, SDL_SCANCODE_PAGEDOWN, 0, 0 }, { KEY_RIGHT, SDL_SCANCODE_RIGHT, 0, 0 },
++	{ KEY_LEFT, SDL_SCANCODE_LEFT, 0, 0 }, { KEY_DOWN, SDL_SCANCODE_DOWN, 0, 0 }, { KEY_UP, SDL_SCANCODE_UP, 0, 0 },
++	{ KEY_NUMLOCK, SDL_SCANCODE_NUMLOCKCLEAR, 0, 0 },
++	{ KEY_KPSLASH, SDL_SCANCODE_KP_DIVIDE, 0, 0 }, { KEY_KPASTERISK, SDL_SCANCODE_KP_MULTIPLY, 0, 0 },
++	{ KEY_KPMINUS, SDL_SCANCODE_KP_MINUS, 0, 0 }, { KEY_KPPLUS, SDL_SCANCODE_KP_PLUS, 0, 0 },
++	{ KEY_KPENTER, SDL_SCANCODE_KP_ENTER, 0, 0 }, { KEY_KP1, SDL_SCANCODE_KP_1, 0, 0 },
++	{ KEY_KP2, SDL_SCANCODE_KP_2, 0, 0 }, { KEY_KP3, SDL_SCANCODE_KP_3, 0, 0 }, { KEY_KP4, SDL_SCANCODE_KP_4, 0, 0 },
++	{ KEY_KP5, SDL_SCANCODE_KP_5, 0, 0 }, { KEY_KP6, SDL_SCANCODE_KP_6, 0, 0 }, { KEY_KP7, SDL_SCANCODE_KP_7, 0, 0 },
++	{ KEY_KP8, SDL_SCANCODE_KP_8, 0, 0 }, { KEY_KP9, SDL_SCANCODE_KP_9, 0, 0 }, { KEY_KP0, SDL_SCANCODE_KP_0, 0, 0 },
++	{ KEY_KPDOT, SDL_SCANCODE_KP_PERIOD, 0, 0 },
++	{ KEY_LEFTCTRL, SDL_SCANCODE_LCTRL, 0, 0 }, { KEY_LEFTSHIFT, SDL_SCANCODE_LSHIFT, 0, 0 },
++	{ KEY_LEFTALT, SDL_SCANCODE_LALT, 0, 0 }, { KEY_LEFTMETA, SDL_SCANCODE_LGUI, 0, 0 },
++	{ KEY_RIGHTCTRL, SDL_SCANCODE_RCTRL, 0, 0 }, { KEY_RIGHTSHIFT, SDL_SCANCODE_RSHIFT, 0, 0 },
++	{ KEY_RIGHTALT, SDL_SCANCODE_RALT, 0, 0 }, { KEY_RIGHTMETA, SDL_SCANCODE_RGUI, 0, 0 },
++	{ KEY_COMPOSE, SDL_SCANCODE_APPLICATION, 0, 0 },
++};
++
++/// The modifier a key is, KMOD_NONE for the others
++uint16_t usbKeyMod(SDL_Scancode scancode)
++{
++	switch(scancode)
++	{
++		case SDL_SCANCODE_LCTRL:  return KMOD_LCTRL;
++		case SDL_SCANCODE_RCTRL:  return KMOD_RCTRL;
++		case SDL_SCANCODE_LSHIFT: return KMOD_LSHIFT;
++		case SDL_SCANCODE_RSHIFT: return KMOD_RSHIFT;
++		case SDL_SCANCODE_LALT:   return KMOD_LALT;
++		case SDL_SCANCODE_RALT:   return KMOD_RALT;
++		case SDL_SCANCODE_LGUI:   return KMOD_LGUI;
++		case SDL_SCANCODE_RGUI:   return KMOD_RGUI;
++		default:                  return KMOD_NONE;
++	}
++}
+ 
+ constexpr uint32_t dpadBits = GP_BIT(GP_UP) | GP_BIT(GP_DOWN) | GP_BIT(GP_LEFT) | GP_BIT(GP_RIGHT);
+ 
+@@ -860,6 +939,151 @@
+ 	}
+ }
+ 
++/// A USB keyboard's key: SDL's key event, and the character it types while
++/// a text input waits for one (SDL sends both too)
++void BareAppLink::onKey(int code, bool pressed)
++{
++	const UsbKey * key = std::find_if(std::begin(usbKeys), std::end(usbKeys), [code](const UsbKey & k) { return k.code == code; });
++	if(key == std::end(usbKeys))
++		return;
++	keyboardUsed = true;
++
++	const uint16_t mod = usbKeyMod(key->scancode);
++	if(mod)
++		keyMods = pressed ? keyMods | mod : keyMods & ~mod;
++	if(key->scancode == SDL_SCANCODE_CAPSLOCK && pressed)
++		keyMods ^= KMOD_CAPS;
++	if(key->scancode == SDL_SCANCODE_NUMLOCKCLEAR && pressed)
++		keyMods ^= KMOD_NUM;
++	SDL_SetModState(static_cast<SDL_Keymod>(keyMods));
++
++	SDL_Event event = {};
++	event.type = pressed ? SDL_KEYDOWN : SDL_KEYUP;
++	event.key.timestamp = SDL_GetTicks();
++	event.key.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++	event.key.keysym.scancode = key->scancode;
++	event.key.keysym.sym = SDL_GetKeyFromScancode(key->scancode);
++	event.key.keysym.mod = keyMods;
++	SDL_PushEvent(&event);
++
++	if(!pressed || !key->lower || (keyMods & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) || SDL_IsTextInputActive() != SDL_TRUE)
++		return;
++	bool upper = keyMods & KMOD_SHIFT;
++	if(key->lower >= 'a' && key->lower <= 'z' && (keyMods & KMOD_CAPS))
++		upper = !upper;
++	SDL_Event text = {};
++	text.type = SDL_TEXTINPUT;
++	text.text.timestamp = SDL_GetTicks();
++	text.text.text[0] = upper ? key->upper : key->lower;
++	SDL_PushEvent(&text);
++}
++
++/// Where the USB mouse has the cursor, in screen pixels: VCMI's cursor
++/// unless only the mouse has moved it since (VCMI keeps its own position
++/// while a button drags)
++Point BareAppLink::mousePosition()
++{
++	const Point & engine = ENGINE->getCursorPosition();
++	if(engine != mouseEnginePos)
++	{
++		mousePos = engine;
++		mouseEnginePos = engine;
++	}
++	return mousePos;
++}
++
++void BareAppLink::onMouseMove(int axis, int value)
++{
++	if(axis == GAME_MOUSE_X)
++		mouseMoved.x += value;
++	else if(axis == GAME_MOUSE_Y)
++		mouseMoved.y += value;
++	else if(axis == GAME_MOUSE_WHEEL && value)
++	{
++		const int scale = ENGINE->screenHandler().getScalingFactor();
++		const Point position = mousePosition();
++		SDL_Event event = {};
++		event.type = SDL_MOUSEWHEEL;
++		event.wheel.timestamp = SDL_GetTicks();
++		event.wheel.y = value;
++		event.wheel.preciseY = static_cast<float>(value);
++		event.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
++		event.wheel.mouseX = position.x * scale;
++		event.wheel.mouseY = position.y * scale;
++		SDL_PushEvent(&event);
++	}
++}
++
++/// The moves of a poll() as one SDL mouse motion, counts as screen pixels
++void BareAppLink::flushMouseMove()
++{
++	if(mouseMoved == Point(0, 0))
++		return;
++	if(detached)
++	{
++		// as the stick: the magnifier comes back to the cursor
++		detached = false;
++		cursorIntoView();
++	}
++	const int scale = ENGINE->screenHandler().getScalingFactor();
++	const Point screen = ENGINE->screenDimensions();
++	const Point from = mousePosition();
++	const Point to(std::clamp(from.x + mouseMoved.x, 0, screen.x - 1), std::clamp(from.y + mouseMoved.y, 0, screen.y - 1));
++	mouseMoved = Point(0, 0);
++	if(to == from)
++		return;
++	mousePos = to;
++
++	SDL_Event event = {};
++	event.type = SDL_MOUSEMOTION;
++	event.motion.timestamp = SDL_GetTicks();
++	event.motion.state = mouseButtons;
++	event.motion.x = to.x * scale;
++	event.motion.y = to.y * scale;
++	event.motion.xrel = (to.x - from.x) * scale;
++	event.motion.yrel = (to.y - from.y) * scale;
++	SDL_PushEvent(&event);
++}
++
++void BareAppLink::onMouseButton(int button, bool pressed)
++{
++	const int sdlButton = button == GAME_MOUSE_LEFT ? SDL_BUTTON_LEFT
++		: button == GAME_MOUSE_RIGHT ? SDL_BUTTON_RIGHT
++		: button == GAME_MOUSE_MIDDLE ? SDL_BUTTON_MIDDLE : 0;
++	if(!sdlButton)
++		return;
++	flushMouseMove();	// the press where the cursor is now
++	const int scale = ENGINE->screenHandler().getScalingFactor();
++	const Point position = mousePosition();
++	const uint32_t now = SDL_GetTicks();
++
++	if(pressed)
++	{
++		const Point d = position - clickPos;
++		if(sdlButton == clickButton && now - clickAt <= doubleClickMs
++			&& std::abs(d.x) <= doubleClickDistance && std::abs(d.y) <= doubleClickDistance)
++			clicks = std::min<int>(clicks + 1, 255);
++		else
++			clicks = 1;
++		clickAt = now;
++		clickPos = position;
++		clickButton = sdlButton;
++		mouseButtons |= SDL_BUTTON(sdlButton);
++	}
++	else
++		mouseButtons &= ~SDL_BUTTON(sdlButton);
++
++	SDL_Event event = {};
++	event.type = pressed ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
++	event.button.timestamp = now;
++	event.button.button = sdlButton;
++	event.button.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++	event.button.clicks = sdlButton == clickButton ? clicks : 1;
++	event.button.x = position.x * scale;
++	event.button.y = position.y * scale;
++	SDL_PushEvent(&event);
++}
++
+ void BareAppLink::poll()
+ {
+ 	for(;;)
+@@ -874,7 +1098,7 @@
+ 			if(errno == EINTR)
+ 				continue;
+ 			if(errno == EAGAIN || errno == EWOULDBLOCK)
+-				return;
++				break;
+ 			leave();
+ 		}
+ 		if(n != sizeof(msg))
+@@ -883,5 +1107,12 @@
+ 			onButton(msg.code, msg.pressed, msg.flags & GAME_BTN_STICK);
+ 		else if(msg.type == GAME_MSG_AXIS)
+ 			onAxis(msg.code, msg.value);
++		else if(msg.type == GAME_MSG_KEY)
++			onKey(msg.value, msg.pressed);
++		else if(msg.type == GAME_MSG_MOUSE_MOVE)
++			onMouseMove(msg.code, msg.value);
++		else if(msg.type == GAME_MSG_MOUSE_BUTTON)
++			onMouseButton(msg.code, msg.pressed);
+ 	}
++	flushMouseMove();
+ }
+--- a/client/eventsSDL/InputHandler.cpp
++++ b/client/eventsSDL/InputHandler.cpp
+@@ -423,6 +423,10 @@
+ 
+ bool InputHandler::isKeyboardAltDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get(); link && link->altDown())
++		return true;
++#endif
+ 	return keyboardHandler->isKeyboardAltDown();
+ }
+ 
+@@ -449,8 +453,9 @@
+ void InputHandler::startTextInput(const Rect & where)
+ {
+ #ifdef VCMI_BARE_APP
+-	// The console has no keyboard: an on-screen one
+-	if(BareAppLink::get())
++	// The console has no keyboard: an on-screen one, unless a USB
++	// keyboard has been used
++	if(auto * link = BareAppLink::get(); link && !link->hasKeyboard())
+ 	{
+ 		BareAppKeyboard::open(where);
+ 		return;
+@@ -462,7 +467,7 @@
+ void InputHandler::stopTextInput()
+ {
+ #ifdef VCMI_BARE_APP
+-	if(BareAppLink::get())
++	if(auto * link = BareAppLink::get(); link && !link->hasKeyboard())
+ 		return;	// the on-screen keyboard closes by itself
+ #endif
+ 	textHandler->stopTextInput();
+--- a/client/eventsSDL/InputSourceKeyboard.cpp
++++ b/client/eventsSDL/InputSourceKeyboard.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include "StdInc.h"
+ #include "InputSourceKeyboard.h"
++#ifdef VCMI_BARE_APP
++#include "../renderSDL/BareAppLink.h"
++#endif
+ 
+ #include "../../lib/CConfigHandler.h"
+ #include "../render/IScreenHandler.h"
+@@ -156,6 +159,10 @@
+ 
+ bool InputSourceKeyboard::isKeyboardCmdDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		return link->ctrlDown();
++#endif
+ #ifdef VCMI_APPLE
+ 	return SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LGUI] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RGUI];
+ #else
+@@ -165,6 +172,12 @@
+ 
+ bool InputSourceKeyboard::isKeyboardCtrlDown() const
+ {
++#ifdef VCMI_BARE_APP
++	// bare_app's USB keyboard sends its keys as SDL events, which SDL's
++	// keyboard state does not see
++	if(auto * link = BareAppLink::get())
++		return link->ctrlDown();
++#endif
+ #ifdef VCMI_APPLE
+ 	return SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LCTRL] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RCTRL] ||
+ 		   SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LGUI] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RGUI];
+@@ -175,10 +188,18 @@
+ 
+ bool InputSourceKeyboard::isKeyboardAltDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		return link->altDown();
++#endif
+ 	return SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LALT] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RALT];
+ }
+ 
+ bool InputSourceKeyboard::isKeyboardShiftDown() const
+ {
++#ifdef VCMI_BARE_APP
++	if(auto * link = BareAppLink::get())
++		return link->shiftDown();
++#endif
+ 	return SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_LSHIFT] || SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_RSHIFT];
+ }

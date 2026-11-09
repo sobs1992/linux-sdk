@@ -1,0 +1,102 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] video: bareapp: a USB mouse
+
+bare_app sends SDL games the buttons and moves of a USB mouse
+(GAME_MSG_MOUSE_*): the video driver gives the window the mouse focus
+and turns them into SDL's mouse events, the counts as window pixels,
+the moves of a pump as one motion, a press after the moves before it.
+Relative mode (games that turn by the mouse, Chocolate Doom) is there
+as it is: the moves are relative already.
+
+--- a/src/video/bareapp/SDL_bareappvideo.c
++++ b/src/video/bareapp/SDL_bareappvideo.c
+@@ -39,6 +39,7 @@
+ #include "../SDL_egl_c.h"
+ #include "../../events/SDL_events_c.h"
+ #include "../../events/SDL_keyboard_c.h"
++#include "../../events/SDL_mouse_c.h"
+ 
+ #include "SDL_bareapp.h"
+ 
+@@ -117,9 +118,50 @@
+     }
+ }
+ 
++/* A USB mouse (GAME_MSG_MOUSE_*, bare_app sends them to SDL games): its
++ * counts as window pixels, the moves of a pump as one motion */
++static void MouseMove(int *dx, int *dy)
++{
++    if (*dx || *dy) {
++        SDL_SendMouseMotion(SDL_GetMouseFocus(), 0, 1, *dx, *dy);
++        *dx = *dy = 0;
++    }
++}
++
++static void Mouse(const struct game_msg *m, int *dx, int *dy)
++{
++    static const Uint8 buttons[] = {
++        [GAME_MOUSE_LEFT] = SDL_BUTTON_LEFT, [GAME_MOUSE_RIGHT] = SDL_BUTTON_RIGHT,
++        [GAME_MOUSE_MIDDLE] = SDL_BUTTON_MIDDLE
++    };
++
++    if (m->type == GAME_MSG_MOUSE_BUTTON) {
++        if (m->code < SDL_arraysize(buttons)) {
++            MouseMove(dx, dy); /* pressed where the cursor is now */
++            SDL_SendMouseButton(SDL_GetMouseFocus(), 0, m->pressed ? SDL_PRESSED : SDL_RELEASED, buttons[m->code]);
++        }
++    } else if (m->code == GAME_MOUSE_X) {
++        *dx += m->value;
++    } else if (m->code == GAME_MOUSE_Y) {
++        *dy += m->value;
++    } else if (m->code == GAME_MOUSE_WHEEL && m->value) {
++        MouseMove(dx, dy);
++        SDL_SendMouseWheel(SDL_GetMouseFocus(), 0, 0.0f, (float)m->value, SDL_MOUSEWHEEL_NORMAL);
++    }
++}
++
++/* Relative mode (games that turn by the mouse): the moves are relative
++ * already, there is no pointer to hold in the window */
++static int BAREAPP_SetRelativeMouseMode(SDL_bool enabled)
++{
++    (void)enabled;
++    return 0;
++}
++
+ static void BAREAPP_PumpEvents(_THIS)
+ {
+     const struct game_msg *m;
++    int dx = 0, dy = 0;
+ 
+     if (!BAREAPP_Poll() && !vd.quit_sent) {
+         vd.quit_sent = SDL_TRUE;
+@@ -128,8 +170,11 @@
+     while ((m = BAREAPP_Next(&vd.tail)) != NULL) {
+         if (m->type == GAME_MSG_BUTTON) {
+             Button(m);
++        } else if (m->type == GAME_MSG_MOUSE_BUTTON || m->type == GAME_MSG_MOUSE_MOVE) {
++            Mouse(m, &dx, &dy);
+         }
+     }
++    MouseMove(&dx, &dy);
+ }
+ 
+ /* ---- displays ----------------------------------------------------------- */
+@@ -151,6 +196,7 @@
+     }
+     SDL_zero(vd.keys);
+     BAREAPP_ParseMap(SDL_getenv("SDL_BAREAPP_KEYS"), KeyMapped, NULL);
++    SDL_GetMouse()->SetRelativeMouseMode = BAREAPP_SetRelativeMouseMode;
+     return 0;
+ }
+ 
+@@ -233,8 +279,9 @@
+         }
+     }
+ #endif
+-    /* the only window there is: it has the gamepad's keys */
++    /* the only window there is: it has the gamepad's keys and the mouse */
+     SDL_SetKeyboardFocus(window);
++    SDL_SetMouseFocus(window);
+     return 0;
+ }
+ 

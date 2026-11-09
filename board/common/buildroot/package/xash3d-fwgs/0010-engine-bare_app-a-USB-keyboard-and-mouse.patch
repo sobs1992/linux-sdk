@@ -1,0 +1,350 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] engine: bare_app: a USB keyboard and mouse
+
+bare_app sends Half-Life the keys of a USB keyboard as Linux key codes
+(GAME_MSG_KEY) and the buttons and moves of a USB mouse
+(GAME_MSG_MOUSE_*).
+
+Keys become engine keys, so any of them can be bound in the controls
+menu; while the engine edits text (the console, chat, text fields) the
+characters they type on a US layout go as char events instead, ctrl
+with a letter as a control character, as with SDL. The modifiers held
+are Platform_GetKeyModifiers'.
+
+In the game the mouse's moves turn the view (Platform_MouseMove) and
+its buttons are the mouse's (IN_MouseEvent: attack, attack2); in menus
+and the console they move a cursor and click (Platform_GetMousePos),
+the wheel is K_MWHEELUP/DOWN. There is no cursor of the system's to
+show, so once the mouse has been used an arrow is drawn into each
+frame while the engine wants a cursor (host.mouse_visible,
+Platform_SetCursorType).
+
+--- a/engine/platform/platform.h
++++ b/engine/platform/platform.h
+@@ -364,7 +364,7 @@
+ static inline void Platform_PreCreateMove( void ) { }
+ static inline int Platform_GetClipboardText( char *buffer, size_t size ) { return 0; }
+ static inline void Platform_SetClipboardText( const char *buffer ) { }
+-#if XASH_PS4 // platform/ps4/kbm_ps4.c
++#if XASH_PS4 || XASH_BARE_APP // platform/ps4/kbm_ps4.c, platform/bare_app/bare_app.c
+ void Platform_SetCursorType( VGUI_DefaultCursor type );
+ void GAME_EXPORT Platform_GetMousePos( int *x, int *y );
+ void GAME_EXPORT Platform_SetMousePos( int x, int y );
+--- a/engine/platform/bare_app/bare_app.c
++++ b/engine/platform/bare_app/bare_app.c
+@@ -29,7 +29,9 @@
+ #include "keydefs.h"
+ #include "client.h"
+ #include "vid_common.h"
++#include "vgui_draw.h"
+ #include <errno.h>
++#include <linux/input-event-codes.h>
+ #include <signal.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+@@ -47,6 +49,17 @@
+ 	qboolean pad_down[GP_COUNT];
+ 	short axes[GP_AXIS_COUNT];
+ 	double repeat_time; // when a held D-pad direction repeats next, 0 - none
++
++	// a USB mouse (bare_app's GAME_MSG_MOUSE_*): the menu's cursor, in render
++	// pixels, and the moves the game turns the view by
++	int mouse_x, mouse_y;
++	float mouse_dx, mouse_dy;
++	qboolean mouse_used; // a USB mouse has moved: the menus show its cursor
++	qboolean mouse_grab;
++
++	// a USB keyboard (bare_app's GAME_MSG_KEY): its modifiers and locks
++	key_modifier_t mods;
++	qboolean caps;
+ } ba;
+ 
+ // bare_app ends a game with SIGTERM: quit from the main loop, so that the
+@@ -103,14 +116,70 @@
+ 	sigaction( SIGTERM, &sa, NULL );
+ 	sigaction( SIGINT, &sa, NULL );
+ 	Con_Reportf( "bare_app: frames %ux%u\n", ba.shm->width, ba.shm->height );
++	// a USB mouse's cursor starts in the middle
++	ba.mouse_x = ba.shm->width / 2;
++	ba.mouse_y = ba.shm->height / 2;
+ 	return true;
+ }
+ 
++// the arrow of a USB mouse's cursor: '#' black, '.' white
++static const char *const ba_arrow[] =
++{
++	"#",
++	"##",
++	"#.#",
++	"#..#",
++	"#...#",
++	"#....#",
++	"#.....#",
++	"#......#",
++	"#.......#",
++	"#........#",
++	"#.....#####",
++	"#..#..#",
++	"#.# #..#",
++	"##  #..#",
++	"#    #..#",
++	"     #..#",
++	"      ##",
++};
++
++// over menus and the console the engine has no cursor of its own to draw:
++// the mouse's is drawn into the frame
++static void BareApp_DrawCursor( void )
++{
++	byte *frame;
++
++	if( !ba.mouse_used || !host.mouse_visible )
++		return;
++
++	frame = game_shm_frame( ba.shm, ba.back );
++	for( int y = 0; y < (int)ARRAYSIZE( ba_arrow ); y++ )
++	{
++		const int fy = ba.mouse_y + y;
++		uint32_t *row;
++
++		if( fy < 0 || fy >= (int)ba.shm->height )
++			continue;
++		row = (uint32_t *)( frame + (size_t)fy * ba.shm->stride );
++		for( int x = 0; ba_arrow[y][x]; x++ )
++		{
++			const int fx = ba.mouse_x + x;
++
++			if( fx < 0 || fx >= (int)ba.shm->width || ba_arrow[y][x] == ' ' )
++				continue;
++			row[fx] = ba_arrow[y][x] == '#' ? 0x000000 : 0xffffff;
++		}
++	}
++}
++
+ // hands the frame the engine owns over to bare_app and takes the middle one
+ static void BareApp_Publish( void )
+ {
+ 	struct game_msg m = { .type = GAME_MSG_FRAME };
+ 
++	BareApp_DrawCursor( );
++
+ 	ba.back = atomic_exchange( &ba.shm->middle, ba.back | GAME_SHM_FRESH ) & ~GAME_SHM_FRESH;
+ 
+ 	// a full socket already holds a "frame" message, nothing to add
+@@ -574,6 +643,146 @@
+ 	Joy_AxisMotionEvent( ba_axes[code], value );
+ }
+ 
++// a USB keyboard's keys (Linux key codes) as engine keys, with the characters
++// they type on a US layout, without and with shift
++static const struct
++{
++	unsigned short code;
++	short key;
++	char lower, upper;
++} ba_usb_keys[] =
++{
++	{ KEY_A, 'a', 'a', 'A' }, { KEY_B, 'b', 'b', 'B' }, { KEY_C, 'c', 'c', 'C' }, { KEY_D, 'd', 'd', 'D' },
++	{ KEY_E, 'e', 'e', 'E' }, { KEY_F, 'f', 'f', 'F' }, { KEY_G, 'g', 'g', 'G' }, { KEY_H, 'h', 'h', 'H' },
++	{ KEY_I, 'i', 'i', 'I' }, { KEY_J, 'j', 'j', 'J' }, { KEY_K, 'k', 'k', 'K' }, { KEY_L, 'l', 'l', 'L' },
++	{ KEY_M, 'm', 'm', 'M' }, { KEY_N, 'n', 'n', 'N' }, { KEY_O, 'o', 'o', 'O' }, { KEY_P, 'p', 'p', 'P' },
++	{ KEY_Q, 'q', 'q', 'Q' }, { KEY_R, 'r', 'r', 'R' }, { KEY_S, 's', 's', 'S' }, { KEY_T, 't', 't', 'T' },
++	{ KEY_U, 'u', 'u', 'U' }, { KEY_V, 'v', 'v', 'V' }, { KEY_W, 'w', 'w', 'W' }, { KEY_X, 'x', 'x', 'X' },
++	{ KEY_Y, 'y', 'y', 'Y' }, { KEY_Z, 'z', 'z', 'Z' },
++	{ KEY_1, '1', '1', '!' }, { KEY_2, '2', '2', '@' }, { KEY_3, '3', '3', '#' }, { KEY_4, '4', '4', '$' },
++	{ KEY_5, '5', '5', '%' }, { KEY_6, '6', '6', '^' }, { KEY_7, '7', '7', '&' }, { KEY_8, '8', '8', '*' },
++	{ KEY_9, '9', '9', '(' }, { KEY_0, '0', '0', ')' },
++	{ KEY_MINUS, '-', '-', '_' }, { KEY_EQUAL, '=', '=', '+' }, { KEY_LEFTBRACE, '[', '[', '{' },
++	{ KEY_RIGHTBRACE, ']', ']', '}' }, { KEY_BACKSLASH, '\\', '\\', '|' }, { KEY_SEMICOLON, ';', ';', ':' },
++	{ KEY_APOSTROPHE, '\'', '\'', '"' }, { KEY_GRAVE, '`', '`', '~' }, { KEY_COMMA, ',', ',', '<' },
++	{ KEY_DOT, '.', '.', '>' }, { KEY_SLASH, '/', '/', '?' }, { KEY_SPACE, K_SPACE, ' ', ' ' },
++	{ KEY_ENTER, K_ENTER }, { KEY_ESC, K_ESCAPE }, { KEY_BACKSPACE, K_BACKSPACE }, { KEY_TAB, K_TAB },
++	{ KEY_CAPSLOCK, K_CAPSLOCK }, { KEY_SCROLLLOCK, K_SCROLLLOCK }, { KEY_PAUSE, K_PAUSE },
++	{ KEY_F1, K_F1 }, { KEY_F2, K_F2 }, { KEY_F3, K_F3 }, { KEY_F4, K_F4 }, { KEY_F5, K_F5 }, { KEY_F6, K_F6 },
++	{ KEY_F7, K_F7 }, { KEY_F8, K_F8 }, { KEY_F9, K_F9 }, { KEY_F10, K_F10 }, { KEY_F11, K_F11 }, { KEY_F12, K_F12 },
++	{ KEY_INSERT, K_INS }, { KEY_DELETE, K_DEL }, { KEY_HOME, K_HOME }, { KEY_END, K_END },
++	{ KEY_PAGEUP, K_PGUP }, { KEY_PAGEDOWN, K_PGDN },
++	{ KEY_UP, K_UPARROW }, { KEY_DOWN, K_DOWNARROW }, { KEY_LEFT, K_LEFTARROW }, { KEY_RIGHT, K_RIGHTARROW },
++	{ KEY_LEFTSHIFT, K_SHIFT }, { KEY_RIGHTSHIFT, K_SHIFT }, { KEY_LEFTCTRL, K_CTRL }, { KEY_RIGHTCTRL, K_CTRL },
++	{ KEY_LEFTALT, K_ALT }, { KEY_RIGHTALT, K_ALT }, { KEY_LEFTMETA, K_WIN }, { KEY_RIGHTMETA, K_WIN },
++	{ KEY_NUMLOCK, K_KP_NUMLOCK }, { KEY_KPSLASH, K_KP_SLASH, '/', '/' }, { KEY_KPASTERISK, K_KP_MUL, '*', '*' },
++	{ KEY_KPMINUS, K_KP_MINUS, '-', '-' }, { KEY_KPPLUS, K_KP_PLUS, '+', '+' }, { KEY_KPENTER, K_KP_ENTER },
++	{ KEY_KP7, K_KP_HOME }, { KEY_KP8, K_KP_UPARROW }, { KEY_KP9, K_KP_PGUP }, { KEY_KP4, K_KP_LEFTARROW },
++	{ KEY_KP5, K_KP_5 }, { KEY_KP6, K_KP_RIGHTARROW }, { KEY_KP1, K_KP_END }, { KEY_KP2, K_KP_DOWNARROW },
++	{ KEY_KP3, K_KP_PGDN }, { KEY_KP0, K_KP_INS }, { KEY_KPDOT, K_KP_DEL },
++};
++
++static key_modifier_t BareApp_KeyModifier( int code )
++{
++	switch( code )
++	{
++	case KEY_LEFTSHIFT: return KeyModifier_LeftShift;
++	case KEY_RIGHTSHIFT: return KeyModifier_RightShift;
++	case KEY_LEFTCTRL: return KeyModifier_LeftCtrl;
++	case KEY_RIGHTCTRL: return KeyModifier_RightCtrl;
++	case KEY_LEFTALT: return KeyModifier_LeftAlt;
++	case KEY_RIGHTALT: return KeyModifier_RightAlt;
++	case KEY_LEFTMETA: return KeyModifier_LeftSuper;
++	case KEY_RIGHTMETA: return KeyModifier_RightSuper;
++	default: return KeyModifier_None;
++	}
++}
++
++/*
++==============
++BareApp_Key
++
++A USB keyboard's key: the engine takes the character while it edits text (the
++console, chat, text fields) and the key otherwise, as with SDL, so any key can
++be bound in the controls menu. Ctrl with a letter is a control character there
++(ctrl+c, ctrl+v)
++==============
++*/
++static void BareApp_Key( int code, qboolean down )
++{
++	const key_modifier_t mod = BareApp_KeyModifier( code );
++	int i;
++
++	for( i = 0; i < (int)ARRAYSIZE( ba_usb_keys ); i++ )
++	{
++		if( ba_usb_keys[i].code == code )
++			break;
++	}
++	if( i == (int)ARRAYSIZE( ba_usb_keys ))
++		return;
++
++	if( mod )
++		ba.mods = down ? ( ba.mods | mod ) : ( ba.mods & ~mod );
++	if( code == KEY_CAPSLOCK && down )
++		ba.caps = !ba.caps;
++
++	if( down && ba_usb_keys[i].lower && ( host.textmode || cls.key_dest == key_console || cls.key_dest == key_message ))
++	{
++		const qboolean ctrl = FBitSet( ba.mods, KeyModifier_LeftCtrl | KeyModifier_RightCtrl ) ? true : false;
++		const qboolean console_key = code == KEY_GRAVE && cls.key_dest == key_console;
++		qboolean upper = FBitSet( ba.mods, KeyModifier_LeftShift | KeyModifier_RightShift ) ? true : false;
++		char ch = ba_usb_keys[i].lower;
++
++		if( ctrl && cls.key_dest != key_game )
++		{
++			if( ch >= 'a' && ch <= 'z' )
++				CL_CharEvent( ch - 'a' + 1 );
++			return;
++		}
++		if( !console_key )
++		{
++			char text[2] = { 0, 0 };
++
++			if( ch >= 'a' && ch <= 'z' && ba.caps )
++				upper = !upper;
++			text[0] = upper ? ba_usb_keys[i].upper : ch;
++			VGui_ReportTextInput( text );
++			CL_CharEvent( (byte)text[0] );
++			return;
++		}
++	}
++
++	Key_Event( ba_usb_keys[i].key, down );
++}
++
++// a USB mouse: moves turn the view in the game, move the cursor elsewhere
++static void BareApp_MouseMove( int code, short value )
++{
++	if( code == GAME_MOUSE_WHEEL )
++	{
++		const int key = value > 0 ? K_MWHEELUP : K_MWHEELDOWN;
++
++		for( int i = abs( value ); i > 0; i-- )
++		{
++			Key_Event( key, true );
++			Key_Event( key, false );
++		}
++		return;
++	}
++
++	ba.mouse_used = true;
++	if( code == GAME_MOUSE_X )
++	{
++		ba.mouse_dx += value;
++		ba.mouse_x = bound( 0, ba.mouse_x + value, (int)ba.shm->width - 1 );
++	}
++	else if( code == GAME_MOUSE_Y )
++	{
++		ba.mouse_dy += value;
++		ba.mouse_y = bound( 0, ba.mouse_y + value, (int)ba.shm->height - 1 );
++	}
++}
++
+ void Platform_RunEvents( void )
+ {
+ 	struct game_msg m;
+@@ -604,8 +813,21 @@
+ 			BareApp_Button( m.code, m.pressed ? true : false );
+ 		else if( m.type == GAME_MSG_AXIS )
+ 			BareApp_Axis( m.code, m.value );
++		else if( m.type == GAME_MSG_KEY )
++			BareApp_Key( m.value, m.pressed ? true : false );
++		else if( m.type == GAME_MSG_MOUSE_MOVE )
++			BareApp_MouseMove( m.code, m.value );
++		else if( m.type == GAME_MSG_MOUSE_BUTTON && m.code <= GAME_MOUSE_MIDDLE )
++		{
++			ba.mouse_used = true;
++			IN_MouseEvent( m.code, m.pressed ); // K_MOUSE1, K_MOUSE2, K_MOUSE3
++		}
+ 	}
+ 
++	// the view turns only by the moves made in the game
++	if( cls.key_dest != key_game )
++		ba.mouse_dx = ba.mouse_dy = 0.0f;
++
+ 	if( cls.key_dest != key_game && ba.repeat_time > 0.0 && host.realtime >= ba.repeat_time )
+ 	{
+ 		for( int i = GP_UP; i <= GP_RIGHT; i++ )
+@@ -620,8 +842,36 @@
+ 
+ void Platform_MouseMove( float *x, float *y )
+ {
+-	if( x ) *x = 0.0f;
+-	if( y ) *y = 0.0f;
++	if( x ) *x = ba.mouse_dx;
++	if( y ) *y = ba.mouse_dy;
++	ba.mouse_dx = ba.mouse_dy = 0.0f;
++}
++
++void GAME_EXPORT Platform_GetMousePos( int *x, int *y )
++{
++	if( x ) *x = ba.mouse_x;
++	if( y ) *y = ba.mouse_y;
++}
++
++void GAME_EXPORT Platform_SetMousePos( int x, int y )
++{
++	ba.mouse_x = x;
++	ba.mouse_y = y;
++}
++
++void Platform_SetCursorType( VGUI_DefaultCursor type )
++{
++	host.mouse_visible = type != dc_none;
++}
++
++qboolean Platform_GetMouseGrab( void )
++{
++	return ba.mouse_grab;
++}
++
++void Platform_SetMouseGrab( qboolean enable )
++{
++	ba.mouse_grab = enable;
+ }
+ 
+ int Platform_JoyInit( void )
+@@ -640,7 +890,7 @@
+ 
+ key_modifier_t Platform_GetKeyModifiers( void )
+ {
+-	return KeyModifier_None;
++	return ba.mods;
+ }
+ 
+ #endif // XASH_VIDEO == VIDEO_BARE_APP
