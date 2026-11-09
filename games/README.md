@@ -62,8 +62,10 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
   русский перевод) через `scripts/homm3-install.sh`.
 - **hota** — та же установка Heroes III: Horn of the Abyss целиком, оригинальная
   игра (HotA 1.8 + HD-мод) под Wine: `hota/overlay/wine.ini` — экран 854×600 на весь
-  дисплей (по ширине 1:1, по высоте 600 → 480), L1 включает и выключает лупу 1:1,
-  правый стик прокручивает карту, крестовина ходит героем; `hota/prepare.sh` ставит
+  дисплей (по ширине 1:1, по высоте 600 → 480), управление как у VCMI на GO Ultra
+  (лупа на L1, крестовина и правый стик прокручивают карту или двигают лупу, у края
+  экрана карта крутится, только пока стик толкает туда; F1 сворачивает, L2/R2 —
+  громкость); `hota/prepare.sh` ставит
   HD-моду разрешение 854×600 и вывод через GDI; обложка — рог из значка exe на фоне
   из `H3bitmap.lod` (`cover_back`).
 - **halflife** — Half-Life из Steam через `scripts/halflife-install.sh`.
