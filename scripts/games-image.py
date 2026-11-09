@@ -122,16 +122,43 @@ def sources(spec):
     return found
 
 
-def make_cover(src, dst, crop):
+def make_cover(spec, dst, crop):
+    """spec: a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py);
+    crop: center, top, bottom, left, right, "X Y SIZE" in its pixels, or fit
+    (all of it, on a blurred, darker copy of itself)"""
     try:
-        from PIL import Image
+        from PIL import Image, ImageEnhance, ImageFilter
     except ImportError:
         die("covers need Python's PIL (apt install python3-pil)")
-    im = Image.open(src).convert("RGB")
+    m = re.match(r"^(.+\.(?:lod|wad)):([^/:]+)$", spec, re.I)
+    try:
+        if m:
+            import game_pictures
+            im = game_pictures.picture(sdk_path(m.group(1)), m.group(2))
+        else:
+            im = Image.open(sdk_path(spec)).convert("RGB")
+    except Exception as e:
+        die("cover %s: %s" % (spec, e))
     w, h = im.size
-    s = min(w, h)
-    x = {"left": 0, "right": w - s}.get(crop, (w - s) // 2)
-    y = {"top": 0, "bottom": h - s}.get(crop, (h - s) // 2)
+    if crop == "fit":
+        k = COVER / max(w, h)
+        s = min(w, h)
+        back = im.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))
+        back = back.resize((COVER, COVER), Image.LANCZOS).filter(ImageFilter.GaussianBlur(12))
+        back = ImageEnhance.Brightness(back).enhance(0.45)
+        fg = im.resize((round(w * k), round(h * k)), Image.LANCZOS)
+        back.paste(fg, ((COVER - fg.width) // 2, (COVER - fg.height) // 2))
+        back.save(dst, optimize=True)
+        return
+    nums = crop.split()
+    if len(nums) == 3 and all(n.isdigit() for n in nums):
+        x, y, s = map(int, nums)
+        if x + s > w or y + s > h:
+            die("cover_crop %s: outside the %dx%d picture" % (crop, w, h))
+    else:
+        s = min(w, h)
+        x = {"left": 0, "right": w - s}.get(crop, (w - s) // 2)
+        y = {"top": 0, "bottom": h - s}.get(crop, (h - s) // 2)
     im = im.crop((x, y, x + s, y + s)).resize((COVER, COVER), Image.LANCZOS)
     im.save(dst, optimize=True)
 
@@ -181,7 +208,7 @@ def install_game(name, g, games, data):
             die("[%s] overlay %s: not a directory" % (name, o))
         shutil.copytree(o, dest, dirs_exist_ok=True)
     if g.get("cover"):
-        make_cover(sdk_path(g["cover"]), os.path.join(dest, "cover.png"), g.get("cover_crop", "center"))
+        make_cover(g["cover"], os.path.join(dest, "cover.png"), g.get("cover_crop", "center"))
     if g.get("run"):
         env = dict(os.environ, GAME_DIR=dest, SOURCE=src or "", SDK_DIR=SDK, DATA_DIR=data)
         run([sdk_path(g["run"])], env=env, cwd=SDK)

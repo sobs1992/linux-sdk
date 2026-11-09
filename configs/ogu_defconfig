@@ -67,10 +67,11 @@ APPS_AUTOSTART := bare-app
 # bare_app's own Kconfig defconfig (platform ogu), the shareware doom1.wad,
 # the Heroes III engine VCMI (game data on /games, see README), Wine for
 # Windows games (a wine.ini per game on /games), SDL2 with bare_app's
-# drivers for SDL2 games (a game.ini each) and Chocolate Doom as one
+# drivers for SDL2 games (a game.ini each). Chocolate Doom (an SDL2 game
+# as it is: bare-app.CHOCOLATE_DOOM=y) is left out: bare_app has its own Doom
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y \
-                  bare-app.SDL=y bare-app.CHOCOLATE_DOOM=y
+                  bare-app.SDL=y
 
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,

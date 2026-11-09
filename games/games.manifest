@@ -40,9 +40,12 @@ games_free_mb = 1024
 ;   run        a program run afterwards with GAME_DIR, SOURCE, SDK_DIR,
 ;              DATA_DIR set (patches the game's files)
 ;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
-;   cover      a picture for bare_app's home screen: cropped square
-;              (cover_crop: center, top, bottom, left, right), 240x240,
-;              saved as cover.png in the game's directory
+;   cover      a picture for bare_app's home screen: a picture file, or
+;              ARCHIVE:ENTRY, a picture inside the game's .lod (Heroes III)
+;              or .wad (Doom), see scripts/game_pictures.py; cropped square
+;              (cover_crop: center, top, bottom, left, right, "X Y SIZE" in
+;              the picture's pixels, or fit: all of it on a blurred copy),
+;              240x240, saved as cover.png in the game's directory
 ; ---------------------------------------------------------------------------
 
 [heroes3]
@@ -51,6 +54,16 @@ games_free_mb = 1024
 ; (downloaded once into dl/hota)
 install = homm3
 source = /media/D/Games/HoMM3_HotA/game_info/data
+; the main menu's background with the two heroes (HotA.lod is encrypted)
+cover = /media/D/Games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:gamselb1.pcx
+cover_crop = left
+
+[doom]
+; Doom: the firmware has doom1.wad (bare-app.DOOM_WAD=y); /games/doom gets
+; only the cover, its title screen (an IWAD put here would be played)
+install = none
+cover = output/ogu/buildroot/target/usr/share/games/doom/doom1.wad:TITLEPIC
+cover_crop = fit
 
 [halflife]
 ; Half-Life from Steam: valve/ and valve_russian/ (scripts/halflife-install.sh)
