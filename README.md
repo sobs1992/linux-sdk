@@ -95,6 +95,8 @@ scripts/flash.sh               запись на SD с проверками
 scripts/apps-config.sh         приложения из конфига прошивки (APPS) -> настройки Buildroot
 scripts/homm3-install.sh       данные Героев III и моды VCMI (HotA, русский) на раздел GAMES (с ПК или по SSH)
 scripts/halflife-install.sh    файлы Half-Life (valve, valve_russian) на раздел GAMES (с ПК или по SSH)
+scripts/games-image.py         полный образ с играми по манифесту (games/games.manifest)
+games/                         манифест игр полного образа, их wine.ini и правки (games/README.md)
 src/                           сабмодули компонентов
 dl/                            кэш загрузок (общий для всех прошивок)
 ```
@@ -451,6 +453,12 @@ RK818) или Ctrl+C в UART. Новый U-Boot перед записью в eMM
 отсчёт в UART и `load mmc 1:1 0x01000000 u-boot-test.bin; go 0x01000000` (`mmc 0:1`
 с SD). U-Boot, который зависает, но проходит проверку BL2, BootROM запускает снова и
 снова, и SD тогда не поможет.
+
+Образ сразу с играми (Heroes III, Half-Life, Pirates!, Daemonica — что перечислено
+в `games/games.manifest`) собирает `scripts/games-image.py` из `ogu.img` и
+`ogu-emmc.img`: дописывает заполненные `/data` и `/games` туда, где их ждёт
+S05data. Пишется он теми же целями: `make flash-emmc IMAGE_EMMC_FILE=<образ>`
+(подробности — `games/README.md`).
 
 `flash-boot`/`flash-emmc-boot` пишут и 440 байт загрузочного кода в секторе 0
 (`boot-area.mbr`): он меняется с каждой сборкой FIP вместе с ним; таблица разделов

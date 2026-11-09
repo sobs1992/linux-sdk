@@ -1,0 +1,92 @@
+; games.manifest: the games of a complete image, for scripts/games-image.py.
+;
+;   scripts/games-image.py                     # this manifest, both images
+;   scripts/games-image.py -m my.manifest --only emmc
+;
+; The script takes the firmware's images (make FW=ogu image) and adds the
+; data partitions to them, filled: /games (FAT32 "GAMES") with a directory
+; per game below, /data (ext4 "data") with the files of the "data" lines.
+; Paths not starting with / are the SDK's; globs work in "file", "data",
+; "cover". Comments start with ";" or "#".
+
+[image]
+; Firmware: its configs/<fw>_defconfig gives where the data partitions go
+fw = ogu
+; The firmware's images (these are the defaults)
+base = output/ogu/images/ogu.img
+base_emmc = output/ogu/images/ogu-emmc.img
+; Where the results go: <out>/<name>.img and <name>-emmc.img, about the
+; size of the games plus 5 GiB (the data partition is empty space: the
+; files are sparse). The games are put together in <work> first. Both
+; want a disk with room.
+out = /media/D/ogu-images
+work = /media/D/ogu-images/work
+name = ogu-games
+; Free space on /games besides the games, MiB (games_size_mb = a fixed size)
+games_free_mb = 1024
+
+; ---------------------------------------------------------------------------
+; A game: [id] with
+;   dir        its directory on /games (default: the id)
+;   install    copy (default): "source" copied whole, without "exclude";
+;              homm3, halflife: the SDK's scripts/<x>-install.sh from "source"
+;              (only what the engine reads; "options" passed to it);
+;              none: only the files below
+;   source     the game on this PC
+;   exclude    glob of what not to copy (relative path or name), may repeat
+;   file       SRC [-> DST]: a file more, into the game's directory (DST
+;              relative to it, ending in / for a directory), may repeat
+;   overlay    a directory copied over the game (wine.ini, settings)
+;   run        a program run afterwards with GAME_DIR, SOURCE, SDK_DIR,
+;              DATA_DIR set (patches the game's files)
+;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
+;   cover      a picture for bare_app's home screen: cropped square
+;              (cover_crop: center, top, bottom, left, right), 240x240,
+;              saved as cover.png in the game's directory
+; ---------------------------------------------------------------------------
+
+[heroes3]
+; Heroes of Might and Magic III: Data, Maps, MP3 of an installation (here a
+; HotA one), the VCMI mods Horn of the Abyss and the Russian translation
+; (downloaded once into dl/hota)
+install = homm3
+source = /media/D/Games/HoMM3_HotA/game_info/data
+
+[halflife]
+; Half-Life from Steam: valve/ and valve_russian/ (scripts/halflife-install.sh)
+install = halflife
+source = /media/D/Games/Steam/steamapps/common/Half-Life
+cover = /media/D/Games/Steam/appcache/librarycache/70/library_600x900.jpg
+cover_crop = top
+
+[pirates]
+; Sid Meier's Pirates! (2004, Steam), Wine: bare_app_wine's wine.ini is
+; this game's
+source = /media/D/Games/Steam/steamapps/common/Sid Meier's Pirates!
+exclude = *.log
+file = apps/bare_app/ports/wine/wine.ini -> wine.ini
+cover = /media/D/Games/Steam/appcache/librarycache/3920/library_600x900.jpg
+cover_crop = top
+
+[daemonica]
+; Daemonica (2006, Russian edition), Wine. Left out: the installer's
+; leftovers and GameRus.exe (283 MB: the Russian files, already unpacked).
+; The engine wants OpenAL from Windows' SysWOW64 next to it, its text the
+; Arial and Palatino fonts in the Wine prefix (a new prefix keeps them).
+source = /media/D/Games/Daemonica
+exclude = GameRus.exe
+exclude = UNWISE.EXE
+exclude = UNWISE.INI
+exclude = INSTALL.LOG
+exclude = *.url
+exclude = Data/daemonica.log
+exclude = Data/Savedgames/*
+file = /media/C/Windows/SysWOW64/OpenAL32.dll
+file = /media/C/Windows/SysWOW64/wrap_oal.dll
+overlay = games/daemonica/overlay
+run = games/daemonica/prepare.sh
+data = /media/C/Windows/Fonts/arial*.ttf -> wine/prefix/drive_c/windows/Fonts/
+data = /media/C/Windows/Fonts/pala*.ttf -> wine/prefix/drive_c/windows/Fonts/
+data = /media/C/Windows/Fonts/Meatcm__.ttf -> wine/prefix/drive_c/windows/Fonts/
+cover = /media/D/Games/Daemonica/Bitmaps/Externals/MMenubcg.png
+cover_crop = center
