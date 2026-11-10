@@ -1,0 +1,27 @@
+From: OdroidLinux SDK
+Subject: [PATCH] irqchip/meson-gpio: pass irq_set_wake to the parent
+
+The GPIO interrupt controller had no irq_set_wake and no
+IRQCHIP_SKIP_SET_WAKE, so enable_irq_wake() on any GPIO interrupt
+failed with -ENXIO. Drivers that ignore that error then warn
+"Unbalanced IRQ wake disable" on resume.
+
+On the ODROID-GO Ultra both PMICs (RK817 with the power key and its
+RTC, RK818 with the charger) signal through GPIO interrupts. In
+suspend-to-idle the kernel disables every interrupt that is not armed
+for wakeup, so nothing could wake the board: it slept until power was
+cut. Pass the call to the parent (the GIC skips it), as other
+hierarchical GPIO interrupt controllers do; s2idle now wakes on the
+RTC alarm (IRQ 17, RK817).
+
+---
+--- a/drivers/irqchip/irq-meson-gpio.c
++++ b/drivers/irqchip/irq-meson-gpio.c
+@@ -535,6 +535,7 @@
+ 	.irq_eoi		= irq_chip_eoi_parent,
+ 	.irq_set_type		= meson_gpio_irq_set_type,
+ 	.irq_retrigger		= irq_chip_retrigger_hierarchy,
++	.irq_set_wake		= irq_chip_set_wake_parent,
+ #ifdef CONFIG_SMP
+ 	.irq_set_affinity	= irq_chip_set_affinity_parent,
+ #endif

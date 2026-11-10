@@ -1,0 +1,160 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: reset: odroid-go-ultra: release the PMIC sleep line
+
+GPIOAO_4 goes to the RK817 SLEEP pin. The board's BL30 (Hardkernel
+odroidgou pwr_ctrl.c, code written for boards where GPIOAO_4 switches
+VDDCPU_A) drives it low when a deep suspend starts and high when it
+hands the SoC back, and leaves it driven high. The RK817 then goes into
+its sleep state while Linux runs (SYS_STS 0x82, cold boot 0x80), with
+its sleep settings: vcc_lcd (LDO8, off in suspend) is cut and the panel
+comes back blank. Worse, a later power off or restart sets the SLEEP
+pin function to power down, active high (patches 0016, 0017): with the
+line already high the RK817 powers down at once and the board is left
+half powered, red LED on, power key dead, until the battery is
+disconnected. The RK817 is never reset, so a reboot or a watchdog reset
+does not bring the panel back either.
+
+Get the line through a GPIO lookup (aobus-banks 4) and turn it back into
+an input, as Linux finds it at boot, in a noirq resume (before the PMIC
+drivers set the SLEEP pin function back to none and before the panel)
+and before the SLEEP pin function is set for power off and restart.
+
+Tested: after a deep suspend SYS_STS reads 0x80, the panel shows the
+picture again, and reboot and power off work.
+
+---
+--- a/drivers/power/reset/odroid-go-ultra-poweroff.c
++++ b/drivers/power/reset/odroid-go-ultra-poweroff.c
+@@ -12,6 +12,9 @@
+ #include <linux/reboot.h>
+ #include <linux/i2c.h>
+ #include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/gpio/machine.h>
++#include <linux/pm.h>
+ 
+ /*
+  * The Odroid Go Ultra has 2 PMICs:
+@@ -50,8 +53,42 @@
+ 	struct device *dev;
+ 	struct device *rk817;
+ 	struct device *rk818;
++	struct gpio_desc *sleep;
+ };
+ 
++/*
++ * GPIOAO_4 goes to the RK817 SLEEP pin; no device tree user, Linux finds it
++ * as an input, low. The Amlogic BL30 of this board (Hardkernel's
++ * odroidgou pwr_ctrl.c, written for boards where GPIOAO_4 switches VDDCPU_A
++ * on) drives it low when a deep suspend (PSCI SYSTEM_SUSPEND) starts and
++ * high when it hands the SoC back, and leaves it so. The RK817 then goes
++ * into its sleep state while Linux runs (SYS_STS 0x82 instead of 0x80),
++ * with its sleep settings: vcc_lcd off, the panel comes back blank. And a
++ * later power off or restart, which sets the SLEEP pin to power the RK817
++ * down when it goes high, powers it down at once: the board is left half
++ * powered (red LED) until the battery is disconnected; it is not undone by
++ * a reboot either, the RK817 is never reset.
++ */
++static struct gpiod_lookup_table odroid_go_ultra_sleep_gpio_table = {
++	.dev_id = "odroid-go-ultra-poweroff",
++	.table = {
++		GPIO_LOOKUP("aobus-banks", 4, "sleep", GPIO_ACTIVE_HIGH),
++		{ }
++	},
++};
++
++/* Let go of the sleep line again, as found at boot: input, pulled low */
++static void odroid_go_ultra_release_sleep_line(struct odroid_go_ultra_poweroff_data *poweroff_data)
++{
++	if (!poweroff_data->sleep)
++		return;
++
++	if (gpiod_direction_input(poweroff_data->sleep))
++		dev_err(poweroff_data->dev, "failed to release the PMIC sleep line\n");
++	else if (gpiod_get_value_cansleep(poweroff_data->sleep))
++		dev_err(poweroff_data->dev, "PMIC sleep line still high\n");
++}
++
+ /* DEV_OFF (power off) or DEV_OFF_RST (reset to power-on values) on the RK818 */
+ static int odroid_go_ultra_pmics_off(struct odroid_go_ultra_poweroff_data *poweroff_data,
+ 				     unsigned int rk818_bit, const char *what)
+@@ -75,6 +112,9 @@
+ 
+ 	dev_info(poweroff_data->dev, "Setting PMICs for %s", what);
+ 
++	/* The SLEEP pin function below must not see the line high already */
++	odroid_go_ultra_release_sleep_line(poweroff_data);
++
+ 	/* RK817: power down on its SLEEP pin going high */
+ 	ret = regmap_update_bits(rk817, RK817_SYS_CFG(3),
+ 				 RK817_SLPPIN_FUNC_MSK | RK817_SLPPOL_MSK,
+@@ -155,6 +195,11 @@
+ 	if (ret)
+ 		return dev_err_probe(&pdev->dev, ret, "failed to get rk818 mfd data\n");
+ 
++	poweroff_data->sleep = devm_gpiod_get_optional(&pdev->dev, "sleep", GPIOD_ASIS);
++	if (IS_ERR(poweroff_data->sleep))
++		return dev_err_probe(&pdev->dev, PTR_ERR(poweroff_data->sleep),
++				     "failed to get the PMIC sleep line\n");
++
+ 	/* RK817 PMIC Device */
+ 	ret = odroid_go_ultra_poweroff_get_pmic_device(&pdev->dev, "rockchip,rk817",
+ 						       &poweroff_data->rk817);
+@@ -183,11 +228,27 @@
+ 
+ 	return 0;
+ }
++/*
++ * In the noirq phase, before the PMICs (whose resume sets the RK817 SLEEP
++ * pin function back to none) and the panel resume.
++ */
++static int odroid_go_ultra_poweroff_resume_noirq(struct device *dev)
++{
++	odroid_go_ultra_release_sleep_line(dev_get_drvdata(dev));
++
++	return 0;
++}
++
++static const struct dev_pm_ops odroid_go_ultra_poweroff_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(NULL, odroid_go_ultra_poweroff_resume_noirq)
++};
++
+ static struct platform_device *pdev;
+ 
+ static struct platform_driver odroid_go_ultra_poweroff_driver = {
+ 	.driver = {
+ 		.name	= "odroid-go-ultra-poweroff",
++		.pm	= pm_sleep_ptr(&odroid_go_ultra_poweroff_pm_ops),
+ 	},
+ 	.probe = odroid_go_ultra_poweroff_probe,
+ };
+@@ -200,15 +261,20 @@
+ 	if (!of_device_is_compatible(of_root, "hardkernel,odroid-go-ultra"))
+ 		return -ENODEV;
+ 
++	gpiod_add_lookup_table(&odroid_go_ultra_sleep_gpio_table);
++
+ 	ret = platform_driver_register(&odroid_go_ultra_poweroff_driver);
+-	if (ret)
++	if (ret) {
++		gpiod_remove_lookup_table(&odroid_go_ultra_sleep_gpio_table);
+ 		return ret;
++	}
+ 
+ 	pdev = platform_device_register_resndata(NULL, "odroid-go-ultra-poweroff", -1,
+ 						 NULL, 0, NULL, 0);
+ 
+ 	if (IS_ERR(pdev)) {
+ 		platform_driver_unregister(&odroid_go_ultra_poweroff_driver);
++		gpiod_remove_lookup_table(&odroid_go_ultra_sleep_gpio_table);
+ 		return PTR_ERR(pdev);
+ 	}
+ 
+@@ -223,6 +289,7 @@
+ 
+ 	platform_device_unregister(pdev);
+ 	platform_driver_unregister(&odroid_go_ultra_poweroff_driver);
++	gpiod_remove_lookup_table(&odroid_go_ultra_sleep_gpio_table);
+ }
+ 
+ module_init(odroid_go_ultra_poweroff_init);

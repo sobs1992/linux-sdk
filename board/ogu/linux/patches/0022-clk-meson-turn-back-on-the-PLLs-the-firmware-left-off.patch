@@ -1,0 +1,137 @@
+From: OdroidLinux SDK
+Subject: [PATCH] clk: meson: turn back on the PLLs the firmware left off
+
+On the G12B (ODROID-GO Ultra) the Amlogic BL30 hands the SoC back after
+a deep suspend (PSCI SYSTEM_SUSPEND) with gp0_pll, sys_pll and sys1_pll
+switched off and in reset (HHI_SYS_PLL_CNTL0 0xd80204c8 before,
+0x280204c8 after; HHI_GP0_PLL_CNTL0 0x800404e9), while the clock
+framework still counts them as enabled and never enables them again:
+
+- gp0_pll is the MIPI-DSI pixel clock: the panel is initialised again
+  on resume with no clock and stays blank.
+- sys_pll feeds the A73 cluster. About two seconds after the resume
+  BL30 also moves both clusters onto fixed fclk_div2 paths (the A73 at
+  50 MHz, "Big core clk resume rate 50000000" on its console) and turns
+  the two CPU PLLs off once more. The next cpufreq change reprograms the
+  PLL, leaves it off as it found it, and switches the cluster onto it:
+  the A73 cores stop and the system hangs.
+
+Give the PLL ops a restore_context that turns a PLL back on when the
+framework counts it as enabled but the hardware has it off (its
+registers keep the rate), and call clk_restore_context() from a syscore
+resume of the G12A clock controller, which runs on the boot CPU before
+the non-boot CPUs and any device resume. For the late switch-off of the
+CPU PLLs, the sys_pll notifier turns the PLL on before it moves the
+cluster back onto it.
+
+Tested: deep suspend and resume with all six cores online under
+schedutil, repeated, panel back on; before, the board hung right after
+"GFP mask restored".
+
+---
+--- a/drivers/clk/meson/clk-pll.c
++++ b/drivers/clk/meson/clk-pll.c
+@@ -482,6 +482,26 @@
+ };
+ EXPORT_SYMBOL_NS_GPL(meson_clk_pcie_pll_ops, "CLK_MESON");
+ 
++/*
++ * Firmware can stop a PLL across a system suspend: on the G12B the Amlogic
++ * BL30 hands the SoC back after a deep suspend (PSCI SYSTEM_SUSPEND) with
++ * gp0_pll, the MIPI-DSI pixel clock, switched off, while the clock framework
++ * still counts it as enabled and never enables it again. Turn such a PLL
++ * back on, with the settings its registers kept.
++ */
++static void meson_clk_pll_restore_context(struct clk_hw *hw)
++{
++	if (!__clk_get_enable_count(hw->clk) || meson_clk_pll_is_enabled(hw))
++		return;
++
++	if (meson_clk_pll_enable(hw))
++		pr_err("%s: %s is off and does not lock\n", __func__,
++		       clk_hw_get_name(hw));
++	else
++		pr_info("%s: %s was off, turned back on\n", __func__,
++			clk_hw_get_name(hw));
++}
++
+ const struct clk_ops meson_clk_pll_ops = {
+ 	.init		= meson_clk_pll_init,
+ 	.recalc_rate	= meson_clk_pll_recalc_rate,
+@@ -489,7 +509,8 @@
+ 	.set_rate	= meson_clk_pll_set_rate,
+ 	.is_enabled	= meson_clk_pll_is_enabled,
+ 	.enable		= meson_clk_pll_enable,
+-	.disable	= meson_clk_pll_disable
++	.disable	= meson_clk_pll_disable,
++	.restore_context = meson_clk_pll_restore_context,
+ };
+ EXPORT_SYMBOL_NS_GPL(meson_clk_pll_ops, "CLK_MESON");
+ 
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -16,6 +16,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/clk.h>
+ #include <linux/module.h>
++#include <linux/syscore_ops.h>
+ 
+ #include "clk-mpll.h"
+ #include "clk-pll.h"
+@@ -1800,6 +1801,22 @@
+ 		 * sys_pll
+ 		 */
+ 
++		/*
++		 * On the G12B the Amlogic BL30, handing the SoC back after a
++		 * deep suspend (PSCI SYSTEM_SUSPEND), moves both CPU clusters
++		 * to fixed clocks and turns sys_pll and sys1_pll off, without
++		 * the clock framework knowing. The PLL keeps its new rate but
++		 * stays off; switching the cluster onto it would stop the
++		 * cluster. Turn it back on first.
++		 */
++		if (!clk_hw_is_enabled(clk_hw_get_parent(nb_data->sys_pll)) &&
++		    meson_clk_pll_ops.enable(clk_hw_get_parent(nb_data->sys_pll))) {
++			pr_err("%s: %s is off and does not lock, staying on %s\n",
++			       __func__, clk_hw_get_name(nb_data->sys_pll),
++			       clk_hw_get_name(nb_data->cpu_clk_dyn));
++			return NOTIFY_OK;
++		}
++
+ 		/* Configure cpu_clk to use sys_pll */
+ 		clk_hw_set_parent(nb_data->cpu_clk,
+ 				  nb_data->sys_pll);
+@@ -5447,6 +5464,24 @@
+ 	int (*dvfs_setup)(struct platform_device *pdev);
+ };
+ 
++/*
++ * Runs on the boot CPU right after the firmware hands the SoC back, before
++ * any device (the display among them) resumes: turn back on the PLLs the
++ * firmware left off (see meson_clk_pll_restore_context()).
++ */
++static void g12a_clkc_syscore_resume(void *data)
++{
++	clk_restore_context();
++}
++
++static const struct syscore_ops g12a_clkc_syscore_ops = {
++	.resume = g12a_clkc_syscore_resume,
++};
++
++static struct syscore g12a_clkc_syscore = {
++	.ops = &g12a_clkc_syscore_ops,
++};
++
+ static int g12a_clkc_probe(struct platform_device *pdev)
+ {
+ 	const struct meson_clkc_data *clkc_data;
+@@ -5464,6 +5499,8 @@
+ 	g12a_data = container_of(clkc_data, struct g12a_clkc_data,
+ 				 clkc_data);
+ 
++	register_syscore(&g12a_clkc_syscore);
++
+ 	if (g12a_data->dvfs_setup)
+ 		return g12a_data->dvfs_setup(pdev);
+ 
