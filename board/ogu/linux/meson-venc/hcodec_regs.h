@@ -1,0 +1,209 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * HCODEC registers of the Amlogic DOS block, as word indices of DOS
+ * (the address is DOS + index * 4). Taken from Amlogic's 4.9 kernel
+ * (include/linux/amlogic/media/registers/regs/hcodec_regs.h, dos_regs.h).
+ * Only what the H.264 encoder uses.
+ */
+#ifndef __MESON_HCODEC_REGS_H
+#define __MESON_HCODEC_REGS_H
+
+/* the region "hcodec" of the node starts at word 0x1000 */
+#define HCODEC_BASE			0x1000
+/* the region "dos-top" at word 0x3f00 */
+#define DOS_TOP_BASE			0x3f00
+
+/* DOS top: shared with the decoder */
+#define DOS_GCLK_EN0			0x3f01
+#define DOS_GEN_CTRL0			0x3f02
+#define DOS_SW_RESET1			0x3f07
+#define DOS_MEM_PD_HCODEC		0x3f32
+
+/* AO RTI (ao-sysctrl), byte offsets: power of the DOS parts */
+#define AO_RTI_GEN_PWR_SLEEP0		0xe8
+#define AO_RTI_GEN_PWR_ISO0		0xec
+#define GEN_PWR_HCODEC			(BIT(1) | BIT(0))
+#define GEN_ISO_HCODEC			(BIT(5) | BIT(4))
+
+#define HCODEC_ASSIST_MMC_CTRL1		0x1002
+
+/*
+ * MFDIN, the input of the encoder. From GXBB on the registers sit 8 words
+ * lower than their names in hcodec_regs.h (Amlogic's encoder.c writes them
+ * with reg_offset = -8); these are the addresses as used on G12.
+ */
+#define HCODEC_MFDIN_REG1_CTRL		(0x1011 - 8)
+#define HCODEC_MFDIN_REG3_CANV		(0x1013 - 8)
+#define HCODEC_MFDIN_REG4_LNR0		(0x1014 - 8)
+#define HCODEC_MFDIN_REG5_LNR1		(0x1015 - 8)
+#define HCODEC_MFDIN_REG8_DMBL		(0x1018 - 8)
+#define HCODEC_MFDIN_REG9_ENDN		(0x1019 - 8)
+/* noise reduction, REGB_AMPC + 2.. + 0xb */
+#define HCODEC_MFDIN_REG0D		(0x101b + 0x2 - 8)
+#define HCODEC_MFDIN_REG0E		(0x101b + 0x3 - 8)
+#define HCODEC_MFDIN_REG0F		(0x101b + 0x4 - 8)
+#define HCODEC_MFDIN_REG10		(0x101b + 0x5 - 8)
+#define HCODEC_MFDIN_REG11		(0x101b + 0x6 - 8)
+#define HCODEC_MFDIN_REG12		(0x101b + 0x7 - 8)
+#define HCODEC_MFDIN_REG13		(0x101b + 0x8 - 8)
+#define HCODEC_MFDIN_REG14		(0x101b + 0x9 - 8)
+#define HCODEC_MFDIN_REG15		(0x101b + 0xa - 8)
+#define HCODEC_MFDIN_REG16		(0x101b + 0xb - 8)
+
+#define HCODEC_ASSIST_AMR1_INT0		0x1025
+#define HCODEC_ASSIST_AMR1_INT1		0x1026
+#define HCODEC_ASSIST_AMR1_INT3		0x1028
+#define HCODEC_ASSIST_MBOX2_CLR_REG	0x1079
+#define HCODEC_ASSIST_MBOX2_MASK	0x107a
+
+/* the AMRISC processor of HCODEC */
+#define HCODEC_MPSR			0x1301
+#define HCODEC_MPC_E			0x1308
+#define HCODEC_CPSR			0x1321
+#define HCODEC_IMEM_DMA_CTRL		0x1340
+#define HCODEC_IMEM_DMA_ADR		0x1341
+#define HCODEC_IMEM_DMA_COUNT		0x1342
+
+#define HCODEC_HDEC_MC_OMEM_AUTO	0x1930
+#define HCODEC_ANC0_CANVAS_ADDR		0x1990
+#define HCODEC_DBKR_CANVAS_ADDR		0x19b0
+#define HCODEC_DBKW_CANVAS_ADDR		0x19b1
+#define HCODEC_REC_CANVAS_ADDR		0x19b2
+#define HCODEC_CURR_CANVAS_CTRL		0x19b3
+
+/* scratch registers: the interface of the microcode */
+#define HCODEC_HENC_SCRATCH_0		0x1ac0
+#define HCODEC_HENC_SCRATCH_1		0x1ac1
+#define HCODEC_HENC_SCRATCH_2		0x1ac2
+#define HCODEC_HENC_SCRATCH_3		0x1ac3
+#define HCODEC_HENC_SCRATCH_4		0x1ac4
+#define HCODEC_HENC_SCRATCH_5		0x1ac5
+#define HCODEC_HENC_SCRATCH_6		0x1ac6
+#define HCODEC_HENC_SCRATCH_7		0x1ac7
+#define HCODEC_HENC_SCRATCH_8		0x1ac8
+#define HCODEC_HENC_SCRATCH_9		0x1ac9
+#define HCODEC_HENC_SCRATCH_A		0x1aca
+#define HCODEC_HENC_SCRATCH_B		0x1acb
+#define HCODEC_HENC_SCRATCH_D		0x1acd
+#define HCODEC_HENC_SCRATCH_E		0x1ace
+#define HCODEC_HENC_SCRATCH_F		0x1acf
+#define HCODEC_HENC_SCRATCH_G		0x1ad0
+#define HCODEC_HENC_SCRATCH_H		0x1ad1
+#define HCODEC_HENC_SCRATCH_I		0x1ad2
+#define HCODEC_HENC_SCRATCH_J		0x1ad3
+#define HCODEC_HENC_SCRATCH_K		0x1ad4
+#define HCODEC_HENC_SCRATCH_L		0x1ad5
+#define HCODEC_IE_DATA_FEED_BUFF_INFO	0x1ad8
+
+#define HCODEC_VLC_STATUS_CTRL		0x1d00
+#define HCODEC_VLC_CONFIG		0x1d01
+#define HCODEC_VLC_VB_START_PTR		0x1d10
+#define HCODEC_VLC_VB_END_PTR		0x1d11
+#define HCODEC_VLC_VB_WR_PTR		0x1d12
+#define HCODEC_VLC_VB_SW_RD_PTR		0x1d14
+#define HCODEC_VLC_VB_CONTROL		0x1d16
+#define HCODEC_VLC_VB_MEM_CTL		0x1d17
+#define HCODEC_VLC_TOTAL_BYTES		0x1d1a
+#define HCODEC_VLC_ADV_CONFIG		0x1d25
+#define HCODEC_VLC_INT_CONTROL		0x1d30
+#define HCODEC_VLC_PIC_SIZE		0x1d31
+#define HCODEC_VLC_PIC_POSITION		0x1d33
+#define HCODEC_VLC_MB_INFO		0x1d35
+#define HCODEC_VLC_HCMD_CONFIG		0x1d54
+
+#define HCODEC_QDCT_STATUS_CTRL		0x1f00
+#define HCODEC_QDCT_CONFIG		0x1f01
+#define HCODEC_IGNORE_CONFIG		0x1f02
+#define HCODEC_IGNORE_CONFIG_2		0x1f03
+#define HCODEC_QDCT_MB_START_PTR	0x1f10
+#define HCODEC_QDCT_MB_END_PTR		0x1f11
+#define HCODEC_QDCT_MB_WR_PTR		0x1f12
+#define HCODEC_QDCT_MB_RD_PTR		0x1f13
+#define HCODEC_QDCT_MB_CONTROL		0x1f15
+#define HCODEC_QDCT_MB_BUFF		0x1f17
+#define HCODEC_QDCT_Q_QUANT_I		0x1f1c
+#define HCODEC_QDCT_Q_QUANT_P		0x1f1d
+#define HCODEC_QDCT_ADV_CONFIG		0x1f34
+#define HCODEC_IE_WEIGHT		0x1f35
+#define HCODEC_Q_QUANT_CONTROL		0x1f36
+#define HCODEC_QUANT_TABLE_DATA		0x1f39
+#define HCODEC_SAD_CONTROL_0		0x1f3a
+#define HCODEC_SAD_CONTROL_1		0x1f3b
+#define HCODEC_QDCT_VLC_QUANT_CTL_0	0x1f3c
+#define HCODEC_QDCT_VLC_QUANT_CTL_1	0x1f3d
+#define HCODEC_IE_CONTROL		0x1f40
+#define HCODEC_SAD_CONTROL		0x1f43
+#define HCODEC_IE_RESULT_BUFFER		0x1f44
+#define HCODEC_ME_STATUS		0x1f4b
+#define HCODEC_ME_SKIP_LINE		0x1f4d
+#define HCODEC_ME_SAD_ENOUGH_01		0x1f50
+#define HCODEC_ME_SAD_ENOUGH_23		0x1f51
+#define HCODEC_ME_STEP0_CLOSE_MV	0x1f52
+#define HCODEC_ME_F_SKIP_SAD		0x1f53
+#define HCODEC_ME_F_SKIP_WEIGHT		0x1f54
+#define HCODEC_ME_MV_MERGE_CTL		0x1f55
+#define HCODEC_ME_MV_WEIGHT_01		0x1f56
+#define HCODEC_ME_MV_WEIGHT_23		0x1f57
+#define HCODEC_ME_SAD_RANGE_INC		0x1f58
+#define HCODEC_ME_WEIGHT		0x1f60
+#define HCODEC_ADV_MV_CTL0		0x1f69
+#define HCODEC_ADV_MV_CTL1		0x1f6a
+#define HCODEC_V3_SKIP_CONTROL		0x1f6c
+#define HCODEC_V3_SKIP_WEIGHT		0x1f70
+#define HCODEC_V3_L1_SKIP_MAX_SAD	0x1f71
+#define HCODEC_V3_L2_SKIP_WEIGHT	0x1f72
+#define HCODEC_V3_MV_SAD_TABLE		0x1f73
+#define HCODEC_V3_F_ZERO_CTL_0		0x1f74
+#define HCODEC_V3_F_ZERO_CTL_1		0x1f75
+#define HCODEC_V3_IPRED_TYPE_WEIGHT_0	0x1f78
+#define HCODEC_V3_IPRED_TYPE_WEIGHT_1	0x1f79
+#define HCODEC_V3_LEFT_SMALL_MAX_SAD	0x1f7a
+#define HCODEC_V4_FORCE_SKIP_CFG	0x1f7b
+#define HCODEC_V5_MB_DIFF_SUM		0x1f7c
+#define HCODEC_V5_SMALL_DIFF_CNT	0x1f7d
+#define HCODEC_V5_SIMPLE_MB_CTL		0x1f7e
+#define HCODEC_V5_SIMPLE_MB_DQUANT	0x1f7f
+#define HCODEC_V5_SIMPLE_MB_ME_WEIGHT	0x1f80
+
+/* what the microcode reads and writes in the scratch registers */
+#define ENCODER_STATUS			HCODEC_HENC_SCRATCH_0
+#define MEM_OFFSET_REG			HCODEC_HENC_SCRATCH_1
+#define DEBUG_REG			HCODEC_HENC_SCRATCH_2
+#define H264_ENC_CBR_TABLE_ADDR		HCODEC_HENC_SCRATCH_3
+#define H264_ENC_CBR_MB_SIZE_ADDR	HCODEC_HENC_SCRATCH_4
+#define IDR_PIC_ID			HCODEC_HENC_SCRATCH_5
+#define FRAME_NUMBER			HCODEC_HENC_SCRATCH_6
+#define PIC_ORDER_CNT_LSB		HCODEC_HENC_SCRATCH_7
+#define LOG2_MAX_PIC_ORDER_CNT_LSB	HCODEC_HENC_SCRATCH_8
+#define LOG2_MAX_FRAME_NUM		HCODEC_HENC_SCRATCH_9
+#define ANC0_BUFFER_ID			HCODEC_HENC_SCRATCH_A
+#define QPPICTURE			HCODEC_HENC_SCRATCH_B
+#define IE_ME_MB_TYPE			HCODEC_HENC_SCRATCH_D
+#define IE_ME_MODE			HCODEC_HENC_SCRATCH_E
+#define IE_REF_SEL			HCODEC_HENC_SCRATCH_F
+#define H264_ENC_CBR_CTL		HCODEC_HENC_SCRATCH_G
+#define H264_ENC_CBR_TARGET_SIZE	HCODEC_HENC_SCRATCH_H
+#define INFO_DUMP_START_ADDR		HCODEC_HENC_SCRATCH_I
+#define H264_ENC_CBR_REGION_SIZE	HCODEC_HENC_SCRATCH_J
+#define H264_ENC_SVC_PIC_TYPE		HCODEC_HENC_SCRATCH_K
+#define FIXED_SLICE_CFG			HCODEC_HENC_SCRATCH_L
+
+/* ENCODER_STATUS */
+#define ENCODER_IDLE			0
+#define ENCODER_SEQUENCE		1
+#define ENCODER_PICTURE			2
+#define ENCODER_IDR			3
+#define ENCODER_NON_IDR			4
+#define ENCODER_SEQUENCE_DONE		7
+#define ENCODER_PICTURE_DONE		8
+#define ENCODER_IDR_DONE		9
+#define ENCODER_NON_IDR_DONE		10
+#define ENCODER_ERROR			0xff
+
+#define ENC_SLC_REF			0x8410
+
+#define HENC_MB_Type_I4MB		0x9
+#define HENC_MB_Type_AUTO		0xf
+#define HENC_SKIP_RUN_AUTO		0xffff
+
+#endif

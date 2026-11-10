@@ -1,0 +1,10 @@
+config BR2_PACKAGE_MESON_VENC_FIRMWARE
+	bool "meson-venc-firmware"
+	help
+	  Microcode of the HCODEC H.264 encoder of Amlogic G12A/G12B
+	  (ga_h264_enc_cabac, Amlogic), for the meson-venc kernel driver:
+	  /lib/firmware/meson/venc/g12a_h264_enc_cabac.bin. Taken out of
+	  the firmware package h264_enc.bin of Amlogic's media_modules
+	  (CoreELEC's copy); not in linux-firmware.
+
+	  https://github.com/CoreELEC/media_modules-aml

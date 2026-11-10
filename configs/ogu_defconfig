@@ -49,6 +49,8 @@ LINUX_FRAGMENTS := $(BOARD_DIR)/linux/ogu.config
 # Kernel patches (*.patch, in name order), applied to a copy of LINUX_SRC
 LINUX_PATCHES   := $(BOARD_DIR)/linux/patches
 LINUX_DTBS      := amlogic/meson-g12b-odroid-go-ultra.dtb
+# Out-of-tree modules: the HCODEC H.264 encoder (V4L2, /dev/videoN)
+LINUX_EXT_MODULES := $(BOARD_DIR)/linux/meson-venc
 # The CPU clusters stay within the factory limits (A73 1908 MHz, A53 1800
 # MHz): the dts patch turns off the A53 points above that.
 LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0

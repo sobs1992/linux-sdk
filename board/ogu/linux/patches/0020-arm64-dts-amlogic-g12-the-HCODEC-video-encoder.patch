@@ -1,0 +1,48 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm64: dts: amlogic: g12: the HCODEC video encoder
+
+HCODEC sits inside the DOS block at 0xff624000 (DOS words
+0x1000-0x1fff) and raises mailbox 2 of DOS (GIC SPI 45, Amlogic's dts:
+amvenc_avc, "mailbox_2"); its resets, clock gates and memory power are
+in the top of DOS, shared with the decoder. Power comes from the same
+AO_RTI_GEN_PWR_SLEEP0/ISO0 registers as for VDEC_1, through ao-sysctrl.
+The node is for the meson-venc driver; enabled on the ODROID-GO Ultra.
+
+--- a/arch/arm64/boot/dts/amlogic/meson-g12-common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/meson-g12-common.dtsi
+@@ -2158,6 +2158,22 @@
+ 			reset-names = "esparser";
+ 		};
+ 
++		venc: video-encoder@ff624000 {
++			compatible = "amlogic,g12a-hcodec";
++			/* HCODEC lies inside the DOS block of the decoder; the top
++			 * of DOS holds the resets, clock gates and memory power of both */
++			reg = <0x0 0xff624000 0x0 0x4000>,
++			      <0x0 0xff62fc00 0x0 0x400>;
++			reg-names = "hcodec", "dos-top";
++			interrupts = <GIC_SPI 45 IRQ_TYPE_EDGE_RISING>;
++			amlogic,ao-sysctrl = <&rti>;
++			amlogic,canvas = <&canvas>;
++			clocks = <&clkc CLKID_DOS>,
++				 <&clkc CLKID_HCODEC>;
++			clock-names = "dos", "hcodec";
++			status = "disabled";
++		};
++
+ 		vpu: vpu@ff900000 {
+ 			compatible = "amlogic,meson-g12a-vpu";
+ 			reg = <0x0 0xff900000 0x0 0x100000>,
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -855,6 +855,10 @@
+ 	status = "okay";
+ };
+ 
++&venc {
++	status = "okay";
++};
++
+ &uart_AO {
+ 	status = "okay";
+ 	pinctrl-0 = <&uart_ao_a_pins>;

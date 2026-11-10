@@ -1,0 +1,110 @@
+From: OdroidLinux SDK
+Subject: [PATCH] clk: meson: g12a: add the HCODEC clock
+
+HCODEC, the H.264 encoder of the DOS block, has its own clock in the
+upper half of HHI_VDEC_CLK_CNTL: mux [27:25] with the parents of the
+vdec clocks, divider [22:16], gate [24] (Amlogic's 4.9 kernel,
+g12a_clk_media.c, "hcodec_p0"). Mainline only had the VDEC_1 half of
+that register. Describe it the way vdec_1 is, for G12A, G12B and SM1.
+
+--- a/include/dt-bindings/clock/g12a-clkc.h
++++ b/include/dt-bindings/clock/g12a-clkc.h
+@@ -287,5 +287,8 @@
+ #define CLKID_MIPI_ISP_GATE			276
+ #define CLKID_MIPI_ISP_CSI_PHY0			277
+ #define CLKID_MIPI_ISP_CSI_PHY1			278
++#define CLKID_HCODEC_SEL			279
++#define CLKID_HCODEC_DIV			280
++#define CLKID_HCODEC				281
+ 
+ #endif /* __G12A_CLKC_H */
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -2988,6 +2988,57 @@
+ 	},
+ };
+ 
++/* HCODEC: the H.264 encoder of the DOS block, in the upper half of HHI_VDEC_CLK_CNTL */
++static struct clk_regmap g12a_hcodec_sel = {
++	.data = &(struct clk_regmap_mux_data){
++		.offset = HHI_VDEC_CLK_CNTL,
++		.mask = 0x7,
++		.shift = 25,
++		.flags = CLK_MUX_ROUND_CLOSEST,
++	},
++	.hw.init = &(struct clk_init_data){
++		.name = "hcodec_sel",
++		.ops = &clk_regmap_mux_ops,
++		.parent_hws = g12a_vdec_parents,
++		.num_parents = ARRAY_SIZE(g12a_vdec_parents),
++		.flags = CLK_SET_RATE_PARENT,
++	},
++};
++
++static struct clk_regmap g12a_hcodec_div = {
++	.data = &(struct clk_regmap_div_data){
++		.offset = HHI_VDEC_CLK_CNTL,
++		.shift = 16,
++		.width = 7,
++		.flags = CLK_DIVIDER_ROUND_CLOSEST,
++	},
++	.hw.init = &(struct clk_init_data){
++		.name = "hcodec_div",
++		.ops = &clk_regmap_divider_ops,
++		.parent_hws = (const struct clk_hw *[]) {
++			&g12a_hcodec_sel.hw
++		},
++		.num_parents = 1,
++		.flags = CLK_SET_RATE_PARENT,
++	},
++};
++
++static struct clk_regmap g12a_hcodec = {
++	.data = &(struct clk_regmap_gate_data){
++		.offset = HHI_VDEC_CLK_CNTL,
++		.bit_idx = 24,
++	},
++	.hw.init = &(struct clk_init_data) {
++		.name = "hcodec",
++		.ops = &clk_regmap_gate_ops,
++		.parent_hws = (const struct clk_hw *[]) {
++			&g12a_hcodec_div.hw
++		},
++		.num_parents = 1,
++		.flags = CLK_SET_RATE_PARENT,
++	},
++};
++
+ static struct clk_regmap g12a_vdec_hevcf_sel = {
+ 	.data = &(struct clk_regmap_mux_data){
+ 		.offset = HHI_VDEC2_CLK_CNTL,
+@@ -4706,6 +4757,9 @@
+ 	[CLKID_VDEC_HEVCF_SEL]		= &g12a_vdec_hevcf_sel.hw,
+ 	[CLKID_VDEC_HEVCF_DIV]		= &g12a_vdec_hevcf_div.hw,
+ 	[CLKID_VDEC_HEVCF]		= &g12a_vdec_hevcf.hw,
++	[CLKID_HCODEC_SEL]		= &g12a_hcodec_sel.hw,
++	[CLKID_HCODEC_DIV]		= &g12a_hcodec_div.hw,
++	[CLKID_HCODEC]			= &g12a_hcodec.hw,
+ 	[CLKID_TS_DIV]			= &g12a_ts_div.hw,
+ 	[CLKID_TS]			= &g12a_ts.hw,
+ 	[CLKID_SPICC0_SCLK_SEL]		= &g12a_spicc0_sclk_sel.hw,
+@@ -4933,6 +4987,9 @@
+ 	[CLKID_VDEC_HEVCF_SEL]		= &g12a_vdec_hevcf_sel.hw,
+ 	[CLKID_VDEC_HEVCF_DIV]		= &g12a_vdec_hevcf_div.hw,
+ 	[CLKID_VDEC_HEVCF]		= &g12a_vdec_hevcf.hw,
++	[CLKID_HCODEC_SEL]		= &g12a_hcodec_sel.hw,
++	[CLKID_HCODEC_DIV]		= &g12a_hcodec_div.hw,
++	[CLKID_HCODEC]			= &g12a_hcodec.hw,
+ 	[CLKID_TS_DIV]			= &g12a_ts_div.hw,
+ 	[CLKID_TS]			= &g12a_ts.hw,
+ 	[CLKID_SYS1_PLL_DCO]		= &g12b_sys1_pll_dco.hw,
+@@ -5201,6 +5258,9 @@
+ 	[CLKID_VDEC_HEVCF_SEL]		= &g12a_vdec_hevcf_sel.hw,
+ 	[CLKID_VDEC_HEVCF_DIV]		= &g12a_vdec_hevcf_div.hw,
+ 	[CLKID_VDEC_HEVCF]		= &g12a_vdec_hevcf.hw,
++	[CLKID_HCODEC_SEL]		= &g12a_hcodec_sel.hw,
++	[CLKID_HCODEC_DIV]		= &g12a_hcodec_div.hw,
++	[CLKID_HCODEC]			= &g12a_hcodec.hw,
+ 	[CLKID_TS_DIV]			= &g12a_ts_div.hw,
+ 	[CLKID_TS]			= &g12a_ts.hw,
+ 	[CLKID_GP1_PLL_DCO]		= &sm1_gp1_pll_dco.hw,

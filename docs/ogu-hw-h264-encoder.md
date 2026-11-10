@@ -1,42 +1,53 @@
-# Аппаратный кодер H.264 на GO Ultra (S922X / G12B): оценка переноса
+# Аппаратный кодер H.264 на GO Ultra (S922X / G12B)
 
-Состояние на 2026-11-09: **не перенесён**, трансляция (`bare_app`, `STREAM`) кодирует
-программно (OpenH264, ~0,8 ядра A73 на 854×480 при 30 кадр/с). Здесь — что есть, чего
-нет и план работ.
+Состояние на 2026-11-10: **работает**. Трансляция bare_app (`STREAM`) кодирует
+HCODEC-ом через драйвер `meson-venc` (V4L2 mem2mem): 854×480 за ~3,7 мс на кадр
+вместо ~0,8 ядра A73 у OpenH264; OpenH264 остался запасным. Драйвер, его
+устройство и проверка — `board/ogu/linux/meson-venc/README.md`.
 
-## Что есть в железе и в ядрах
+## Что было и что сделано
 
-- В блоке DOS у G12B есть HCODEC: отдельный микроконтроллер AMRISC с микрокодом
-  кодера H.264 (до 1080p). Регистры HCODEC лежат в той же области DOS
-  (`0xff620000`), что и у декодера.
-- Вендорское ядро Amlogic/Hardkernel 4.9: драйвер `amvenc_avc`
-  (`media_modules`, `frame_sink/encoder/h264/encoder.c`, ~4000 строк) со своим
-  ioctl-интерфейсом `/dev/amvenc_avc` и библиотекой `libvpcodec` в userspace;
-  опирается на вендорские подсистемы `codec_mm` (CMA), `canvas`, `vdec`-питание,
-  загрузку микрокода из `video_ucode.bin`.
-- Mainline 7.2: только декодер `meson-vdec` (staging, V4L2 M2M stateful); драйвер
-  `meson-canvas` есть; часы `dos` есть, а отдельных часов HCODEC (`hcodec_sel/div/gate`)
-  в `g12a.c` нет; домена питания HCODEC для G12A в `meson-ee-pwrc` нет. Amlogic сейчас
-  выкладывает stateless-декодер для S4, G12B у них в списке «потом», кодера в планах нет.
+- В блоке DOS у G12B есть HCODEC: ядро AMRISC с микрокодом кодера H.264 (до
+  1080p) рядом с аппаратными ME/IE, DCT и VLC; регистры — слова DOS
+  0x1000–0x1fff (`0xff624000`), прерывание — mailbox 2 (SPI 45). Есть ещё
+  Wave420L (HEVC, `0xff610000`, SPI 187) — не трогали: для RTSP/VLC нужен H.264.
+- Вендорское ядро 4.9: `amvenc_avc` (media_modules,
+  `frame_sink/encoder/h264/encoder.c`) со своим ioctl и библиотекой
+  (`encoder_libs_aml`, `gx_enc_fast`: таблицы QP, CBR, команды).
+- Mainline 7.2 не имел ни часов HCODEC, ни питания, ни драйвера. Сделано:
+  1. Патч ядра 0019: часы `hcodec_sel/div/gate` (`HHI_VDEC_CLK_CNTL` [27:25],
+     [22:16], [24]) в `g12a.c` для G12A/G12B/SM1, `CLKID_HCODEC*` 279–281.
+  2. Патч 0020: узел `video-encoder@ff624000` (`amlogic,g12a-hcodec`) в
+     `meson-g12-common.dtsi`, выключен; включён в dts GO Ultra.
+  3. Питание — в драйвере, как у `vdec_1.c`: `AO_RTI_GEN_PWR_SLEEP0[1:0]`,
+     `ISO0[5:4]`, `DOS_MEM_PD_HCODEC`, гейты `DOS_GCLK_EN0[26:12]`. Включается с
+     первым кадром, выключается через секунду простоя.
+  4. Драйвер `meson-venc` — внешний модуль SDK (`LINUX_EXT_MODULES`): XR24 и NV12
+     → H.264 Main (CABAC), свой покадровый RC, кадрирование в SPS для размеров,
+     не кратных 16.
+  5. Микрокод `ga_h264_enc_cabac` (24 КБ, код — первые ~11 КБ, грузится 16 КБ
+     IMEM) — Buildroot-пакет `meson-venc-firmware`: из `h264_enc.bin`
+     media_modules Amlogic (копия CoreELEC, закреплённый коммит, sha256), в
+     `/lib/firmware/meson/venc/`. Тот же байт в байт, что в `video_ucode.bin`.
+  6. bare_app: `stream/h264_v4l2.c` — первый V4L2 mem2mem-кодер XBGR32 → H.264 в
+     системе, иначе OpenH264 (`BARE_APP_STREAM_SW=1` — программный всегда).
 
-## План переноса (оценка — недели, не ночь)
+## Что выяснилось по ходу
 
-1. Часы: `hcodec` mux/div/gate в `drivers/clk/meson/g12a.c` (по образцу `vdec_1`),
-   номер в dt-bindings.
-2. Питание: биты HCODEC в `AO_RTI_GEN_PWR_SLEEP0/ISO0` и `DOS_MEM_PD_HCODEC` —
-   либо домен в `meson-ee-pwrc`, либо как это делает `vdec_1.c` сам.
-3. Драйвер V4L2 M2M stateful-кодера `meson-venc` (staging/media/meson): очереди
-   NV12/I420 → H.264, буферы через `dma_alloc_coherent`/CMA вместо `codec_mm`,
-   канвы через `meson_canvas_*`, загрузка микрокода через `request_firmware`
-   (`meson/venc/g12b_h264_enc.bin` — блоб нужно извлечь из `video_ucode.bin`;
-   его лицензия — как у остального микрокода Amlogic, в linux-firmware его нет).
-4. Перенос программирования регистров из `encoder.c` (ME/MC, rate control, CABAC
-   выключен, refs) — основной объём, без документации, сверяясь с вендорским кодом.
-5. Узел в DT (`video-encoder@...` с часами, прерыванием HCODEC, канвой).
-6. В bare_app: бэкенд кодера `stream/h264_v4l2.c` рядом с `h264.c` (тот же интерфейс
-   `h264_new/encode`), выбор при старте: V4L2-устройство есть — оно, иначе OpenH264.
+- Этот микрокод заканчивает и P-кадр статусом `ENCODER_IDR_DONE` (9), не 10;
+  вендорская библиотека так его и ждёт.
+- RGB: MFDIN формат 12 читает кадр линейно по адресу и сам переводит в YUV;
+  перестановка байтов `REG9_ENDN` вендора — для памяти R,G,B,A, для XRGB8888
+  (B,G,R,X) нужна тождественная. Уровни — BT.601 studio range.
+- Регистры MFDIN на GXBB+ сдвинуты на −8 слов от имён в `hcodec_regs.h`.
+- SPS микрокод пишет целыми макроблоками без `frame_cropping`.
+- Канвы кодера — без перестановки байтов (endian 0), в отличие от декодера.
 
-Риски: микрокод и регистры без документации; вендорский драйвер ждёт
-выравниваний и форматов памяти canvas; отладка только на железе (ядро через SD,
-см. ogu-port). Выигрыш: ~0,8 ядра CPU и меньше задержка — для трансляции в
-854×480 программный кодер уже держит 30 кадр/с.
+## Что не сделано
+
+- Не проверена одновременная работа с декодером `meson-vdec`: его старт пишет
+  `DOS_GCLK_EN0 = 0x3ff` и снимает гейты HCODEC.
+- Вход — копия кадра в MMAP-буфер V4L2 (~1,6 МБ на кадр); без копии можно через
+  DMABUF кадра DRM.
+- Драйвер вне дерева ядра; для апстрима — staging-патч и биндинг DT.
+- На OGA (RK3326) аппаратного кодера в mainline нет — там остаётся OpenH264.
