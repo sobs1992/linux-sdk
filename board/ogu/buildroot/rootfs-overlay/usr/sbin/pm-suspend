@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# Sleep; returns once the device is awake again. bare_app runs it when the
+# screen has been off for a while; the power key wakes the device up (the
+# rk817 power key is a wakeup source).
+#
+# Suspend to idle (s2idle), not to RAM: from a deep suspend (PSCI
+# SYSTEM_SUSPEND) only the firmware (BL30) can wake the SoC, and it does not
+# see the power key of this board, only its timer (the meson-vrtc alarm).
+#
+# The LEDs would keep their state (the blue one lit, half way through its
+# heartbeat): they are switched off for the sleep, then each one gets its
+# trigger, or without one its level, back.
+
+leds=
+for led in /sys/class/leds/*; do
+	[ -e "$led/brightness" ] || continue
+	trigger=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$led/trigger")
+	leds="$leds $led|${trigger:-none}|$(cat "$led/brightness")"
+	echo none > "$led/trigger"
+	echo 0 > "$led/brightness"
+done
+
+sync
+echo freeze > /sys/power/state
+rc=$?
+
+for saved in $leds; do
+	led=${saved%%|*}
+	rest=${saved#*|}
+	trigger=${rest%%|*}
+	if [ "$trigger" = none ]; then
+		echo "${rest#*|}" > "$led/brightness"
+	else
+		echo "$trigger" > "$led/trigger"
+	fi
+done
+
+exit $rc
