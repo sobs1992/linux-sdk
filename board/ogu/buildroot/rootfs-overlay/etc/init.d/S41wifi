@@ -6,20 +6,34 @@
 # /etc/mdev.conf) when it is plugged in or pulled out later:
 # wpa_supplicant + DHCP on wlan0. wpa_cli runs /etc/wpa_cli.action on every
 # connection, so DHCP follows network changes (bare_app's Wi-Fi screen).
+#
+# At boot both come: init's "start" and mdev's "add" for wlan0, at the same
+# moment. Starting and stopping hold a lock, and whether the supplicant runs
+# is asked over its socket, not read from its pid file: a second
+# wpa_supplicant that fails to start removes the first one's pid file on
+# its way out, and two of them on one interface leave it disconnected.
 
 IFACE=wlan0
 CONF=/etc/wpa_supplicant.conf
 WPA_PID=/var/run/wpa_supplicant.$IFACE.pid
 DHCP_PID=/var/run/udhcpc.$IFACE.pid
 CLI_PID=/var/run/wpa_cli.$IFACE.pid
+LOCK=/var/run/wifi.$IFACE.lock
 
 running() {
-	[ -f $WPA_PID ] && kill -0 "$(cat $WPA_PID)" 2>/dev/null
+	wpa_cli -i $IFACE ping 2>/dev/null | grep -qx PONG
+}
+
+# the lock is fd 9; the daemons started under it must not keep it open
+lock() {
+	exec 9>$LOCK
+	flock 9
 }
 
 up() {
-	running && return
 	(
+		lock
+		running && exit 0
 		# the driver may still be loading its firmware
 		n=0
 		while [ ! -e /sys/class/net/$IFACE ]; do
@@ -27,26 +41,49 @@ up() {
 			[ $n -le 10 ] || exit 0
 			sleep 1
 		done
-		wpa_supplicant -B -i $IFACE -c $CONF -P $WPA_PID
+		wpa_supplicant -B -i $IFACE -c $CONF -P $WPA_PID 9>&-
 		# wpa_cli runs the action script on every connection, which starts
 		# or renews the DHCP client. Joining a network takes a scan
 		# (seconds), so wpa_cli is there in time; a DHCP client started
 		# before it would ask in vain and wait 20 s to ask again.
-		wpa_cli -B -i $IFACE -a /etc/wpa_cli.action -P $CLI_PID
+		wpa_cli -B -i $IFACE -a /etc/wpa_cli.action -P $CLI_PID 9>&-
 		# a network joined before wpa_cli was there to see it
 		if wpa_cli -i $IFACE status 2>/dev/null | grep -qx wpa_state=COMPLETED; then
 			WPA_ID=$(wpa_cli -i $IFACE status | sed -n 's/^id=//p') \
-				/etc/wpa_cli.action $IFACE CONNECTED
+				/etc/wpa_cli.action $IFACE CONNECTED 9>&-
 		fi
 	) </dev/null >/dev/null 2>&1 &
 }
 
-down() {
-	for pid in $CLI_PID $DHCP_PID $WPA_PID; do
-		[ -f $pid ] && kill "$(cat $pid)" 2>/dev/null
-		rm -f $pid
+# the daemons on the interface, found by their command lines: a pid file
+# is removed by whoever wrote it on its way out, also after a newer
+# instance wrote its own there (an old wpa_cli -a outlives its supplicant)
+daemons() {
+	for pid in $(pidof wpa_supplicant wpa_cli udhcpc); do
+		tr '\0' ' ' </proc/$pid/cmdline 2>/dev/null | grep -q -- "-i $IFACE " && echo $pid
 	done
-	rm -f /var/run/wifi.$IFACE.network
+}
+
+down() {
+	(
+		lock
+		# the supplicant outlives its interface; it is told to go
+		wpa_cli -i $IFACE terminate >/dev/null 2>&1
+		pids=$(daemons)
+		[ -n "$pids" ] && kill $pids 2>/dev/null
+		# wpa_cli -a sees SIGTERM only when its 5 s wait ends; what is
+		# left after that goes without a word
+		n=0
+		for pid in $pids; do
+			while [ $n -lt 60 ] && kill -0 $pid 2>/dev/null; do
+				n=$((n + 1))
+				sleep 0.1
+			done
+			kill -9 $pid 2>/dev/null
+		done
+		rm -f $CLI_PID $DHCP_PID $WPA_PID
+		rm -f /var/run/wifi.$IFACE.network
+	)
 }
 
 case "$1" in
