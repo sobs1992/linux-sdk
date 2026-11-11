@@ -1,4 +1,4 @@
-From 461cf796bca92244fa631adde764f9e25cced75a Mon Sep 17 00:00:00 2001
+From 5f1df62ca809abe2b80a194f671bf518ae31a01f Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 14:43:52 +0100
 Subject: [PATCH 15/17] Dynamic resolution of the 3D view (BFG's resolution
@@ -30,30 +30,37 @@ PostProcess no longer runs for rs_enable alone.
 rs_enable 4: both axes alike; rs_minimum: the smallest scale. Without
 GPU timer queries (Mesa: off in RBDOOM, and panfrost's split batches)
 idResolutionScale::SetCurrentFrameTime steers by the time between
-frames: it drops proportionally when frames take rs_frameDropMilliseconds
-longer than the engine's rate and judges each drop by the 20 frames
-after it; one that did not make them faster (bound by the CPU) is taken
-back, and the next drop waits 300 frames, twice as long each time it
-fails again. It rises a step after waiting at the full rate, waiting
-longer after a rise that had to be taken back.
+frames and by whether the GPU holds them back: GL_BlockingSwapBuffers
+looks (without waiting) at the fence of the frame before when this one
+has been issued; if the GPU is still on it, the GPU is the bottleneck.
+The scale drops proportionally when frames take rs_frameDropMilliseconds
+longer than the engine's rate while the GPU holds them back; when the
+CPU does, fewer pixels would only blur the view (the game pinned to the
+two A53 cores: full size at 56 fps). It rises a step after waiting at
+the full rate, or with the GPU idle while the CPU holds the frames back,
+waiting longer after a rise that had to be taken back. (Judging each
+drop by the frames after it failed in the intro: a camera cut during
+the judgement took a good drop back, 18 fps at the full size for
+seconds.)
 
 Handhelds: rs_enable 4, rs_minimum 0.6. Mali-G52 (854x480): the start of
 mars_city2 27.8 -> 46 fps, the mars_city1 hangar 34 -> 54 fps; light
 scenes keep the full size at 60 fps.
 ---
- neo/d3xp/PlayerView.cpp            |  53 ++++++++-
- neo/d3xp/PlayerView.h              |   5 +
- neo/renderer/Image_intrinsic.cpp   |   3 +
- neo/renderer/Material.cpp          |  18 +++
- neo/renderer/RenderBackend.cpp     |  32 ++++--
- neo/renderer/RenderCommon.h        |   8 +-
- neo/renderer/RenderSystem.cpp      |  28 ++++-
- neo/renderer/RenderSystem.h        |   4 +
- neo/renderer/RenderSystem_init.cpp |   2 +
- neo/renderer/RenderWorld.cpp       |  12 +-
- neo/renderer/ResolutionScale.cpp   | 176 ++++++++++++++++++++++++++++-
- neo/renderer/ResolutionScale.h     |  21 ++++
- 12 files changed, 341 insertions(+), 21 deletions(-)
+ neo/d3xp/PlayerView.cpp                  |  53 +++++++++++-
+ neo/d3xp/PlayerView.h                    |   5 ++
+ neo/renderer/Image_intrinsic.cpp         |   3 +
+ neo/renderer/Material.cpp                |  18 ++++
+ neo/renderer/OpenGL/RenderBackend_GL.cpp |  15 ++++
+ neo/renderer/RenderBackend.cpp           |  34 ++++++--
+ neo/renderer/RenderCommon.h              |   8 +-
+ neo/renderer/RenderSystem.cpp            |  28 ++++--
+ neo/renderer/RenderSystem.h              |   4 +
+ neo/renderer/RenderSystem_init.cpp       |   2 +
+ neo/renderer/RenderWorld.cpp             |  12 ++-
+ neo/renderer/ResolutionScale.cpp         | 104 ++++++++++++++++++++++-
+ neo/renderer/ResolutionScale.h           |  12 +++
+ 13 files changed, 277 insertions(+), 21 deletions(-)
 
 diff --git a/neo/d3xp/PlayerView.cpp b/neo/d3xp/PlayerView.cpp
 index c45329f..e5b1698 100644
@@ -213,11 +220,51 @@ index 4d75c2c..455ef1c 100644
  	// if there exists an image with the same name
  	if( 1 )    //fileSystem->ReadFile( GetName(), NULL ) != -1 ) {
  	{
+diff --git a/neo/renderer/OpenGL/RenderBackend_GL.cpp b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+index 50f294a..8291a03 100644
+--- a/neo/renderer/OpenGL/RenderBackend_GL.cpp
++++ b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+@@ -57,6 +57,10 @@ idCVar r_syncEveryFrame( "r_syncEveryFrame", "1", CVAR_BOOL, "Don't let the GPU
+ static int		swapIndex;		// 0 or 1 into renderSync
+ static GLsync	renderSync[2];
+ 
++// dynamic resolution without GPU timers (idResolutionScale::SetCurrentFrameTime):
++// whether the GPU held the last frame back
++bool			backEndGPUBehind;
++
+ void GLimp_SwapBuffers();
+ void RB_SetMVP( const idRenderMatrix& mvp );
+ 
+@@ -1711,6 +1715,15 @@ void idRenderBackend::GL_BlockingSwapBuffers()
+ 		common->Printf( "%i msec to glFinish\n", beforeSwap - beforeFinish );
+ 	}
+ 	
++	// is the GPU still on the frame before (its fence, set after its swap)
++	// now this one has been issued? Then the GPU holds the frames back and
++	// fewer pixels would help; else the CPU does. A look, no waiting.
++	bool gpuBehind = false;
++	if( glConfig.syncAvailable && glIsSync( renderSync[swapIndex] ) )
++	{
++		gpuBehind = glClientWaitSync( renderSync[swapIndex], 0, 0 ) == GL_TIMEOUT_EXPIRED;
++	}
++	
+ 	GLimp_SwapBuffers();
+ 	
+ 	const int beforeFence = Sys_Milliseconds();
+@@ -1763,6 +1776,8 @@ void idRenderBackend::GL_BlockingSwapBuffers()
+ 	{
+ 		common->Printf( "%i msec to wait on fence\n", afterFence - beforeFence );
+ 	}
++	// r_syncEveryFrame 1 waits for this very frame: a long wait is the GPU's
++	backEndGPUBehind = gpuBehind || afterFence - beforeFence >= 2;
+ 	
+ 	const int64 exitBlockTime = Sys_Microseconds();
+ 	
 diff --git a/neo/renderer/RenderBackend.cpp b/neo/renderer/RenderBackend.cpp
-index 8420ec2..7326473 100644
+index 8420ec2..21d3259 100644
 --- a/neo/renderer/RenderBackend.cpp
 +++ b/neo/renderer/RenderBackend.cpp
-@@ -5200,7 +5200,21 @@ void idRenderBackend::ExecuteBackEndCommands( const emptyCommand_t* cmds )
+@@ -5200,7 +5200,23 @@ void idRenderBackend::ExecuteBackEndCommands( const emptyCommand_t* cmds )
  	int c_setBuffers = 0;
  	int c_copyRenders = 0;
  	
@@ -228,19 +275,21 @@ index 8420ec2..7326473 100644
 +	}
 +	else
 +	{
-+		// no GPU timing (Mesa): by the time from one frame to the next
++		// no GPU timing (Mesa): by the time from one frame to the next, and
++		// whether the GPU held the last one back (GL_BlockingSwapBuffers)
++		extern bool backEndGPUBehind;
 +		static uint64 lastFrameMicroseconds;
 +		const uint64 now = Sys_Microseconds();
 +		if( lastFrameMicroseconds != 0 )
 +		{
-+			resolutionScale.SetCurrentFrameTime( ( int )( now - lastFrameMicroseconds ) );
++			resolutionScale.SetCurrentFrameTime( ( int )( now - lastFrameMicroseconds ), backEndGPUBehind );
 +		}
 +		lastFrameMicroseconds = now;
 +	}
  	
  	ResizeImages();
  	
-@@ -5796,12 +5810,12 @@ idRenderBackend::PostProcess
+@@ -5796,12 +5812,12 @@ idRenderBackend::PostProcess
  
  ==================
  */
@@ -257,7 +306,7 @@ index 8420ec2..7326473 100644
  	{
  		return;
  	}
-@@ -5825,9 +5839,11 @@ void idRenderBackend::PostProcess( const void* data )
+@@ -5825,9 +5841,11 @@ void idRenderBackend::PostProcess( const void* data )
  	int screenWidth = renderSystem->GetWidth();
  	int screenHeight = renderSystem->GetHeight();
  	
@@ -405,7 +454,7 @@ index b46e077..aadd21d 100644
  	// screenFraction is just for quickly testing fill rate limitations
  	if( r_screenFraction.GetInteger() != 100 )
 diff --git a/neo/renderer/ResolutionScale.cpp b/neo/renderer/ResolutionScale.cpp
-index 2c54d15..46bfc32 100644
+index 2c54d15..ce27405 100644
 --- a/neo/renderer/ResolutionScale.cpp
 +++ b/neo/renderer/ResolutionScale.cpp
 @@ -35,11 +35,17 @@ If you have questions concerning this license or the applicable additional terms
@@ -441,7 +490,7 @@ index 2c54d15..46bfc32 100644
  idCVar rs_display( "rs_display", "0", CVAR_INTEGER, "0 - percentages, 1 - pixels per frame" );
  
  
-@@ -63,6 +75,17 @@ idResolutionScale::idResolutionScale()
+@@ -63,6 +75,11 @@ idResolutionScale::idResolutionScale()
  	raiseMilliseconds = 13.0f;
  	framesAboveRaise = 0;
  	currentResolution = 1.0f;
@@ -449,25 +498,11 @@ index 2c54d15..46bfc32 100644
 +	framesSinceChange = 0;
 +	raiseWait = 60;
 +	lastChangeWasRaise = false;
-+	judgingDrop = false;
-+	msBeforeDrop = 0.0f;
-+	scaleBeforeDrop = 1.0f;
-+	areaBeforeDrop = 1.0f;
-+	dropHold = 0;
-+	dropWait = DROP_WAIT_FIRST;
-+	framesUnderDrop = 0;
++	gpuBusy = 0.0f;
  }
  
  /*
-@@ -84,6 +107,7 @@ idResolutionScale::ResetToFullResolution
- void idResolutionScale::ResetToFullResolution()
- {
- 	currentResolution = 1.0f;
-+	judgingDrop = false;	// a drop to judge is gone with it
- }
- 
- /*
-@@ -108,6 +132,9 @@ void idResolutionScale::GetCurrentResolutionScale( float& x, float& y )
+@@ -108,6 +125,9 @@ void idResolutionScale::GetCurrentResolutionScale( float& x, float& y )
  		case 2:
  			y = currentResolution;
  			break;
@@ -477,7 +512,7 @@ index 2c54d15..46bfc32 100644
  		case 3:
  		{
  			const float middle = ( MINIMUM_RESOLUTION_SCALE + MAXIMUM_RESOLUTION_SCALE ) * 0.5f;
-@@ -190,6 +217,151 @@ void idResolutionScale::SetCurrentGPUFrameTime( int microseconds )
+@@ -190,6 +210,86 @@ void idResolutionScale::SetCurrentGPUFrameTime( int microseconds )
  	}
  }
  
@@ -487,20 +522,18 @@ index 2c54d15..46bfc32 100644
 +
 +For GPUs without usable timer queries: frames are paced to the engine's
 +rate (com_engineHz), so a frame that keeps that rate tells nothing about
-+the time to spare. The scale drops at once (proportionally to the miss,
-+pixels cost about the area) when frames take too long. Each drop is
-+judged by the frames after it: one that did not make them faster by a
-+fair part of what fewer pixels would give (the frame is bound by the CPU,
-+the game or the swap, not the GPU's pixels) is taken back, and the next
-+drop waits longer, so a slow CPU does not blur the view for nothing. The
-+scale rises a step after raiseWait frames at the full rate, and a rise
-+that had to be taken back soon makes the next wait longer, so the picture
-+does not keep changing between two sizes.
++the time to spare. gpuBehind: the GPU was still on the frame before when
++this one had been issued, so it is the GPU that holds the frames back.
++The scale drops at once (proportionally to the miss, pixels cost about
++the area) when frames take too long while the GPU holds them back; when
++the CPU does (the game, the front or back end), fewer pixels would only
++blur the view. It rises a step after raiseWait frames at the full rate,
++or with the GPU idle while the CPU holds the frames back (room for more
++pixels); a rise that had to be taken back soon makes the next wait
++longer, so the picture does not keep changing between two sizes.
 +========================
 +*/
-+static const int DROP_JUDGE_FRAMES = 20;	// frames at a new size before it is judged
-+
-+void idResolutionScale::SetCurrentFrameTime( int microseconds )
++void idResolutionScale::SetCurrentFrameTime( int microseconds, bool gpuBehind )
 +{
 +	const float old = currentResolution;
 +	const float target = 1000.0f / idMath::ClampFloat( 10.0f, 240.0f, com_engineHz_latched );
@@ -515,80 +548,18 @@ index 2c54d15..46bfc32 100644
 +		frameMsAverage = ms;
 +	}
 +	frameMsAverage = frameMsAverage * 0.8f + ms * 0.2f;
++	gpuBusy = gpuBusy * 0.8f + ( gpuBehind ? 0.2f : 0.0f );
 +	framesSinceChange++;
-+	if( dropHold > 0 )
-+	{
-+		dropHold--;
-+	}
 +	
 +	const float drop = target + rs_frameDropMilliseconds.GetFloat();
 +	const float raise = target + rs_frameRaiseMilliseconds.GetFloat();
 +	
-+	// frames fast enough for a while: the scene has changed, so a drop
-+	// may be tried again soon
-+	framesUnderDrop = frameMsAverage <= drop ? framesUnderDrop + 1 : 0;
-+	if( framesUnderDrop > 600 )
++	if( frameMsAverage > drop && gpuBusy > 0.5f && framesSinceChange >= 6 )
 +	{
-+		dropWait = DROP_WAIT_FIRST;
-+	}
-+	
-+	bool judging = false;
-+	if( judgingDrop )
-+	{
-+		if( framesSinceChange < DROP_JUDGE_FRAMES )
-+		{
-+			judging = true;	// the new size's own frames first
-+		}
-+		else
-+		{
-+			judgingDrop = false;
-+			float x, y;
-+			GetCurrentResolutionScale( x, y );
-+			// what the frame would gain if all of it were the pixels'
-+			const float expected = msBeforeDrop * ( 1.0f - ( x * y ) / Max( areaBeforeDrop, 0.01f ) );
-+			const float gain = msBeforeDrop - frameMsAverage;
-+			if( frameMsAverage > drop && ( gain < 1.0f || gain < 0.25f * expected ) )
-+			{
-+				// fewer pixels did not help: back to the size before, and
-+				// the next drop waits (longer each time it fails again)
-+				currentResolution = scaleBeforeDrop;
-+				dropHold = dropWait;
-+				dropWait = Min( dropWait * 2, DROP_WAIT_MAX );
-+				framesSinceChange = 0;
-+				framesAboveRaise = 0;
-+				frameMsAverage = msBeforeDrop;
-+				lastChangeWasRaise = false;
-+				judging = true;
-+			}
-+			else
-+			{
-+				dropWait = DROP_WAIT_FIRST;	// it helped: the next may come soon
-+			}
-+		}
-+	}
-+	
-+	if( judging )
-+	{
-+		// nothing else while a drop is judged or was just taken back
-+	}
-+	else if( frameMsAverage > drop && framesSinceChange >= 6 && dropHold == 0 )
-+	{
-+		float x, y;
-+		GetCurrentResolutionScale( x, y );
-+		// at least 8 %: a smaller step gains too little to judge from the
-+		// frames' jitter whether pixels or the CPU hold the frame back
 +		float want = currentResolution * idMath::Sqrt( target / frameMsAverage );
 +		want = Max( want, currentResolution - 0.15f );
-+		want = Min( want, currentResolution - 0.08f );
-+		want = Max( want, MINIMUM_RESOLUTION_SCALE );
-+		if( want < currentResolution )
-+		{
-+			judgingDrop = true;
-+			msBeforeDrop = frameMsAverage;
-+			scaleBeforeDrop = currentResolution;
-+			areaBeforeDrop = x * y;
-+			currentResolution = want;
-+		}
++		want = Min( want, currentResolution - 0.02f );
++		currentResolution = Max( want, MINIMUM_RESOLUTION_SCALE );
 +		if( lastChangeWasRaise && framesSinceChange < raiseWait )
 +		{
 +			raiseWait = Min( raiseWait * 2, 1200 );	// that rise was too much
@@ -598,7 +569,7 @@ index 2c54d15..46bfc32 100644
 +		framesAboveRaise = 0;
 +		frameMsAverage = target;	// judge the new size by its own frames
 +	}
-+	else if( frameMsAverage < raise && currentResolution < MAXIMUM_RESOLUTION_SCALE )
++	else if( ( frameMsAverage < raise || gpuBusy < 0.2f ) && currentResolution < MAXIMUM_RESOLUTION_SCALE )
 +	{
 +		if( ++framesAboveRaise >= raiseWait )
 +		{
@@ -621,8 +592,7 @@ index 2c54d15..46bfc32 100644
 +	if( rs_showResolutionChanges.GetInteger() > 1 ||
 +			( rs_showResolutionChanges.GetInteger() == 1 && currentResolution != old ) )
 +	{
-+		idLib::Printf( "frame msec: %4.1f (average %4.1f) resolutionScale: %4.2f, raise wait %d, drop hold %d%s\n", ms, frameMsAverage, currentResolution, raiseWait, dropHold,
-+					   currentResolution > old && !lastChangeWasRaise ? " (the drop did not help)" : "" );
++		idLib::Printf( "frame msec: %4.1f (average %4.1f) GPU busy %3.0f%% resolutionScale: %4.2f, raise wait %d\n", ms, frameMsAverage, gpuBusy * 100.0f, currentResolution, raiseWait );
 +	}
 +}
 +
@@ -630,22 +600,23 @@ index 2c54d15..46bfc32 100644
  ========================
  idResolutionScale::GetConsoleText
 diff --git a/neo/renderer/ResolutionScale.h b/neo/renderer/ResolutionScale.h
-index 5d8cc5d..8a104da 100644
+index 5d8cc5d..16b4d38 100644
 --- a/neo/renderer/ResolutionScale.h
 +++ b/neo/renderer/ResolutionScale.h
-@@ -50,6 +50,11 @@ public:
+@@ -50,6 +50,12 @@ public:
  	// to this, which will effectively disable resolution scaling.
  	void	SetCurrentGPUFrameTime( int microseconds );
  	
-+	// Without GPU timing (Mesa): the time from one frame to the next; the
-+	// scale drops when frames take longer than rs_dropMilliseconds and
-+	// rises again, carefully, while they keep the engine's rate
-+	void	SetCurrentFrameTime( int microseconds );
++	// Without GPU timing (Mesa): the time from one frame to the next and
++	// whether the GPU held it back; the scale drops when frames take longer
++	// than rs_frameDropMilliseconds because of the GPU, and rises again,
++	// carefully, while they keep the engine's rate or the GPU idles
++	void	SetCurrentFrameTime( int microseconds, bool gpuBehind );
 +	
  	// return console display text
  	void	GetConsoleText( idStr& s );
  	
-@@ -58,6 +63,22 @@ private:
+@@ -58,6 +64,12 @@ private:
  	float			raiseMilliseconds;
  	int				framesAboveRaise;
  	float			currentResolution;
@@ -654,17 +625,7 @@ index 5d8cc5d..8a104da 100644
 +	int				framesSinceChange;
 +	int				raiseWait;
 +	bool			lastChangeWasRaise;
-+	// a drop is judged by the frames after it, and taken back if they are
-+	// not faster (bound by the CPU): no other drop for dropHold frames then
-+	static const int DROP_WAIT_FIRST = 300;
-+	static const int DROP_WAIT_MAX = 4800;
-+	bool			judgingDrop;
-+	float			msBeforeDrop;
-+	float			scaleBeforeDrop;
-+	float			areaBeforeDrop;
-+	int				dropHold;
-+	int				dropWait;
-+	int				framesUnderDrop;
++	float			gpuBusy;	// how often the GPU held the frames back lately (0..1)
  };
  
  extern idResolutionScale resolutionScale;

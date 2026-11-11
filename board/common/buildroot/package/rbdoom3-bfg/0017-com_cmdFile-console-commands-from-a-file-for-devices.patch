@@ -1,4 +1,4 @@
-From e83920d21b3a35de02e1ddda19166092f9d918b3 Mon Sep 17 00:00:00 2001
+From 572ec9e45df60c789c96cce6ab631e839bc53db1 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 16:10:04 +0100
 Subject: [PATCH 17/17] com_cmdFile: console commands from a file, for devices
