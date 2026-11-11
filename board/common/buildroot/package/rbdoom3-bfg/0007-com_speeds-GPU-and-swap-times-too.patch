@@ -1,4 +1,4 @@
-From 8ddbcab7fdc9fe3d97e577e10cf8e23eac3575be Mon Sep 17 00:00:00 2001
+From 595d325e13d86deb5f00d1850bf00e31d6745088 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 09:18:04 +0100
 Subject: [PATCH 07/17] com_speeds: GPU and swap times too

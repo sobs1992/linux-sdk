@@ -1,5 +1,6 @@
 config BR2_PACKAGE_RBDOOM3_BFG
 	bool "rbdoom3-bfg"
+	depends on BR2_aarch64 || BR2_x86_64 # neo/sys/sys_defines.h
 	depends on BR2_INSTALL_LIBSTDCPP
 	depends on BR2_TOOLCHAIN_HAS_THREADS
 	depends on !BR2_STATIC_LIBS # sdl2
@@ -17,5 +18,6 @@ config BR2_PACKAGE_RBDOOM3_BFG
 	  https://github.com/RobertBeckebans/RBDOOM-3-BFG
 
 comment "rbdoom3-bfg needs mesa-panfrost and a toolchain w/ C++, threads, dynamic library"
+	depends on BR2_aarch64 || BR2_x86_64
 	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_INSTALL_LIBSTDCPP || \
 		!BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

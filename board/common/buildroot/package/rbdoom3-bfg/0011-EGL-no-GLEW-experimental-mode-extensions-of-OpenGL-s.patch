@@ -1,4 +1,4 @@
-From 0086c14f4969585443191c0d678920758dba0579 Mon Sep 17 00:00:00 2001
+From 90e3409ca226d4553a650f4a68bcb06c69346853 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 11:04:59 +0100
 Subject: [PATCH 11/17] EGL: no GLEW experimental mode; extensions of OpenGL's
@@ -6,14 +6,59 @@ Subject: [PATCH 11/17] EGL: no GLEW experimental mode; extensions of OpenGL's
 
 eglGetProcAddress gives a function for every name, so the experimental
 mode took every extension for supported (GL_EXT_depth_bounds_test: a
-GL_INVALID_ENUM every frame on Mali). Mesa lists no extension that is
-part of the core any more, so those are set from the version.
+GL_INVALID_ENUM every frame on Mali). Without it GLEW knows only the
+extensions the driver lists, and Mesa does not list those of OpenGL's
+own core in core profiles: in glewContextInit they now count as there by
+the version, before their functions (the ARB names the engine calls,
+glGenBuffersARB...) are loaded; set after glewInit they had no functions.
 ---
- neo/sys/sdl/sdl_glimp.cpp | 30 +++++++++++++++++++++++++++++-
- 1 file changed, 29 insertions(+), 1 deletion(-)
+ neo/libs/glew/src/glew.c  | 30 ++++++++++++++++++++++++++++++
+ neo/sys/sdl/sdl_glimp.cpp |  4 +++-
+ 2 files changed, 33 insertions(+), 1 deletion(-)
 
+diff --git a/neo/libs/glew/src/glew.c b/neo/libs/glew/src/glew.c
+index 5ba9750..c578bf1 100644
+--- a/neo/libs/glew/src/glew.c
++++ b/neo/libs/glew/src/glew.c
+@@ -13608,6 +13608,36 @@ static GLenum GLEWAPIENTRY glewContextInit ()
+       }
+     }
+   }
++
++#if defined(USE_EGL)
++  /* RBDOOM with EGL has no experimental mode (eglGetProcAddress gives a
++   * function for every name, so every extension would count as there).
++   * Without it GLEW knows only the extensions the driver lists, and Mesa
++   * does not list those of OpenGL's own core in core profiles: they count
++   * as there by the version, before their functions (ARB names too) are
++   * loaded below. */
++  if (GLEW_VERSION_1_3)
++  {
++    GLEW_ARB_multitexture = GL_TRUE;
++    GLEW_ARB_texture_compression = GL_TRUE;
++  }
++  if (GLEW_VERSION_1_5)
++  {
++    GLEW_ARB_vertex_buffer_object = GL_TRUE;
++    GLEW_ARB_occlusion_query = GL_TRUE;
++  }
++  if (GLEW_VERSION_3_0)
++  {
++    GLEW_ARB_map_buffer_range = GL_TRUE;
++    GLEW_ARB_vertex_array_object = GL_TRUE;
++    GLEW_ARB_framebuffer_object = GL_TRUE;
++    GLEW_EXT_framebuffer_blit = GL_TRUE;
++  }
++  if (GLEW_VERSION_3_1)
++  {
++    GLEW_ARB_uniform_buffer_object = GL_TRUE;
++  }
++#endif
+ #ifdef GL_VERSION_1_2
+   if (glewExperimental || GLEW_VERSION_1_2) GLEW_VERSION_1_2 = !_glewInit_GL_VERSION_1_2();
+ #endif /* GL_VERSION_1_2 */
 diff --git a/neo/sys/sdl/sdl_glimp.cpp b/neo/sys/sdl/sdl_glimp.cpp
-index 1d00c55..b74f5c3 100644
+index 1d00c55..41e8159 100644
 --- a/neo/sys/sdl/sdl_glimp.cpp
 +++ b/neo/sys/sdl/sdl_glimp.cpp
 @@ -326,7 +326,9 @@ bool GLimp_Init( glimpParms_t parms )
@@ -27,39 +72,6 @@ index 1d00c55..b74f5c3 100644
  	glewExperimental = GL_TRUE;
  #endif
  	
-@@ -341,6 +343,32 @@ bool GLimp_Init( glimpParms_t parms )
- 		common->Printf( "Using GLEW %s\n", glewGetString( GLEW_VERSION ) );
- 	}
- 	
-+#if defined(USE_EGL)
-+	// without the experimental mode GLEW knows only the extensions the driver
-+	// lists, and Mesa does not list those of OpenGL's own core any more
-+	if( GLEW_VERSION_1_3 )
-+	{
-+		__GLEW_ARB_multitexture = GL_TRUE;
-+		__GLEW_ARB_texture_compression = GL_TRUE;
-+	}
-+	if( GLEW_VERSION_1_5 )
-+	{
-+		__GLEW_ARB_vertex_buffer_object = GL_TRUE;
-+		__GLEW_ARB_occlusion_query = GL_TRUE;
-+	}
-+	if( GLEW_VERSION_3_0 )
-+	{
-+		__GLEW_ARB_map_buffer_range = GL_TRUE;
-+		__GLEW_ARB_vertex_array_object = GL_TRUE;
-+		__GLEW_ARB_framebuffer_object = GL_TRUE;
-+		__GLEW_EXT_framebuffer_blit = GL_TRUE;
-+	}
-+	if( GLEW_VERSION_3_1 )
-+	{
-+		__GLEW_ARB_uniform_buffer_object = GL_TRUE;
-+	}
-+#endif
-+	
- 	// DG: disable cursor, we have two cursors in menu (because mouse isn't grabbed in menu)
- 	SDL_ShowCursor( SDL_DISABLE );
- 	// DG end
 -- 
 2.53.0
 

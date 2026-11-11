@@ -9,10 +9,19 @@ gets in bare_app's frame, with a fence; the copy made at the swap before
 (finished by then) is read back and shown. The game's work on the next
 frame overlaps the GPU's on this one instead of waiting for it in
 glReadPixels, and a scaled picture costs no CPU; the picture is a frame
-late. Mesa's panfrost reads pixel buffer objects back on the CPU too, so
-those would not help. Desktop OpenGL reads GL_BGRA, bare_app's own
-layout: a plain copy. Needs framebuffer blits and fences (OpenGL 3,
-OpenGL ES 3); off by default.
+late. When frames come more than 100 ms apart (a game loading), each is
+shown at its own swap, as the next one may be long in coming. Mesa's
+panfrost reads pixel buffer objects back on the CPU too, so those would
+not help. Desktop OpenGL reads GL_BGRA, bare_app's own layout: a plain
+copy. Needs OpenGL (ES) 3 by its version string (eglGetProcAddress has
+something for every name) and no multisampling (a scaling blit cannot
+resolve it); else, and by default, pictures are read at each swap.
+
+Both ways the window is read whatever the game has bound: draw and read
+framebuffers apart and a pixel pack buffer (OpenGL (ES) 3) too. The
+copies belong to the context they were made in: when it is deleted (SDL
+has made it no longer current) or another one swaps, they are forgotten,
+not deleted in a context they are not part of.
 ---
 --- a/src/video/bareapp/SDL_bareapp.h
 +++ b/src/video/bareapp/SDL_bareapp.h
@@ -54,16 +63,32 @@ OpenGL ES 3); off by default.
      if (ba.xmap_size < n) {
 --- a/src/video/bareapp/SDL_bareappvideo.c
 +++ b/src/video/bareapp/SDL_bareappvideo.c
-@@ -55,6 +55,21 @@
+@@ -37,6 +37,7 @@
+ 
+ #include "../SDL_sysvideo.h"
+ #include "../SDL_egl_c.h"
++#include "SDL_timer.h"
+ #include "../../events/SDL_events_c.h"
+ #include "../../events/SDL_keyboard_c.h"
+ #include "../../events/SDL_mouse_c.h"
+@@ -51,10 +52,28 @@
+ 
+ /* glReadPixels and what is saved around it */
+ #define BA_GL_FRAMEBUFFER 0x8D40
+-#define BA_GL_FRAMEBUFFER_BINDING 0x8CA6
++#define BA_GL_FRAMEBUFFER_BINDING 0x8CA6 /* the draw framebuffer's */
++#define BA_GL_READ_FRAMEBUFFER 0x8CA8
++#define BA_GL_DRAW_FRAMEBUFFER 0x8CA9
++#define BA_GL_READ_FRAMEBUFFER_BINDING 0x8CAA
++#define BA_GL_PIXEL_PACK_BUFFER 0x88EB
++#define BA_GL_PIXEL_PACK_BUFFER_BINDING 0x88ED
  #define BA_GL_PACK_ALIGNMENT 0x0D05
  #define BA_GL_RGBA 0x1908
  #define BA_GL_UNSIGNED_BYTE 0x1401
 +/* and for SDL_BAREAPP_GL_ASYNC */
++#define BA_GL_MAJOR_VERSION 0x821B
 +#define BA_GL_BGRA 0x80E1
 +#define BA_GL_RGBA8 0x8058
-+#define BA_GL_READ_FRAMEBUFFER 0x8CA8
-+#define BA_GL_DRAW_FRAMEBUFFER 0x8CA9
-+#define BA_GL_READ_FRAMEBUFFER_BINDING 0x8CAA
 +#define BA_GL_RENDERBUFFER 0x8D41
 +#define BA_GL_RENDERBUFFER_BINDING 0x8CA7
 +#define BA_GL_COLOR_ATTACHMENT0 0x8CE0
@@ -76,17 +101,20 @@ OpenGL ES 3); off by default.
  
  typedef struct
  {
-@@ -78,8 +93,30 @@
+@@ -78,8 +97,33 @@
      void (*GetIntegerv)(unsigned name, int *value);
      void (*BindFramebuffer)(unsigned target, unsigned framebuffer);
      void (*PixelStorei)(unsigned name, int value);
-+    /* SDL_BAREAPP_GL_ASYNC: two copies of the picture, each with a fence */
++    void (*BindBuffer)(unsigned target, unsigned buffer);
++    /* SDL_BAREAPP_GL_ASYNC: two copies of the picture, each with a fence
++     * while it waits to be read */
 +    int async; /* -1: not looked at yet, 0: off, 1: on */
 +    SDL_bool bgra; /* desktop OpenGL: read as bare_app's own layout */
++    SDL_GLContext copy_context; /* the context the copies belong to */
 +    unsigned fbo[2], rb[2];
 +    void *fence[2];
-+    SDL_bool pending[2];
-+    int copy_w, copy_h, next;
++    int copy_w, copy_h, next, gl_major;
++    Uint64 last_swap;
 +    void (*GenFramebuffers)(int n, unsigned *ids);
 +    void (*DeleteFramebuffers)(int n, const unsigned *ids);
 +    void (*GenRenderbuffers)(int n, unsigned *ids);
@@ -108,7 +136,7 @@ OpenGL ES 3); off by default.
  
  /* ---- keys --------------------------------------------------------------- */
  
-@@ -371,6 +408,134 @@
+@@ -371,10 +415,186 @@
      return SDL_EGL_MakeCurrent(_this, NULL, NULL);
  }
  
@@ -129,7 +157,11 @@ OpenGL ES 3); off by default.
 +        vd.async = 0;
 +        if (env && SDL_atoi(env) > 0) {
 +#define BA_PROC(name, gl) (vd.name = SDL_EGL_GetProcAddress(_this, gl)) != NULL
-+            vd.async = BA_PROC(GenFramebuffers, "glGenFramebuffers") &&
++            /* eglGetProcAddress gives something for any name: the version
++             * tells; a blit that scales cannot resolve multisampling */
++            vd.async = vd.gl_major >= 3 &&
++                       _this->gl_config.multisamplebuffers == 0 &&
++                       BA_PROC(GenFramebuffers, "glGenFramebuffers") &&
 +                       BA_PROC(DeleteFramebuffers, "glDeleteFramebuffers") &&
 +                       BA_PROC(GenRenderbuffers, "glGenRenderbuffers") &&
 +                       BA_PROC(DeleteRenderbuffers, "glDeleteRenderbuffers") &&
@@ -147,28 +179,48 @@ OpenGL ES 3); off by default.
 +#undef BA_PROC
 +            /* GL_BGRA is bare_app's own layout; OpenGL ES may not read it */
 +            vd.bgra = !(_this->gl_config.profile_mask & SDL_GL_CONTEXT_PROFILE_ES);
++            if (!vd.async) {
++                SDL_Log("bareapp: SDL_BAREAPP_GL_ASYNC needs OpenGL (ES) 3 without multisampling; pictures read at each swap");
++            }
 +        }
 +    }
 +    return vd.async > 0;
 +}
 +
-+static void ForgetCopies(void)
++/* current: the copies' context is current, their objects are deleted; else
++ * they go with that context */
++static void ForgetCopies(SDL_bool current)
 +{
 +    int k;
 +
 +    for (k = 0; k < 2; k++) {
-+        if (vd.fence[k]) {
++        if (vd.fence[k] && current) {
 +            vd.DeleteSync(vd.fence[k]);
-+            vd.fence[k] = NULL;
 +        }
-+        vd.pending[k] = SDL_FALSE;
++        vd.fence[k] = NULL;
 +    }
-+    if (vd.fbo[0]) {
++    if (vd.fbo[0] && current) {
 +        vd.DeleteFramebuffers(2, vd.fbo);
 +        vd.DeleteRenderbuffers(2, vd.rb);
-+        vd.fbo[0] = vd.fbo[1] = vd.rb[0] = vd.rb[1] = 0;
 +    }
++    vd.fbo[0] = vd.fbo[1] = vd.rb[0] = vd.rb[1] = 0;
 +    vd.copy_w = vd.copy_h = 0;
++    vd.copy_context = NULL;
++}
++
++/* Copy k, finished by the GPU (or waited for), read and shown */
++static void ShowCopy(int k)
++{
++    int cw = vd.copy_w, ch = vd.copy_h;
++
++    vd.ClientWaitSync(vd.fence[k], BA_GL_SYNC_FLUSH_COMMANDS_BIT, 2000000000ull);
++    vd.DeleteSync(vd.fence[k]);
++    vd.fence[k] = NULL;
++    vd.BindFramebuffer(BA_GL_READ_FRAMEBUFFER, vd.fbo[k]);
++    vd.ReadPixels(0, 0, cw, ch, vd.bgra ? BA_GL_BGRA : BA_GL_RGBA, BA_GL_UNSIGNED_BYTE, vd.pixels);
++    /* GL's rows go up */
++    BAREAPP_Present(vd.pixels + (size_t)(ch - 1) * cw * 4, cw, ch, -cw * 4,
++                    vd.bgra ? BAREAPP_XRGB : BAREAPP_RGBA);
 +}
 +
 +/* The window's framebuffer is bound for drawing and reading. The copies
@@ -176,8 +228,15 @@ OpenGL ES 3); off by default.
 +static void SwapAsync(int w, int h)
 +{
 +    int k, rb = 0, cw, ch;
-+    SDL_bool scissor = vd.IsEnabled(BA_GL_SCISSOR_TEST), nearest;
++    SDL_bool scissor, nearest, slow;
++    SDL_GLContext context = SDL_GL_GetCurrentContext();
++    Uint64 now = SDL_GetTicks64();
 +    size_t size;
++
++    /* frames far apart (a game loading): this one is shown now, as the
++     * next swap that would show it may be long in coming */
++    slow = vd.last_swap != 0 && now - vd.last_swap > 100;
++    vd.last_swap = now;
 +
 +    BAREAPP_FitSize(w, h, &cw, &ch, &nearest);
 +    size = (size_t)cw * ch * 4;
@@ -190,8 +249,11 @@ OpenGL ES 3); off by default.
 +        vd.pixels = pixels;
 +        vd.pixels_size = size;
 +    }
++    if (vd.copy_context != context) {
++        ForgetCopies(SDL_FALSE); /* another context's (or none) */
++    }
 +    if (vd.copy_w != cw || vd.copy_h != ch) {
-+        ForgetCopies();
++        ForgetCopies(SDL_TRUE);
 +        vd.GetIntegerv(BA_GL_RENDERBUFFER_BINDING, &rb);
 +        vd.GenFramebuffers(2, vd.fbo);
 +        vd.GenRenderbuffers(2, vd.rb);
@@ -204,8 +266,10 @@ OpenGL ES 3); off by default.
 +        vd.BindRenderbuffer(BA_GL_RENDERBUFFER, (unsigned)rb);
 +        vd.copy_w = cw;
 +        vd.copy_h = ch;
++        vd.copy_context = context;
 +        vd.next = 0;
 +    }
++    scissor = vd.IsEnabled(BA_GL_SCISSOR_TEST);
 +    if (scissor) {
 +        vd.Disable(BA_GL_SCISSOR_TEST); /* blits are cut by it */
 +    }
@@ -218,21 +282,18 @@ OpenGL ES 3); off by default.
 +    vd.BindFramebuffer(BA_GL_DRAW_FRAMEBUFFER, vd.fbo[k]);
 +    vd.BlitFramebuffer(0, 0, w, h, 0, 0, cw, ch, BA_GL_COLOR_BUFFER_BIT, nearest ? BA_GL_NEAREST : BA_GL_LINEAR);
 +    vd.fence[k] = vd.FenceSync(BA_GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-+    vd.pending[k] = SDL_TRUE;
 +    vd.Flush();
 +
-+    /* the one before: done by now, read without waiting */
 +    vd.next = 1 - k;
-+    if (vd.pending[vd.next]) {
-+        vd.ClientWaitSync(vd.fence[vd.next], BA_GL_SYNC_FLUSH_COMMANDS_BIT, 2000000000ull);
-+        vd.DeleteSync(vd.fence[vd.next]);
-+        vd.fence[vd.next] = NULL;
-+        vd.pending[vd.next] = SDL_FALSE;
-+        vd.BindFramebuffer(BA_GL_READ_FRAMEBUFFER, vd.fbo[vd.next]);
-+        vd.ReadPixels(0, 0, cw, ch, vd.bgra ? BA_GL_BGRA : BA_GL_RGBA, BA_GL_UNSIGNED_BYTE, vd.pixels);
-+        /* GL's rows go up */
-+        BAREAPP_Present(vd.pixels + (size_t)(ch - 1) * cw * 4, cw, ch, -cw * 4,
-+                        vd.bgra ? BAREAPP_XRGB : BAREAPP_RGBA);
++    if (slow) {
++        /* this one now; the one before is older, never shown */
++        if (vd.fence[vd.next]) {
++            vd.DeleteSync(vd.fence[vd.next]);
++            vd.fence[vd.next] = NULL;
++        }
++        ShowCopy(k);
++    } else if (vd.fence[vd.next]) {
++        ShowCopy(vd.next); /* the one before: done by now, no waiting */
 +    }
 +    vd.BindFramebuffer(BA_GL_FRAMEBUFFER, 0);
 +    if (scissor) {
@@ -240,10 +301,65 @@ OpenGL ES 3); off by default.
 +    }
 +}
 +
++/* "OpenGL ES 3.1 Mesa ..." or "3.1 Mesa ...": 3 */
++static int GLMajorVersion(_THIS)
++{
++    const char *(*GetString)(unsigned name) = SDL_EGL_GetProcAddress(_this, "glGetString");
++    const char *version = GetString ? GetString(0x1F02 /* GL_VERSION */) : NULL;
++
++    if (!version) {
++        return 0;
++    }
++    while (*version && (*version < '0' || *version > '9')) {
++        version++;
++    }
++    return SDL_atoi(version);
++}
++
  static int BAREAPP_GL_SwapWindow(_THIS, SDL_Window *window)
  {
      BAREAPP_WindowData *data = window->driverdata;
-@@ -406,7 +571,11 @@
+-    int w = data->egl_w, h = data->egl_h, fb = 0, align = 4;
++    int w = data->egl_w, h = data->egl_h, draw = 0, read = -1, pack = 0, align = 4;
+     size_t size = (size_t)w * h * 4;
+ 
+     if (!vd.ReadPixels) {
+@@ -386,6 +606,10 @@
+             vd.ReadPixels = NULL;
+             return SDL_SetError("bareapp: no glReadPixels");
+         }
++        vd.gl_major = GLMajorVersion(_this);
++        if (vd.gl_major >= 3) {
++            vd.BindBuffer = SDL_EGL_GetProcAddress(_this, "glBindBuffer");
++        }
+     }
+     if (vd.pixels_size < size) {
+         Uint8 *pixels = SDL_realloc(vd.pixels, size);
+@@ -397,25 +621,49 @@
+         vd.pixels_size = size;
+     }
+ 
+-    /* the window's pixels whatever the game has bound */
+-    vd.GetIntegerv(BA_GL_FRAMEBUFFER_BINDING, &fb);
++    /* the window's pixels whatever the game has bound to draw, to read and
++     * to pack pixels into (separate read framebuffers and pixel buffers:
++     * OpenGL (ES) 3, asked only there not to leave an error behind) */
++    vd.GetIntegerv(BA_GL_FRAMEBUFFER_BINDING, &draw);
++    if (vd.gl_major >= 3) {
++        vd.GetIntegerv(BA_GL_READ_FRAMEBUFFER_BINDING, &read);
++        vd.GetIntegerv(BA_GL_PIXEL_PACK_BUFFER_BINDING, &pack);
++    }
++    if (read < 0) {
++        read = draw;
++    }
+     vd.GetIntegerv(BA_GL_PACK_ALIGNMENT, &align);
+-    if (fb) {
++    if (draw || read) {
+         vd.BindFramebuffer(BA_GL_FRAMEBUFFER, 0);
+     }
++    if (pack && vd.BindBuffer) {
++        vd.BindBuffer(BA_GL_PIXEL_PACK_BUFFER, 0);
++    }
      if (align != 4) {
          vd.PixelStorei(BA_GL_PACK_ALIGNMENT, 4);
      }
@@ -256,8 +372,16 @@ OpenGL ES 3); off by default.
      if (align != 4) {
          vd.PixelStorei(BA_GL_PACK_ALIGNMENT, align);
      }
-@@ -414,8 +583,10 @@
-         vd.BindFramebuffer(BA_GL_FRAMEBUFFER, (unsigned)fb);
+-    if (fb) {
+-        vd.BindFramebuffer(BA_GL_FRAMEBUFFER, (unsigned)fb);
++    if (pack && vd.BindBuffer) {
++        vd.BindBuffer(BA_GL_PIXEL_PACK_BUFFER, (unsigned)pack);
++    }
++    if (read != draw) {
++        vd.BindFramebuffer(BA_GL_READ_FRAMEBUFFER, (unsigned)read);
++        vd.BindFramebuffer(BA_GL_DRAW_FRAMEBUFFER, (unsigned)draw);
++    } else if (draw) {
++        vd.BindFramebuffer(BA_GL_FRAMEBUFFER, (unsigned)draw);
      }
  
 -    /* GL's rows go up */
@@ -269,12 +393,13 @@ OpenGL ES 3); off by default.
  
      /* the window got another size (full screen): a pbuffer of it */
      if (window->w != data->egl_w || window->h != data->egl_h) {
-@@ -426,6 +597,9 @@
+@@ -426,6 +674,10 @@
  
  static void BAREAPP_GL_DeleteContext(_THIS, SDL_GLContext context)
  {
-+    if (vd.async > 0) {
-+        ForgetCopies(); /* the copies go with the context */
++    /* SDL has made it no longer current: its copies go with it */
++    if (context == vd.copy_context) {
++        ForgetCopies(SDL_FALSE);
 +    }
      SDL_EGL_DeleteContext(_this, context);
  }

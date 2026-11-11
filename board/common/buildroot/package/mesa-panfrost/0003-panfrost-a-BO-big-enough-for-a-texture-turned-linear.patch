@@ -1,0 +1,75 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] panfrost: a BO big enough for a texture turned linear
+
+A u-interleaved texture overwritten whole again and again (a video) is
+turned linear in panfrost_ptr_unmap, in the BO it had. The linear
+layout can be bigger: its rows are aligned to 64 bytes, the tiles only
+to 16 pixels. An R8 video plane 784x203 (the U and V planes of DOOM 3
+BFG's main menu video, 1567x406) needs 168896 bytes linear against
+163072 tiled, in a 163840-byte BO; only an assert (gone in release
+builds) stood in the way. That copy and every later upload of a frame
+wrote past the end of the BO's mapping: into whatever was mapped after
+it (another BO: GPU faults, corrupted job descriptors) or into nothing
+(a crash in memcpy at a page boundary, glTexSubImage2D going back to
+the menu). Such a resource now gets a new BO of the linear size; with
+no memory for one it stays tiled.
+
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1881,16 +1881,47 @@
+                panfrost_resource_setup(screen, prsrc, DRM_FORMAT_MOD_LINEAR,
+                                        prsrc->image.layout.format);
+ 
+-               /* converting the resource from tiled to linear and back
+-                * shouldn't increase memory usage...
+-                */
+-               assert(prsrc->image.layout.data_size <= panfrost_bo_size(bo));
++               /* The linear layout can be bigger than the tiled one: its
++                * rows are aligned to 64 bytes, the tiles to 16 pixels (an
++                * R8 784x203 video plane: 168896 bytes against 163072, a
++                * 163840-byte BO). Then the resource gets a BO big enough,
++                * else this copy and every later upload write past the end
++                * of the old one, into whatever is mapped after it. */
++               struct panfrost_bo *newbo = NULL;
+ 
+-               util_copy_rect(
+-                  bo->ptr.cpu + prsrc->image.layout.slices[0].offset,
+-                  prsrc->base.format, prsrc->image.layout.slices[0].row_stride,
+-                  0, 0, transfer->box.width, transfer->box.height, trans->map,
+-                  transfer->stride, 0, 0);
++               if (prsrc->image.layout.data_size > panfrost_bo_size(bo)) {
++                  perf_debug(ctx, "Linear layout bigger than the tiled BO: "
++                                  "%u > %zu bytes, new BO",
++                             (unsigned)prsrc->image.layout.data_size,
++                             (size_t)panfrost_bo_size(bo));
++                  newbo = panfrost_bo_create(
++                     dev, prsrc->image.layout.data_size,
++                     bo->flags & ~PAN_BO_DELAY_MMAP, bo->label);
++                  if (newbo) {
++                     panfrost_bo_unreference(prsrc->bo);
++                     prsrc->bo = newbo;
++                     prsrc->image.data.base = newbo->ptr.gpu;
++                     bo = newbo;
++                     panfrost_dirty_state_all(ctx);
++                  } else {
++                     /* no memory for it: tiled for good */
++                     panfrost_resource_setup(
++                        screen, prsrc,
++                        DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
++                        prsrc->image.layout.format);
++                  }
++               }
++
++               if (prsrc->image.layout.modifier == DRM_FORMAT_MOD_LINEAR) {
++                  util_copy_rect(
++                     bo->ptr.cpu + prsrc->image.layout.slices[0].offset,
++                     prsrc->base.format,
++                     prsrc->image.layout.slices[0].row_stride, 0, 0,
++                     transfer->box.width, transfer->box.height, trans->map,
++                     transfer->stride, 0, 0);
++               } else {
++                  panfrost_store_tiled_images(trans, prsrc);
++               }
+             } else {
+                panfrost_store_tiled_images(trans, prsrc);
+             }

@@ -1,4 +1,4 @@
-From 05f3daa72b0a08abfef6261d702426709045f911 Mon Sep 17 00:00:00 2001
+From 1c3c2f5beef7547b3904c06a8897f38e07343663 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 09:18:04 +0100
 Subject: [PATCH 05/17] Linux: the signal handler prints the faulting address
@@ -10,7 +10,7 @@ Offsets into the files, for addr2line on an unstripped build.
  1 file changed, 32 insertions(+)
 
 diff --git a/neo/sys/posix/posix_signal.cpp b/neo/sys/posix/posix_signal.cpp
-index 5c33b34..0cce94f 100644
+index 5c33b34..d327f0d 100644
 --- a/neo/sys/posix/posix_signal.cpp
 +++ b/neo/sys/posix/posix_signal.cpp
 @@ -30,6 +30,13 @@ If you have questions concerning this license or the applicable additional terms
@@ -42,7 +42,7 @@ index 5c33b34..0cce94f 100644
 +#elif defined(__x86_64__)
 +		pc = ( void* )( ( ucontext_t* )context )->uc_mcontext.gregs[ REG_RIP ];
 +#endif
-+		fprintf( stderr, "fault address %p, pc %p\n", info->si_addr, pc );
++		fprintf( stderr, "%s (si_code %d): fault address %p, pc %p\n", strsignal( signum ), info->si_code, info->si_addr, pc );
 +		for( int i = -1; i < n; i++ )
 +		{
 +			void* a = i < 0 ? pc : frames[ i ];

@@ -1,7 +1,7 @@
-From f3bd90d501a5e86c32b90f87c435088cab6fd149 Mon Sep 17 00:00:00 2001
+From 53ae49850c5620c958ab31d530327409056e64d3 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 13:29:39 +0100
-Subject: [PATCH 14/17] Vertex cache: three frames of temporary geometry
+Subject: [PATCH 13/17] Vertex cache: three frames of temporary geometry
 
 The game thread writes frame N+1 into one set while the back end draws
 frame N; the set last held frame N-1. With r_syncEveryFrame 0 only frame

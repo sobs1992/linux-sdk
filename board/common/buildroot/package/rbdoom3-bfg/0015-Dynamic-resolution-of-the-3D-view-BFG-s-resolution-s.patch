@@ -1,7 +1,7 @@
-From 7ec5fc36dfba283b358d709820bfd741319f29a7 Mon Sep 17 00:00:00 2001
+From b8e91d51b6a44d443ad751b47c7e033d6af8ae88 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 14:43:52 +0100
-Subject: [PATCH 16/17] Dynamic resolution of the 3D view (BFG's resolution
+Subject: [PATCH 15/17] Dynamic resolution of the 3D view (BFG's resolution
  scaling, wired up)
 
 When frames are slow, FullscreenFXManager::Process draws the player's
@@ -11,6 +11,15 @@ into the image _scaledSceneImage and stretches it over the screen with
 the material _scaledScene (opaque; translucent so it is not depth
 tested EQUAL in the 2D view). The HUD, texts and menus drawn after it
 stay at the full size.
+
+The scale is taken once a frame, when its command buffer starts
+(SwapCommandBuffers_FinishCommandBuffers, the game thread stopped):
+with com_smp the back end steers it while the game thread draws, and
+Process and RenderScene reading it apart could crop and stretch by two
+sizes. A portal sky is drawn and captured at the view's size, which is
+the size the view reads it back at. The back end's post-processing
+(filmic) stays within the view; SMAA works on the whole screen, so the
+scale stays 1 with it.
 
 rs_enable 4: both axes alike; rs_minimum: the smallest scale. Without
 GPU timer queries (Mesa: off in RBDOOM, and panfrost's split batches)
@@ -23,22 +32,48 @@ Handhelds: rs_enable 4, rs_minimum 0.6. Mali-G52 (854x480): the start of
 mars_city2 27.8 -> 46 fps, the mars_city1 hangar 34 -> 54 fps; light
 scenes keep the full size at 60 fps.
 ---
- neo/d3xp/PlayerView.cpp          | 24 ++++++++
- neo/d3xp/PlayerView.h            |  1 +
- neo/renderer/Image_intrinsic.cpp |  3 +
- neo/renderer/Material.cpp        | 18 ++++++
- neo/renderer/RenderBackend.cpp   | 16 +++++-
- neo/renderer/RenderCommon.h      |  2 +-
- neo/renderer/RenderSystem.h      |  4 ++
- neo/renderer/ResolutionScale.cpp | 98 +++++++++++++++++++++++++++++++-
- neo/renderer/ResolutionScale.h   | 10 ++++
- 9 files changed, 172 insertions(+), 4 deletions(-)
+ neo/d3xp/PlayerView.cpp            | 39 ++++++++++++
+ neo/d3xp/PlayerView.h              |  1 +
+ neo/renderer/Image_intrinsic.cpp   |  3 +
+ neo/renderer/Material.cpp          | 18 ++++++
+ neo/renderer/RenderBackend.cpp     | 23 +++++--
+ neo/renderer/RenderCommon.h        |  8 ++-
+ neo/renderer/RenderSystem.cpp      | 19 ++++--
+ neo/renderer/RenderSystem.h        |  4 ++
+ neo/renderer/RenderSystem_init.cpp |  2 +
+ neo/renderer/ResolutionScale.cpp   | 98 +++++++++++++++++++++++++++++-
+ neo/renderer/ResolutionScale.h     | 10 +++
+ 11 files changed, 212 insertions(+), 13 deletions(-)
 
 diff --git a/neo/d3xp/PlayerView.cpp b/neo/d3xp/PlayerView.cpp
-index c45329f..370b3b1 100644
+index c45329f..37878db 100644
 --- a/neo/d3xp/PlayerView.cpp
 +++ b/neo/d3xp/PlayerView.cpp
-@@ -1762,6 +1762,7 @@ FullscreenFXManager::FullscreenFXManager()
+@@ -457,8 +457,23 @@ void idPlayerView::SingleView( const renderView_t* view, idMenuHandler_HUD* hudM
+ 	{
+ 		renderView_t portalView = hackedView;
+ 		portalView.vieworg = gameLocal.portalSkyEnt.GetEntity()->GetPhysics()->GetOrigin();
++		// dynamic resolution: RenderScene draws the sky at the 3D view's
++		// size, and the view reads it back over that size: captured at it
++		int skyWidth = renderSystem->GetWidth();
++		int skyHeight = renderSystem->GetHeight();
++		renderSystem->PerformResolutionScaling( skyWidth, skyHeight );
++		const bool scaledSky = ( skyWidth < renderSystem->GetWidth() || skyHeight < renderSystem->GetHeight() ) &&
++							   skyWidth > 0 && skyHeight > 0;
++		if( scaledSky )
++		{
++			renderSystem->CropRenderSize( skyWidth, skyHeight );
++		}
+ 		gameRenderWorld->RenderScene( &portalView );
+ 		renderSystem->CaptureRenderToImage( "_currentRender" );
++		if( scaledSky )
++		{
++			renderSystem->UnCrop();
++		}
+ 		
+ 		hackedView.forceUpdate = true;				// FIX: for smoke particles not drawing when portalSky present
+ 	}
+@@ -1762,6 +1777,7 @@ FullscreenFXManager::FullscreenFXManager()
  {
  	playerView = NULL;
  	blendBackMaterial = NULL;
@@ -46,7 +81,7 @@ index c45329f..370b3b1 100644
  }
  
  /*
-@@ -1854,6 +1855,7 @@ void FullscreenFXManager::Initialize( idPlayerView* pv )
+@@ -1854,6 +1870,7 @@ void FullscreenFXManager::Initialize( idPlayerView* pv )
  	// set the playerview
  	playerView = pv;
  	blendBackMaterial = declManager->FindMaterial( "textures/d3bfg/blendBack" );
@@ -54,7 +89,7 @@ index c45329f..370b3b1 100644
  	
  	// allocate the fx
  	CreateFX( "helltime", "helltime", 1000 );
-@@ -1937,8 +1939,30 @@ void FullscreenFXManager::Process( const renderView_t* view )
+@@ -1937,8 +1954,30 @@ void FullscreenFXManager::Process( const renderView_t* view )
  	}
  	
  	// do the first render
@@ -141,7 +176,7 @@ index 4d75c2c..455ef1c 100644
  	if( 1 )    //fileSystem->ReadFile( GetName(), NULL ) != -1 ) {
  	{
 diff --git a/neo/renderer/RenderBackend.cpp b/neo/renderer/RenderBackend.cpp
-index 8420ec2..c5e106d 100644
+index 8420ec2..14fd61f 100644
 --- a/neo/renderer/RenderBackend.cpp
 +++ b/neo/renderer/RenderBackend.cpp
 @@ -5200,7 +5200,21 @@ void idRenderBackend::ExecuteBackEndCommands( const emptyCommand_t* cmds )
@@ -167,8 +202,22 @@ index 8420ec2..c5e106d 100644
  	
  	ResizeImages();
  	
+@@ -5825,9 +5839,10 @@ void idRenderBackend::PostProcess( const void* data )
+ 	int screenWidth = renderSystem->GetWidth();
+ 	int screenHeight = renderSystem->GetHeight();
+ 	
+-	// set the window clipping
+-	GL_Viewport( 0, 0, screenWidth, screenHeight );
+-	GL_Scissor( 0, 0, screenWidth, screenHeight );
++	// set the window clipping: the view's own (dynamic resolution draws it
++	// smaller, at the bottom left; SMAA keeps it at the full size)
++	GL_Viewport( viewport.x1, viewport.y1, viewport.x2 + 1 - viewport.x1, viewport.y2 + 1 - viewport.y1 );
++	GL_Scissor( viewport.x1, viewport.y1, viewport.x2 + 1 - viewport.x1, viewport.y2 + 1 - viewport.y1 );
+ 	
+ 	// SMAA
+ 	int aaMode = r_antiAliasing.GetInteger();
 diff --git a/neo/renderer/RenderCommon.h b/neo/renderer/RenderCommon.h
-index f009c0a..b73543a 100644
+index f009c0a..511eeaa 100644
 --- a/neo/renderer/RenderCommon.h
 +++ b/neo/renderer/RenderCommon.h
 @@ -781,7 +781,7 @@ public:
@@ -180,6 +229,56 @@ index f009c0a..b73543a 100644
  	int						GetFrameCount() const
  	{
  		return frameCount;
+@@ -830,6 +830,12 @@ public:
+ 	idScreenRect			renderCrops[MAX_RENDER_CROPS];
+ 	int						currentRenderCrop;
+ 	
++	// dynamic resolution: the scale of the 3D view for the frame being
++	// made, taken when its command buffer starts (the back end changes the
++	// scale meanwhile, on the other thread with com_smp)
++	float					frameResolutionScaleX;
++	float					frameResolutionScaleY;
++	
+ 	// GUI drawing variables for surface creation
+ 	int						guiRecursionLevel;		// to prevent infinite overruns
+ 	uint32					currentColorNativeBytesOrder;
+diff --git a/neo/renderer/RenderSystem.cpp b/neo/renderer/RenderSystem.cpp
+index 3b42d4f..6036769 100644
+--- a/neo/renderer/RenderSystem.cpp
++++ b/neo/renderer/RenderSystem.cpp
+@@ -751,6 +751,16 @@ const emptyCommand_t* idRenderSystemLocal::SwapCommandBuffers_FinishCommandBuffe
+ 	R_InitDrawSurfFromTri( tr.zeroOneCubeSurface_, *tr.zeroOneCubeTriangles );
+ 	R_InitDrawSurfFromTri( tr.testImageSurface_, *tr.testImageTriangles );
+ 	
++	// dynamic resolution: the 3D view's scale for the whole frame about to
++	// be made (the game thread is not running here); SMAA works on the
++	// whole screen, so not with it
++	frameResolutionScaleX = 1.0f;
++	frameResolutionScaleY = 1.0f;
++	if( r_antiAliasing.GetInteger() != ANTI_ALIASING_SMAA_1X )
++	{
++		resolutionScale.GetCurrentResolutionScale( frameResolutionScaleX, frameResolutionScaleY );
++	}
++	
+ 	// Reset render crop to be the full screen
+ 	renderCrops[0].x1 = 0;
+ 	renderCrops[0].y1 = 0;
+@@ -846,12 +856,9 @@ In split screen mode the rendering size is also smaller.
+ void idRenderSystemLocal::PerformResolutionScaling( int& newWidth, int& newHeight )
+ {
+ 
+-	float xScale = 1.0f;
+-	float yScale = 1.0f;
+-	resolutionScale.GetCurrentResolutionScale( xScale, yScale );
+-	
+-	newWidth = idMath::Ftoi( GetWidth() * xScale );
+-	newHeight = idMath::Ftoi( GetHeight() * yScale );
++	// the scale taken for this frame: the same for every view of it
++	newWidth = idMath::Ftoi( GetWidth() * frameResolutionScaleX );
++	newHeight = idMath::Ftoi( GetHeight() * frameResolutionScaleY );
+ }
+ 
+ /*
 diff --git a/neo/renderer/RenderSystem.h b/neo/renderer/RenderSystem.h
 index 4b44b0b..9a6fe1d 100644
 --- a/neo/renderer/RenderSystem.h
@@ -195,6 +294,19 @@ index 4b44b0b..9a6fe1d 100644
  	// the image has to be already loaded ( most straightforward way would be through a FindMaterial )
  	// texture filter / mipmapping / repeat won't be modified by the upload
  	// returns false if the image wasn't found
+diff --git a/neo/renderer/RenderSystem_init.cpp b/neo/renderer/RenderSystem_init.cpp
+index 4211fe9..bf9e3ba 100644
+--- a/neo/renderer/RenderSystem_init.cpp
++++ b/neo/renderer/RenderSystem_init.cpp
+@@ -1984,6 +1984,8 @@ void idRenderSystemLocal::Clear()
+ 	memset( &identitySpace, 0, sizeof( identitySpace ) );
+ 	memset( renderCrops, 0, sizeof( renderCrops ) );
+ 	currentRenderCrop = 0;
++	frameResolutionScaleX = 1.0f;
++	frameResolutionScaleY = 1.0f;
+ 	currentColorNativeBytesOrder = 0xFFFFFFFF;
+ 	currentGLState = 0;
+ 	guiRecursionLevel = 0;
 diff --git a/neo/renderer/ResolutionScale.cpp b/neo/renderer/ResolutionScale.cpp
 index 2c54d15..6c69300 100644
 --- a/neo/renderer/ResolutionScale.cpp

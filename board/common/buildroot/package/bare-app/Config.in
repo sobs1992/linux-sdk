@@ -142,6 +142,7 @@ config BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM
 config BR2_PACKAGE_BARE_APP_DOOM3
 	bool "DOOM 3 BFG Edition (RBDOOM-3-BFG, an SDL2 game)"
 	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_aarch64 || BR2_x86_64 # rbdoom3-bfg
 	depends on BR2_INSTALL_LIBSTDCPP
 	depends on BR2_TOOLCHAIN_HAS_THREADS
 	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # mesa-panfrost

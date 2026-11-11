@@ -1,7 +1,7 @@
-From 4ad79f9f5fd707f753b4b576a5cd7552c3429846 Mon Sep 17 00:00:00 2001
+From a9fc71ca293618cd6c59c74fcb146677f9ea8cf7 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 15:10:55 +0100
-Subject: [PATCH 17/17] Render crops at the bottom left
+Subject: [PATCH 16/17] Render crops at the bottom left
 
 Shaders sampling _currentRender (glass, mirrors, heat haze) turn the
 fragment position into texture coordinates by the viewport's size
@@ -13,10 +13,10 @@ glass read the wrong part of the scene: it looked opaque.
  1 file changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/neo/renderer/RenderSystem.cpp b/neo/renderer/RenderSystem.cpp
-index 3b42d4f..bf0835c 100644
+index 6036769..e3221d7 100644
 --- a/neo/renderer/RenderSystem.cpp
 +++ b/neo/renderer/RenderSystem.cpp
-@@ -895,10 +895,14 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
+@@ -902,10 +902,14 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
  	
  	idScreenRect& current = renderCrops[currentRenderCrop];
  	

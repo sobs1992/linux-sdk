@@ -1,20 +1,27 @@
-From 3166727bdad6147e088cb9d44b9024a6c4ed7eeb Mon Sep 17 00:00:00 2001
+From 1e2c1ff0481930a608f2612c9603107a5676d4d0 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 11:35:18 +0100
 Subject: [PATCH 12/17] Readable small texts on small screens
 
 swf_textMinHeight: SWF texts drawn smaller than this many pixels grow,
-at most swf_textMaxScale (1.35) times; headings stay as they are.
+at most swf_textMaxScale (1.35) times, as far as they still fit their
+field: a single line stays whole, lines that fitted the field still do
+(lines that scroll, like the PDA's, grow all the same); worked out when
+the text or the scale changes. GetTextLength and CalcNumLines (icons
+and arrows next to texts, tooltip boxes) use the size the text was
+drawn at. Headings and edited texts stay as they are.
 r_fontLodBias: mip map LOD bias of the font images, below 0 for sharper
 small letters (live). The BFG interface is made for 1280x720 and up: at
 854x480 its small texts were about 7 pixels high and blurred. With
 HANDHELD_DEFAULTS: 14 pixels and -0.5; else both off.
 ---
- neo/renderer/OpenGL/Image_GL.cpp         |  7 +++++++
- neo/renderer/OpenGL/RenderBackend_GL.cpp |  4 +++-
- neo/renderer/RenderSystem_init.cpp       |  5 +++++
- neo/swf/SWF_Render.cpp                   | 13 +++++++++++++
- 4 files changed, 28 insertions(+), 1 deletion(-)
+ neo/renderer/OpenGL/Image_GL.cpp         |   7 +
+ neo/renderer/OpenGL/RenderBackend_GL.cpp |   4 +-
+ neo/renderer/RenderSystem_init.cpp       |   5 +
+ neo/swf/SWF_Render.cpp                   | 170 +++++++++++++++++++++++
+ neo/swf/SWF_TextInstance.cpp             |  11 +-
+ neo/swf/SWF_TextInstance.h               |   8 ++
+ 6 files changed, 202 insertions(+), 3 deletions(-)
 
 diff --git a/neo/renderer/OpenGL/Image_GL.cpp b/neo/renderer/OpenGL/Image_GL.cpp
 index c78a0e3..c62cbdc 100644
@@ -68,7 +75,7 @@ index a2124e2..4211fe9 100644
  // RB end
  
 diff --git a/neo/swf/SWF_Render.cpp b/neo/swf/SWF_Render.cpp
-index 841d4c1..60e1442 100644
+index 841d4c1..9c8fc43 100644
 --- a/neo/swf/SWF_Render.cpp
 +++ b/neo/swf/SWF_Render.cpp
 @@ -33,6 +33,15 @@ If you have questions concerning this license or the applicable additional terms
@@ -87,16 +94,235 @@ index 841d4c1..60e1442 100644
  idCVar swf_titleSafe( "swf_titleSafe", "0.005", CVAR_FLOAT, "space between UI elements and screen edge", 0.0f, 0.075f );
  
  idCVar swf_forceAlpha( "swf_forceAlpha", "0", CVAR_FLOAT, "force an alpha value on all elements, useful to show invisible animating elements", 0.0f, 1.0f );
-@@ -1009,6 +1018,10 @@ void idSWF::RenderEditText( idRenderSystem* gui, idSWFTextInstance* textInstance
- 	idSWFFont* swfFont = fontEntry->font;
- 	
- 	float postTransformHeight = SWFTWIP( shape->fontHeight ) * yScale;
-+	if( postTransformHeight > 0.0f && postTransformHeight < swf_textMinHeight.GetFloat() )
+@@ -876,6 +885,158 @@ void idSWF::DrawEditCursor( idRenderSystem* gui, float x, float y, float w, floa
+ 	DrawStretchPic( idVec4( topl.x, topl.y, 0.0f, 0.0f ), idVec4( topr.x, topr.y, 1.0f, 0.0f ), idVec4( br.x, br.y, 1.0f, 1.0f ), idVec4( bl.x, bl.y, 0.0f, 1.0f ), white );
+ }
+ 
++/*
++========================
++SWF_TextLines
++
++The lines a text takes in a field at a glyph scale, broken as
++idSWF::RenderEditText breaks them (tooltip icons left out); at most
++lineLimit + 1 are counted. A field that neither wraps nor has several
++lines takes one, or two when the text is cut at its end.
++========================
++*/
++static int SWF_TextLines( idSWFTextInstance* textInstance, const idFont* fontInfo, idStr& text, float glyphScale, float left, float right, int lineLimit )
++{
++	const idSWFEditText* shape = textInstance->editText;
++	const bool wrap = ( shape->flags & ( SWF_ET_MULTILINE | SWF_ET_WORDWRAP ) ) != 0;
++	const float strokeSkip = textInstance->HasStroke() ? swf_textStrokeSizeGlyphSpacer.GetFloat() * textInstance->GetStrokeWeight() * glyphScale : 0.0f;
++	
++	int lines = 1;
++	float x = left;
++	bool haveBreak = false;
++	float lastbreakX = 0.0f;
++	int charIndex = textInstance->IsSubtitle() ? textInstance->GetSubStartIndex() : 0;
++	
++	while( charIndex < text.Length() && lines <= lineLimit )
 +	{
-+		postTransformHeight *= idMath::ClampFloat( 1.0f, swf_textMaxScale.GetFloat(), swf_textMinHeight.GetFloat() / postTransformHeight );
++		if( text[ charIndex ] == '\n' )
++		{
++			if( !( shape->flags & SWF_ET_MULTILINE ) )
++			{
++				break;
++			}
++			lines++;
++			x = left;
++			haveBreak = false;
++			charIndex++;
++			continue;
++		}
++		const uint32 tc = text.UTF8Char( charIndex );
++		scaledGlyphInfo_t glyph;
++		fontInfo->GetScaledGlyph( glyphScale, tc, glyph );
++		const float glyphSkip = glyph.xSkip + strokeSkip;
++		if( x + glyphSkip > right )
++		{
++			lines++;	// a new line, or (no wrapping) the text is cut
++			if( !wrap )
++			{
++				break;
++			}
++			// as RenderEditText: the part after the last break moves on
++			x = haveBreak ? x - lastbreakX : left;
++			haveBreak = false;
++		}
++		x += glyphSkip;
++		if( tc == ' ' || tc == '-' )
++		{
++			haveBreak = true;
++			lastbreakX = x;
++		}
 +	}
++	return lines;
++}
++
++static float SWF_FitTextBoost( idSWFTextInstance* textInstance, const idFont* fontInfo, idStr& text, float xScale, float yScale, float height, float wanted );
++
++/*
++========================
++SWF_TextBoost
++
++swf_textMinHeight: how much bigger a text smaller than that is drawn, at
++most swf_textMaxScale times, and only as far as it still fits its field:
++the lines it took at its own size, as many as the field has room for
++then. Lines that did not fit at their own size either (scrolled like the
++PDA's) grow all the same. Worked out again only when the text or the
++scale changes.
++========================
++*/
++static float SWF_TextBoost( idSWFTextInstance* textInstance, const idFont* fontInfo, idStr& text, float xScale, float yScale )
++{
++	const idSWFEditText* shape = textInstance->editText;
++	const float height = SWFTWIP( shape->fontHeight ) * yScale;
++	if( height <= 0.0f || height >= swf_textMinHeight.GetFloat() || text.IsEmpty() )
++	{
++		return 1.0f;
++	}
++	const float wanted = idMath::ClampFloat( 1.0f, swf_textMaxScale.GetFloat(), swf_textMinHeight.GetFloat() / height );
++	if( shape->flags & SWF_ET_AUTOSIZE )
++	{
++		return wanted;	// the field grows with its text
++	}
++	
++	const int hash = idStr::Hash( text.c_str() ) ^ ( int )( wanted * 1000.0f );
++	if( hash == textInstance->textBoostHash && xScale == textInstance->textBoostXScale && yScale == textInstance->textBoostYScale )
++	{
++		return textInstance->textBoostFit;
++	}
++	textInstance->textBoostHash = hash;
++	textInstance->textBoostXScale = xScale;
++	textInstance->textBoostYScale = yScale;
++	textInstance->textBoostFit = SWF_FitTextBoost( textInstance, fontInfo, text, xScale, yScale, height, wanted );
++	return textInstance->textBoostFit;
++}
++
++/*
++========================
++SWF_FitTextBoost
++
++SWF_TextBoost without its cache: the biggest boost up to wanted at which
++the text still fits its field
++========================
++*/
++static float SWF_FitTextBoost( idSWFTextInstance* textInstance, const idFont* fontInfo, idStr& text, float xScale, float yScale, float height, float wanted )
++{
++	const idSWFEditText* shape = textInstance->editText;
++	
++	// the field as RenderEditText sees it at a boost
++	const float left = xScale * ( shape->bounds.tl.x + SWFTWIP( shape->leftMargin ) );
++	const float right = xScale * ( shape->bounds.br.x - SWFTWIP( shape->rightMargin ) );
++	const bool severalLines = ( shape->flags & ( SWF_ET_MULTILINE | SWF_ET_WORDWRAP ) ) != 0;
++	auto roomFor = [&]( float boost ) -> int
++	{
++		if( !severalLines )
++		{
++			return 1;
++		}
++		const float glyphScale = height * boost / 48.0f;
++		float linespacing = fontInfo->GetAscender( 1.15f * glyphScale );
++		if( shape->leading != 0 )
++		{
++			linespacing += SWFTWIP( shape->leading );
++		}
++		const float top = yScale * ( shape->bounds.tl.y + ( 1.15f * glyphScale ) );
++		const float bottom = yScale * shape->bounds.br.y;
++		return Max( idMath::Ftoi( ( bottom - top ) / linespacing ), 1 );
++	};
++	
++	const int ownRoom = roomFor( 1.0f );
++	if( SWF_TextLines( textInstance, fontInfo, text, height / 48.0f, left, right, ownRoom ) > ownRoom )
++	{
++		// did not fit at its own size either: lines that scroll (the PDA's)
++		// grow all the same, a single cut line stays as it was
++		return severalLines ? wanted : 1.0f;
++	}
++	for( float boost = wanted; boost > 1.0f; boost -= 0.05f )
++	{
++		const int room = roomFor( boost );
++		if( SWF_TextLines( textInstance, fontInfo, text, height * boost / 48.0f, left, right, room ) <= room )
++		{
++			return boost;
++		}
++	}
++	return 1.0f;
++}
++
+ /*
+ ========================
+ idSWF::RenderEditText
+@@ -1012,6 +1173,15 @@ void idSWF::RenderEditText( idRenderSystem* gui, idSWFTextInstance* textInstance
  	
  	const idFont* fontInfo = swfFont->fontID;
+ 	
++	// small texts on small screens: bigger, as far as they still fit
++	const float textBoost = inputField ? 1.0f : SWF_TextBoost( textInstance, fontInfo, text, xScale, yScale );
++	postTransformHeight *= textBoost;
++	if( textInstance->textBoost != textBoost )
++	{
++		textInstance->textBoost = textBoost;
++		textInstance->lengthCalculated = false;	// GetTextLength
++	}
++	
+ 	float glyphScale = postTransformHeight / 48.0f;
+ 	float imageScale = postTransformHeight / 24.0f;
+ 	textInstance->glyphScale = glyphScale;
+diff --git a/neo/swf/SWF_TextInstance.cpp b/neo/swf/SWF_TextInstance.cpp
+index 29a8dcd..e1d6171 100644
+--- a/neo/swf/SWF_TextInstance.cpp
++++ b/neo/swf/SWF_TextInstance.cpp
+@@ -94,6 +94,11 @@ void idSWFTextInstance::Init( idSWFEditText* _editText, idSWF* _swf )
+ 	maxLines = 0;
+ 	linespacing = 0;
+ 	glyphScale = 1.0f;
++	textBoost = 1.0f;
++	textBoostFit = 1.0f;
++	textBoostHash = 0;
++	textBoostXScale = 0.0f;
++	textBoostYScale = 0.0f;
+ 	
+ 	shiftHeld = false;
+ 	tooltip = false;
+@@ -184,7 +189,8 @@ float idSWFTextInstance::GetTextLength()
+ 		idSWFDictionaryEntry* fontEntry = swf->FindDictionaryEntry( shape->fontID, SWF_DICT_FONT );
+ 		idSWFFont* swfFont = fontEntry->font;
+ 		float width = fabs( shape->bounds.br.x - shape->bounds.tl.x );
+-		float postTrans = SWFTWIP( shape->fontHeight );
++		// as big as it was last drawn (swf_textMinHeight)
++		float postTrans = SWFTWIP( shape->fontHeight ) * textBoost;
+ 		const idFont* fontInfo = swfFont->fontID;
+ 		float glyphScale = postTrans / 48.0f;
+ 		
+@@ -915,7 +921,8 @@ int idSWFTextInstance::CalcNumLines()
+ 	}
+ 	
+ 	idSWFFont* swfFont = fontEntry->font;
+-	float postTransformHeight = SWFTWIP( shape->fontHeight );
++	// as big as it was last drawn (swf_textMinHeight)
++	float postTransformHeight = SWFTWIP( shape->fontHeight ) * textBoost;
+ 	const idFont* fontInfo = swfFont->fontID;
+ 	
+ 	float glyphScale = postTransformHeight / 48.0f;
+diff --git a/neo/swf/SWF_TextInstance.h b/neo/swf/SWF_TextInstance.h
+index 6192179..6c701b1 100644
+--- a/neo/swf/SWF_TextInstance.h
++++ b/neo/swf/SWF_TextInstance.h
+@@ -206,6 +206,14 @@ public:
+ 	swfRect_t bounds;
+ 	float linespacing;
+ 	
++	// swf_textMinHeight: how much bigger the text was last drawn (1: its own
++	// size), and what that was worked out for
++	float textBoost;
++	float textBoostFit;	// SWF_TextBoost's answer for:
++	int textBoostHash;
++	float textBoostXScale;
++	float textBoostYScale;
++	
+ 	bool shiftHeld;
+ 	int lastInputTime;
  	
 -- 
 2.53.0

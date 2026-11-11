@@ -6,8 +6,16 @@ cache handed it out, so every transient buffer (the staging and shadow
 buffers of glBufferSubData, the pools of each batch) cost an mmap, a
 munmap and a page fault on each page touched. A Direct3D 9 game under
 Wine spent about 15 % of its GL thread there. The mapping now stays
-with a cached BO and panfrost_bo_free() unmaps; a BO the kernel purged
-while in the cache is freed when fetched, as before.
+with a cached BO and panfrost_bo_free() unmaps.
+
+Such a BO is not marked purgeable (MADV_DONTNEED) when it goes into the
+cache, and so needs no MADV_WILLNEED when it comes out. Stock Mesa never
+leaves a purgeable BO mapped; with the first version of this patch,
+which did, GPU job faults (DATA_INVALID) and a crash writing job
+descriptors were seen with DOOM 3 BFG under memory pressure, after the
+kernel had purged BOs (perhaps the bad page maps seen with Pirates! too;
+not proven). The cache still frees BOs unused for two seconds, but the
+kernel can no longer reclaim mapped ones before that.
 
 --- a/src/gallium/drivers/panfrost/pan_bo.c
 +++ b/src/gallium/drivers/panfrost/pan_bo.c
@@ -30,7 +38,32 @@ while in the cache is freed when fetched, as before.
     /* BO will be freed with the sparse array, but zero to indicate free */
     memset(bo, 0, sizeof(*bo));
  
-@@ -458,9 +463,10 @@
+@@ -232,7 +237,9 @@
+       list_del(&entry->bucket_link);
+       list_del(&entry->lru_link);
+ 
+-      if (!pan_kmod_bo_make_unevictable(entry->kmod_bo)) {
++      /* A BO that kept its CPU mapping was never made evictable (see
++       * panfrost_bo_cache_put): no madvise to undo, nothing purged. */
++      if (!entry->ptr.cpu && !pan_kmod_bo_make_unevictable(entry->kmod_bo)) {
+          panfrost_bo_free(entry);
+          continue;
+       }
+@@ -288,7 +295,12 @@
+    struct list_head *bucket = pan_bucket(dev, MAX2(panfrost_bo_size(bo), 4096));
+    struct timespec time;
+ 
+-   pan_kmod_bo_make_evictable(bo->kmod_bo);
++   /* A BO keeping its CPU mapping is not handed to the kernel's shrinker
++    * (stock Mesa never leaves a purgeable BO mapped; with that, GPU job
++    * faults and crashes writing descriptors were seen under memory
++    * pressure). The cache drops it after two seconds unused anyway. */
++   if (!bo->ptr.cpu)
++      pan_kmod_bo_make_evictable(bo->kmod_bo);
+ 
+    /* Add us to the bucket */
+    list_addtail(&bo->bucket_link, bucket);
+@@ -458,9 +470,10 @@
      * lock, let's make sure it's still not referenced before freeing it.
      */
     if (p_atomic_read(&bo->refcnt) == 0) {
