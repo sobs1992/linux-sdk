@@ -1,79 +1,77 @@
-From b8e91d51b6a44d443ad751b47c7e033d6af8ae88 Mon Sep 17 00:00:00 2001
+From 461cf796bca92244fa631adde764f9e25cced75a Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 14:43:52 +0100
 Subject: [PATCH 15/17] Dynamic resolution of the 3D view (BFG's resolution
  scaling, wired up)
 
-When frames are slow, FullscreenFXManager::Process draws the player's
-view cropped to a smaller size (CropRenderSize: the front end computes
-viewport, light scissors and window coordinates for it), captures it
-into the image _scaledSceneImage and stretches it over the screen with
-the material _scaledScene (opaque; translucent so it is not depth
-tested EQUAL in the 2D view). The HUD, texts and menus drawn after it
-stay at the full size.
+When frames are slow, FullscreenFXManager::RenderScaledScene draws the
+player's view cropped to a smaller size (CropRenderSize: the front end
+computes viewport, light scissors and window coordinates for it) and
+captures it into the image _scaledSceneImage; Process stretches it over
+the screen with the material _scaledScene (opaque; translucent so it is
+not depth tested EQUAL in the 2D view). The HUD, texts and menus drawn
+after it stay at the full size. RenderScene no longer scales by itself
+(BFG scaled every 3D view there and stretched none): it draws into the
+crop it is given, so demos, screenshots and the end of a level keep the
+full size. More crops than renderCrops holds are an error, not a write
+past it.
 
 The scale is taken once a frame, when its command buffer starts
 (SwapCommandBuffers_FinishCommandBuffers, the game thread stopped):
 with com_smp the back end steers it while the game thread draws, and
-Process and RenderScene reading it apart could crop and stretch by two
+two views of one frame reading it apart could crop and stretch by two
 sizes. A portal sky is drawn and captured at the view's size, which is
-the size the view reads it back at. The back end's post-processing
-(filmic) stays within the view; SMAA works on the whole screen, so the
-scale stays 1 with it.
+the size the view reads it back at. Only views that keep to their
+viewport are scaled: with antialiasing, HDR, SSAO, SSGI or motion blur
+(passes over the whole screen), or while a demo is recorded, the scale
+stays 1. The back end's filmic post-processing stays within the view;
+PostProcess no longer runs for rs_enable alone.
 
 rs_enable 4: both axes alike; rs_minimum: the smallest scale. Without
 GPU timer queries (Mesa: off in RBDOOM, and panfrost's split batches)
 idResolutionScale::SetCurrentFrameTime steers by the time between
 frames: it drops proportionally when frames take rs_frameDropMilliseconds
-longer than the engine's rate, and rises a step after waiting at the
-full rate, waiting longer after a rise that had to be taken back.
+longer than the engine's rate and judges each drop by the 20 frames
+after it; one that did not make them faster (bound by the CPU) is taken
+back, and the next drop waits 300 frames, twice as long each time it
+fails again. It rises a step after waiting at the full rate, waiting
+longer after a rise that had to be taken back.
 
 Handhelds: rs_enable 4, rs_minimum 0.6. Mali-G52 (854x480): the start of
 mars_city2 27.8 -> 46 fps, the mars_city1 hangar 34 -> 54 fps; light
 scenes keep the full size at 60 fps.
 ---
- neo/d3xp/PlayerView.cpp            | 39 ++++++++++++
- neo/d3xp/PlayerView.h              |  1 +
- neo/renderer/Image_intrinsic.cpp   |  3 +
- neo/renderer/Material.cpp          | 18 ++++++
- neo/renderer/RenderBackend.cpp     | 23 +++++--
- neo/renderer/RenderCommon.h        |  8 ++-
- neo/renderer/RenderSystem.cpp      | 19 ++++--
- neo/renderer/RenderSystem.h        |  4 ++
- neo/renderer/RenderSystem_init.cpp |  2 +
- neo/renderer/ResolutionScale.cpp   | 98 +++++++++++++++++++++++++++++-
- neo/renderer/ResolutionScale.h     | 10 +++
- 11 files changed, 212 insertions(+), 13 deletions(-)
+ neo/d3xp/PlayerView.cpp            |  53 ++++++++-
+ neo/d3xp/PlayerView.h              |   5 +
+ neo/renderer/Image_intrinsic.cpp   |   3 +
+ neo/renderer/Material.cpp          |  18 +++
+ neo/renderer/RenderBackend.cpp     |  32 ++++--
+ neo/renderer/RenderCommon.h        |   8 +-
+ neo/renderer/RenderSystem.cpp      |  28 ++++-
+ neo/renderer/RenderSystem.h        |   4 +
+ neo/renderer/RenderSystem_init.cpp |   2 +
+ neo/renderer/RenderWorld.cpp       |  12 +-
+ neo/renderer/ResolutionScale.cpp   | 176 ++++++++++++++++++++++++++++-
+ neo/renderer/ResolutionScale.h     |  21 ++++
+ 12 files changed, 341 insertions(+), 21 deletions(-)
 
 diff --git a/neo/d3xp/PlayerView.cpp b/neo/d3xp/PlayerView.cpp
-index c45329f..37878db 100644
+index c45329f..e5b1698 100644
 --- a/neo/d3xp/PlayerView.cpp
 +++ b/neo/d3xp/PlayerView.cpp
-@@ -457,8 +457,23 @@ void idPlayerView::SingleView( const renderView_t* view, idMenuHandler_HUD* hudM
+@@ -457,8 +457,9 @@ void idPlayerView::SingleView( const renderView_t* view, idMenuHandler_HUD* hudM
  	{
  		renderView_t portalView = hackedView;
  		portalView.vieworg = gameLocal.portalSkyEnt.GetEntity()->GetPhysics()->GetOrigin();
-+		// dynamic resolution: RenderScene draws the sky at the 3D view's
-+		// size, and the view reads it back over that size: captured at it
-+		int skyWidth = renderSystem->GetWidth();
-+		int skyHeight = renderSystem->GetHeight();
-+		renderSystem->PerformResolutionScaling( skyWidth, skyHeight );
-+		const bool scaledSky = ( skyWidth < renderSystem->GetWidth() || skyHeight < renderSystem->GetHeight() ) &&
-+							   skyWidth > 0 && skyHeight > 0;
-+		if( scaledSky )
-+		{
-+			renderSystem->CropRenderSize( skyWidth, skyHeight );
-+		}
- 		gameRenderWorld->RenderScene( &portalView );
- 		renderSystem->CaptureRenderToImage( "_currentRender" );
-+		if( scaledSky )
-+		{
-+			renderSystem->UnCrop();
-+		}
+-		gameRenderWorld->RenderScene( &portalView );
+-		renderSystem->CaptureRenderToImage( "_currentRender" );
++		// drawn and captured at the size the 3D view gets this frame
++		// (dynamic resolution): the view reads it back over its own size
++		fxManager->RenderScaledScene( &portalView, "_currentRender", true );
  		
  		hackedView.forceUpdate = true;				// FIX: for smoke particles not drawing when portalSky present
  	}
-@@ -1762,6 +1777,7 @@ FullscreenFXManager::FullscreenFXManager()
+@@ -1762,6 +1763,7 @@ FullscreenFXManager::FullscreenFXManager()
  {
  	playerView = NULL;
  	blendBackMaterial = NULL;
@@ -81,7 +79,7 @@ index c45329f..37878db 100644
  }
  
  /*
-@@ -1854,6 +1870,7 @@ void FullscreenFXManager::Initialize( idPlayerView* pv )
+@@ -1854,6 +1856,7 @@ void FullscreenFXManager::Initialize( idPlayerView* pv )
  	// set the playerview
  	playerView = pv;
  	blendBackMaterial = declManager->FindMaterial( "textures/d3bfg/blendBack" );
@@ -89,39 +87,68 @@ index c45329f..37878db 100644
  	
  	// allocate the fx
  	CreateFX( "helltime", "helltime", 1000 );
-@@ -1937,8 +1954,30 @@ void FullscreenFXManager::Process( const renderView_t* view )
+@@ -1921,6 +1924,43 @@ void FullscreenFXManager::Restore( idRestoreGame* savefile )
+ 
+ idCVar player_allowScreenFXInStereo( "player_allowScreenFXInStereo", "1", CVAR_BOOL, "allow full screen fx in stereo mode" );
+ 
++/*
++==================
++FullscreenFXManager::RenderScaledScene
++
++Dynamic resolution (rs_enable): a 3D view of the player's drawn at the
++size this frame's scale gives (RenderScene draws into the crop, at the
++bottom left), then captured into image; false when it is drawn at the
++full size (captured then too if captureAlways). The view and its portal
++sky alike, as the view reads the sky back over its own size. Only here:
++other 3D views (demos, screenshots, the end of a level) stay at the full
++size, as nothing would stretch them.
++==================
++*/
++bool FullscreenFXManager::RenderScaledScene( const renderView_t* view, const char* image, bool captureAlways )
++{
++	int width = renderSystem->GetWidth();
++	int height = renderSystem->GetHeight();
++	renderSystem->PerformResolutionScaling( width, height );
++	const bool scaled = scaledSceneMaterial != NULL && !IsGameStereoRendered() &&
++						( width < renderSystem->GetWidth() || height < renderSystem->GetHeight() ) &&
++						width > 0 && height > 0;
++	if( scaled )
++	{
++		renderSystem->CropRenderSize( width, height );
++	}
++	gameRenderWorld->RenderScene( view );
++	if( scaled || captureAlways )
++	{
++		renderSystem->CaptureRenderToImage( image );
++	}
++	if( scaled )
++	{
++		renderSystem->UnCrop();
++	}
++	return scaled;
++}
++
+ /*
+ ==================
+ FullscreenFXManager::Process
+@@ -1937,7 +1977,14 @@ void FullscreenFXManager::Process( const renderView_t* view )
  	}
  	
  	// do the first render
+-	gameRenderWorld->RenderScene( view );
 +	// dynamic resolution (rs_enable): the 3D view at a smaller size when the
 +	// frames are slow, stretched to the screen; the HUD, texts and menus
 +	// drawn after it stay at the full size
-+	int sceneWidth = renderSystem->GetWidth();
-+	int sceneHeight = renderSystem->GetHeight();
-+	renderSystem->PerformResolutionScaling( sceneWidth, sceneHeight );
-+	const bool scaledScene = scaledSceneMaterial != NULL && !IsGameStereoRendered() &&
-+							 ( sceneWidth < renderSystem->GetWidth() || sceneHeight < renderSystem->GetHeight() ) &&
-+							 sceneWidth > 0 && sceneHeight > 0;
-+	if( scaledScene )
++	if( RenderScaledScene( view, "_scaledSceneImage", false ) )
 +	{
-+		renderSystem->CropRenderSize( sceneWidth, sceneHeight );
-+	}
-+	
- 	gameRenderWorld->RenderScene( view );
- 	
-+	if( scaledScene )
-+	{
-+		renderSystem->CaptureRenderToImage( "_scaledSceneImage" );
-+		renderSystem->UnCrop();
 +		renderSystem->SetColor4( 1.0f, 1.0f, 1.0f, 1.0f );
 +		renderSystem->DrawStretchPic( 0.0f, 0.0f, renderSystem->GetVirtualWidth(), renderSystem->GetVirtualHeight(), 0.0f, 1.0f, 1.0f, 0.0f, scaledSceneMaterial );
 +	}
-+	
+ 	
  	// we should consider these on a case-by-case basis for stereo rendering
  	// double vision could be implemented "for real" by shifting the
- 	// eye views
 diff --git a/neo/d3xp/PlayerView.h b/neo/d3xp/PlayerView.h
-index 87588bd..0ec79d9 100644
+index 87588bd..5fb1dcf 100644
 --- a/neo/d3xp/PlayerView.h
 +++ b/neo/d3xp/PlayerView.h
 @@ -360,6 +360,7 @@ class FullscreenFXManager
@@ -132,6 +159,17 @@ index 87588bd..0ec79d9 100644
  	
  	void					CreateFX( idStr name, idStr fxtype, int fade );
  	
+@@ -367,6 +368,10 @@ public:
+ 	FullscreenFXManager();
+ 	virtual					~FullscreenFXManager();
+ 	
++	// dynamic resolution: a 3D view drawn smaller and captured into image;
++	// false: drawn at the full size
++	bool					RenderScaledScene( const renderView_t* view, const char* image, bool captureAlways );
++	
+ 	void					Initialize( idPlayerView* pv );
+ 	
+ 	void					Process( const renderView_t* view );
 diff --git a/neo/renderer/Image_intrinsic.cpp b/neo/renderer/Image_intrinsic.cpp
 index c2456b6..bd9d114 100644
 --- a/neo/renderer/Image_intrinsic.cpp
@@ -176,7 +214,7 @@ index 4d75c2c..455ef1c 100644
  	if( 1 )    //fileSystem->ReadFile( GetName(), NULL ) != -1 ) {
  	{
 diff --git a/neo/renderer/RenderBackend.cpp b/neo/renderer/RenderBackend.cpp
-index 8420ec2..14fd61f 100644
+index 8420ec2..7326473 100644
 --- a/neo/renderer/RenderBackend.cpp
 +++ b/neo/renderer/RenderBackend.cpp
 @@ -5200,7 +5200,21 @@ void idRenderBackend::ExecuteBackEndCommands( const emptyCommand_t* cmds )
@@ -202,15 +240,33 @@ index 8420ec2..14fd61f 100644
  	
  	ResizeImages();
  	
-@@ -5825,9 +5839,10 @@ void idRenderBackend::PostProcess( const void* data )
+@@ -5796,12 +5810,12 @@ idRenderBackend::PostProcess
+ 
+ ==================
+ */
+-extern idCVar rs_enable;
+ void idRenderBackend::PostProcess( const void* data )
+ {
+-	// only do the post process step if resolution scaling is enabled. Prevents the unnecessary copying of the framebuffer and
+-	// corresponding full screen quad pass.
+-	if( rs_enable.GetInteger() == 0 && !r_useFilmicPostProcessEffects.GetBool() && r_antiAliasing.GetInteger() == 0 )
++	// only do the post process step for the filmic effects or antialiasing (the dynamic resolution's
++	// smaller view is stretched by FullscreenFXManager). Prevents the unnecessary copying of the
++	// framebuffer and corresponding full screen quad pass.
++	if( !r_useFilmicPostProcessEffects.GetBool() && r_antiAliasing.GetInteger() == 0 )
+ 	{
+ 		return;
+ 	}
+@@ -5825,9 +5839,11 @@ void idRenderBackend::PostProcess( const void* data )
  	int screenWidth = renderSystem->GetWidth();
  	int screenHeight = renderSystem->GetHeight();
  	
 -	// set the window clipping
 -	GL_Viewport( 0, 0, screenWidth, screenHeight );
 -	GL_Scissor( 0, 0, screenWidth, screenHeight );
-+	// set the window clipping: the view's own (dynamic resolution draws it
-+	// smaller, at the bottom left; SMAA keeps it at the full size)
++	// set the window clipping: the view's own (a cropped view is drawn at
++	// the bottom left; the dynamic resolution keeps the full size with
++	// antialiasing)
 +	GL_Viewport( viewport.x1, viewport.y1, viewport.x2 + 1 - viewport.x1, viewport.y2 + 1 - viewport.y1 );
 +	GL_Scissor( viewport.x1, viewport.y1, viewport.x2 + 1 - viewport.x1, viewport.y2 + 1 - viewport.y1 );
  	
@@ -243,19 +299,23 @@ index f009c0a..511eeaa 100644
  	int						guiRecursionLevel;		// to prevent infinite overruns
  	uint32					currentColorNativeBytesOrder;
 diff --git a/neo/renderer/RenderSystem.cpp b/neo/renderer/RenderSystem.cpp
-index 3b42d4f..6036769 100644
+index 3b42d4f..9a18b28 100644
 --- a/neo/renderer/RenderSystem.cpp
 +++ b/neo/renderer/RenderSystem.cpp
-@@ -751,6 +751,16 @@ const emptyCommand_t* idRenderSystemLocal::SwapCommandBuffers_FinishCommandBuffe
+@@ -751,6 +751,20 @@ const emptyCommand_t* idRenderSystemLocal::SwapCommandBuffers_FinishCommandBuffe
  	R_InitDrawSurfFromTri( tr.zeroOneCubeSurface_, *tr.zeroOneCubeTriangles );
  	R_InitDrawSurfFromTri( tr.testImageSurface_, *tr.testImageTriangles );
  	
 +	// dynamic resolution: the 3D view's scale for the whole frame about to
-+	// be made (the game thread is not running here); SMAA works on the
-+	// whole screen, so not with it
++	// be made (the game thread is not running here). Only for views that
++	// keep to their viewport: antialiasing, HDR (tone mapping, bloom,
++	// exposure), SSAO, SSGI and motion blur work on the whole screen, and a
++	// demo being recorded would play the smaller views back unstretched
++	extern idCVar r_motionBlur;
 +	frameResolutionScaleX = 1.0f;
 +	frameResolutionScaleY = 1.0f;
-+	if( r_antiAliasing.GetInteger() != ANTI_ALIASING_SMAA_1X )
++	if( r_antiAliasing.GetInteger() == 0 && !r_useHDR.GetBool() && r_useSSAO.GetInteger() <= 0 &&
++			!r_useSSGI.GetBool() && r_motionBlur.GetInteger() <= 0 && common->WriteDemo() == NULL )
 +	{
 +		resolutionScale.GetCurrentResolutionScale( frameResolutionScaleX, frameResolutionScaleY );
 +	}
@@ -263,7 +323,7 @@ index 3b42d4f..6036769 100644
  	// Reset render crop to be the full screen
  	renderCrops[0].x1 = 0;
  	renderCrops[0].y1 = 0;
-@@ -846,12 +856,9 @@ In split screen mode the rendering size is also smaller.
+@@ -846,12 +860,9 @@ In split screen mode the rendering size is also smaller.
  void idRenderSystemLocal::PerformResolutionScaling( int& newWidth, int& newHeight )
  {
  
@@ -279,6 +339,18 @@ index 3b42d4f..6036769 100644
  }
  
  /*
+@@ -876,6 +887,11 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
+ 		common->Error( "CropRenderSize: bad sizes" );
+ 	}
+ 	
++	if( currentRenderCrop >= MAX_RENDER_CROPS - 1 )
++	{
++		common->Error( "CropRenderSize: more than %d crops", MAX_RENDER_CROPS - 1 );
++	}
++	
+ 	if( common->WriteDemo() )
+ 	{
+ 		common->WriteDemo()->WriteInt( DS_RENDER );
 diff --git a/neo/renderer/RenderSystem.h b/neo/renderer/RenderSystem.h
 index 4b44b0b..9a6fe1d 100644
 --- a/neo/renderer/RenderSystem.h
@@ -307,8 +379,33 @@ index 4211fe9..bf9e3ba 100644
  	currentColorNativeBytesOrder = 0xFFFFFFFF;
  	currentGLState = 0;
  	guiRecursionLevel = 0;
+diff --git a/neo/renderer/RenderWorld.cpp b/neo/renderer/RenderWorld.cpp
+index b46e077..aadd21d 100644
+--- a/neo/renderer/RenderWorld.cpp
++++ b/neo/renderer/RenderWorld.cpp
+@@ -931,9 +931,19 @@ void idRenderWorldLocal::RenderScene( const renderView_t* renderView )
+ 		parms->renderView.forceUpdate = true;
+ 	}
+ 	
++	// the size of the crop it is drawn in: the window's, or the caller's
++	// (FullscreenFXManager::RenderScaledScene: the dynamic resolution's
++	// smaller view of the player). The scale is not taken here: other 3D
++	// views (demos, screenshots, the end of a level) would stay small in
++	// a corner, as nothing stretches them.
+ 	int windowWidth = tr.GetWidth();
+ 	int windowHeight = tr.GetHeight();
+-	tr.PerformResolutionScaling( windowWidth, windowHeight );
++	if( tr.currentRenderCrop > 0 )
++	{
++		const idScreenRect& crop = tr.renderCrops[ tr.currentRenderCrop ];
++		windowWidth = crop.x2 + 1 - crop.x1;
++		windowHeight = crop.y2 + 1 - crop.y1;
++	}
+ 	
+ 	// screenFraction is just for quickly testing fill rate limitations
+ 	if( r_screenFraction.GetInteger() != 100 )
 diff --git a/neo/renderer/ResolutionScale.cpp b/neo/renderer/ResolutionScale.cpp
-index 2c54d15..6c69300 100644
+index 2c54d15..46bfc32 100644
 --- a/neo/renderer/ResolutionScale.cpp
 +++ b/neo/renderer/ResolutionScale.cpp
 @@ -35,11 +35,17 @@ If you have questions concerning this license or the applicable additional terms
@@ -344,7 +441,7 @@ index 2c54d15..6c69300 100644
  idCVar rs_display( "rs_display", "0", CVAR_INTEGER, "0 - percentages, 1 - pixels per frame" );
  
  
-@@ -63,6 +75,10 @@ idResolutionScale::idResolutionScale()
+@@ -63,6 +75,17 @@ idResolutionScale::idResolutionScale()
  	raiseMilliseconds = 13.0f;
  	framesAboveRaise = 0;
  	currentResolution = 1.0f;
@@ -352,10 +449,25 @@ index 2c54d15..6c69300 100644
 +	framesSinceChange = 0;
 +	raiseWait = 60;
 +	lastChangeWasRaise = false;
++	judgingDrop = false;
++	msBeforeDrop = 0.0f;
++	scaleBeforeDrop = 1.0f;
++	areaBeforeDrop = 1.0f;
++	dropHold = 0;
++	dropWait = DROP_WAIT_FIRST;
++	framesUnderDrop = 0;
  }
  
  /*
-@@ -108,6 +124,9 @@ void idResolutionScale::GetCurrentResolutionScale( float& x, float& y )
+@@ -84,6 +107,7 @@ idResolutionScale::ResetToFullResolution
+ void idResolutionScale::ResetToFullResolution()
+ {
+ 	currentResolution = 1.0f;
++	judgingDrop = false;	// a drop to judge is gone with it
+ }
+ 
+ /*
+@@ -108,6 +132,9 @@ void idResolutionScale::GetCurrentResolutionScale( float& x, float& y )
  		case 2:
  			y = currentResolution;
  			break;
@@ -365,7 +477,7 @@ index 2c54d15..6c69300 100644
  		case 3:
  		{
  			const float middle = ( MINIMUM_RESOLUTION_SCALE + MAXIMUM_RESOLUTION_SCALE ) * 0.5f;
-@@ -190,6 +209,81 @@ void idResolutionScale::SetCurrentGPUFrameTime( int microseconds )
+@@ -190,6 +217,151 @@ void idResolutionScale::SetCurrentGPUFrameTime( int microseconds )
  	}
  }
  
@@ -376,12 +488,18 @@ index 2c54d15..6c69300 100644
 +For GPUs without usable timer queries: frames are paced to the engine's
 +rate (com_engineHz), so a frame that keeps that rate tells nothing about
 +the time to spare. The scale drops at once (proportionally to the miss,
-+pixels cost about the area) when frames take too long; it rises a step
-+after raiseWait frames at the full rate, and a rise that had to be taken
-+back soon makes the next wait longer, so the picture does not keep
-+changing between two sizes.
++pixels cost about the area) when frames take too long. Each drop is
++judged by the frames after it: one that did not make them faster by a
++fair part of what fewer pixels would give (the frame is bound by the CPU,
++the game or the swap, not the GPU's pixels) is taken back, and the next
++drop waits longer, so a slow CPU does not blur the view for nothing. The
++scale rises a step after raiseWait frames at the full rate, and a rise
++that had to be taken back soon makes the next wait longer, so the picture
++does not keep changing between two sizes.
 +========================
 +*/
++static const int DROP_JUDGE_FRAMES = 20;	// frames at a new size before it is judged
++
 +void idResolutionScale::SetCurrentFrameTime( int microseconds )
 +{
 +	const float old = currentResolution;
@@ -398,16 +516,79 @@ index 2c54d15..6c69300 100644
 +	}
 +	frameMsAverage = frameMsAverage * 0.8f + ms * 0.2f;
 +	framesSinceChange++;
++	if( dropHold > 0 )
++	{
++		dropHold--;
++	}
 +	
 +	const float drop = target + rs_frameDropMilliseconds.GetFloat();
 +	const float raise = target + rs_frameRaiseMilliseconds.GetFloat();
 +	
-+	if( frameMsAverage > drop && framesSinceChange >= 6 )
++	// frames fast enough for a while: the scene has changed, so a drop
++	// may be tried again soon
++	framesUnderDrop = frameMsAverage <= drop ? framesUnderDrop + 1 : 0;
++	if( framesUnderDrop > 600 )
 +	{
++		dropWait = DROP_WAIT_FIRST;
++	}
++	
++	bool judging = false;
++	if( judgingDrop )
++	{
++		if( framesSinceChange < DROP_JUDGE_FRAMES )
++		{
++			judging = true;	// the new size's own frames first
++		}
++		else
++		{
++			judgingDrop = false;
++			float x, y;
++			GetCurrentResolutionScale( x, y );
++			// what the frame would gain if all of it were the pixels'
++			const float expected = msBeforeDrop * ( 1.0f - ( x * y ) / Max( areaBeforeDrop, 0.01f ) );
++			const float gain = msBeforeDrop - frameMsAverage;
++			if( frameMsAverage > drop && ( gain < 1.0f || gain < 0.25f * expected ) )
++			{
++				// fewer pixels did not help: back to the size before, and
++				// the next drop waits (longer each time it fails again)
++				currentResolution = scaleBeforeDrop;
++				dropHold = dropWait;
++				dropWait = Min( dropWait * 2, DROP_WAIT_MAX );
++				framesSinceChange = 0;
++				framesAboveRaise = 0;
++				frameMsAverage = msBeforeDrop;
++				lastChangeWasRaise = false;
++				judging = true;
++			}
++			else
++			{
++				dropWait = DROP_WAIT_FIRST;	// it helped: the next may come soon
++			}
++		}
++	}
++	
++	if( judging )
++	{
++		// nothing else while a drop is judged or was just taken back
++	}
++	else if( frameMsAverage > drop && framesSinceChange >= 6 && dropHold == 0 )
++	{
++		float x, y;
++		GetCurrentResolutionScale( x, y );
++		// at least 8 %: a smaller step gains too little to judge from the
++		// frames' jitter whether pixels or the CPU hold the frame back
 +		float want = currentResolution * idMath::Sqrt( target / frameMsAverage );
 +		want = Max( want, currentResolution - 0.15f );
-+		want = Min( want, currentResolution - 0.02f );
-+		currentResolution = Max( want, MINIMUM_RESOLUTION_SCALE );
++		want = Min( want, currentResolution - 0.08f );
++		want = Max( want, MINIMUM_RESOLUTION_SCALE );
++		if( want < currentResolution )
++		{
++			judgingDrop = true;
++			msBeforeDrop = frameMsAverage;
++			scaleBeforeDrop = currentResolution;
++			areaBeforeDrop = x * y;
++			currentResolution = want;
++		}
 +		if( lastChangeWasRaise && framesSinceChange < raiseWait )
 +		{
 +			raiseWait = Min( raiseWait * 2, 1200 );	// that rise was too much
@@ -440,7 +621,8 @@ index 2c54d15..6c69300 100644
 +	if( rs_showResolutionChanges.GetInteger() > 1 ||
 +			( rs_showResolutionChanges.GetInteger() == 1 && currentResolution != old ) )
 +	{
-+		idLib::Printf( "frame msec: %4.1f (average %4.1f) resolutionScale: %4.2f, raise wait %d\n", ms, frameMsAverage, currentResolution, raiseWait );
++		idLib::Printf( "frame msec: %4.1f (average %4.1f) resolutionScale: %4.2f, raise wait %d, drop hold %d%s\n", ms, frameMsAverage, currentResolution, raiseWait, dropHold,
++					   currentResolution > old && !lastChangeWasRaise ? " (the drop did not help)" : "" );
 +	}
 +}
 +
@@ -448,7 +630,7 @@ index 2c54d15..6c69300 100644
  ========================
  idResolutionScale::GetConsoleText
 diff --git a/neo/renderer/ResolutionScale.h b/neo/renderer/ResolutionScale.h
-index 5d8cc5d..c534605 100644
+index 5d8cc5d..8a104da 100644
 --- a/neo/renderer/ResolutionScale.h
 +++ b/neo/renderer/ResolutionScale.h
 @@ -50,6 +50,11 @@ public:
@@ -463,7 +645,7 @@ index 5d8cc5d..c534605 100644
  	// return console display text
  	void	GetConsoleText( idStr& s );
  	
-@@ -58,6 +63,11 @@ private:
+@@ -58,6 +63,22 @@ private:
  	float			raiseMilliseconds;
  	int				framesAboveRaise;
  	float			currentResolution;
@@ -472,6 +654,17 @@ index 5d8cc5d..c534605 100644
 +	int				framesSinceChange;
 +	int				raiseWait;
 +	bool			lastChangeWasRaise;
++	// a drop is judged by the frames after it, and taken back if they are
++	// not faster (bound by the CPU): no other drop for dropHold frames then
++	static const int DROP_WAIT_FIRST = 300;
++	static const int DROP_WAIT_MAX = 4800;
++	bool			judgingDrop;
++	float			msBeforeDrop;
++	float			scaleBeforeDrop;
++	float			areaBeforeDrop;
++	int				dropHold;
++	int				dropWait;
++	int				framesUnderDrop;
  };
  
  extern idResolutionScale resolutionScale;

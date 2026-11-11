@@ -1,4 +1,4 @@
-From 53ae49850c5620c958ab31d530327409056e64d3 Mon Sep 17 00:00:00 2001
+From b5a5d4fca3c6de3be41d16f1a863d81068b0c770 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 13:29:39 +0100
 Subject: [PATCH 13/17] Vertex cache: three frames of temporary geometry
@@ -10,9 +10,13 @@ indexes and joints being overwritten: garbage triangles, GPU job
 timeouts and faults (Mali-G52, the mars_city1 intro within a minute).
 A third set leaves N-1 alone.
 
-Handhelds: 16 MB of vertexes and of indexes per frame instead of 31 MB
-(a frame uses about 3 MB even in big halls), so the three sets take less
-memory than the two did.
+Handhelds: 16 MB of vertexes and of indexes per frame instead of 31 MB,
+so the three sets take less memory than the two did. Running out is a
+fatal error ("Out of vertex cache"), so the peak was measured
+(r_showVertexCache, which counts reserved blocks too): big halls about
+3 MB; hell1 with eight monsters spawned and fighting, stencil shadows,
+3.2 MB of vertexes and 1.2 MB of indexes at most: 16 MB leaves five times
+that.
 ---
  neo/renderer/VertexCache.cpp |  6 +++---
  neo/renderer/VertexCache.h   | 20 +++++++++++++++++---

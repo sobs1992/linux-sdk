@@ -2,9 +2,13 @@ config BR2_PACKAGE_RBDOOM3_BFG
 	bool "rbdoom3-bfg"
 	depends on BR2_aarch64 || BR2_x86_64 # neo/sys/sys_defines.h
 	depends on BR2_INSTALL_LIBSTDCPP
-	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL # openal
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_7 # openal
+	depends on BR2_PACKAGE_OPENAL_ARCH_SUPPORTS
 	depends on !BR2_STATIC_LIBS # sdl2
 	depends on BR2_PACKAGE_MESA_PANFROST # OpenGL through EGL
+	# SDL2 with EGL and its bareapp video driver: the only window there is
+	depends on BR2_PACKAGE_BARE_APP_SDL
 	select BR2_PACKAGE_SDL2
 	select BR2_PACKAGE_OPENAL
 	select BR2_PACKAGE_ZLIB
@@ -17,7 +21,9 @@ config BR2_PACKAGE_RBDOOM3_BFG
 
 	  https://github.com/RobertBeckebans/RBDOOM-3-BFG
 
-comment "rbdoom3-bfg needs mesa-panfrost and a toolchain w/ C++, threads, dynamic library"
+comment "rbdoom3-bfg needs mesa-panfrost, bare_app's SDL2 games and a toolchain w/ C++, NPTL, gcc >= 7, dynamic library"
 	depends on BR2_aarch64 || BR2_x86_64
-	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_INSTALL_LIBSTDCPP || \
-		!BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS
+	depends on BR2_PACKAGE_OPENAL_ARCH_SUPPORTS
+	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_PACKAGE_BARE_APP_SDL || \
+		!BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS_NPTL || \
+		!BR2_TOOLCHAIN_GCC_AT_LEAST_7 || BR2_STATIC_LIBS

@@ -1,34 +1,38 @@
-From 2d339f46b317e7a633e4cfa41578a7a0e697bf9e Mon Sep 17 00:00:00 2001
+From e83920d21b3a35de02e1ddda19166092f9d918b3 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 16:10:04 +0100
 Subject: [PATCH 17/17] com_cmdFile: console commands from a file, for devices
  without a keyboard
 
 +set com_cmdFile cmd.cfg: twice a second the engine looks for that file
-in the save path; its console commands are run and the file is removed.
-A handheld has no keyboard for the console, so tests (maps, cvars,
-benchmarks) are driven by writing the file over ssh. Off by default; the
-file is looked for in the save path only, as one among the game's own
-read-only files could not be removed and would run again and again.
+in the save path; once it has kept its length from one look to the next
+(not being written any more: cat > over ssh) its console commands are
+run and the file is removed. Writing it under another name and renaming
+it is safest. A handheld has no keyboard for the console, so tests
+(maps, cvars, benchmarks) are driven by writing the file over ssh. Off by
+default; the file is looked for in the save path only, as one among the
+game's own read-only files could not be removed and would run again and
+again.
 ---
- neo/framework/common_frame.cpp | 36 ++++++++++++++++++++++++++++++++++
- 1 file changed, 36 insertions(+)
+ neo/framework/common_frame.cpp | 48 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
 
 diff --git a/neo/framework/common_frame.cpp b/neo/framework/common_frame.cpp
-index 829ae22..4e71bd7 100644
+index 829ae22..d65ff00 100644
 --- a/neo/framework/common_frame.cpp
 +++ b/neo/framework/common_frame.cpp
-@@ -447,6 +447,40 @@ extern idCVar com_pause;
+@@ -447,6 +447,52 @@ extern idCVar com_pause;
  idCommonLocal::Frame
  =================
  */
 +// test hook for devices without a keyboard: console commands put into this
 +// file (in the save path) are run, then the file is removed
-+idCVar com_cmdFile( "com_cmdFile", "", CVAR_SYSTEM, "a file in the save path whose console commands are run as soon as it appears (then it is removed)" );
++idCVar com_cmdFile( "com_cmdFile", "", CVAR_SYSTEM, "a file in the save path whose console commands are run once it is written (then it is removed); write it under another name and rename it" );
 +
 +static void RunCommandFile()
 +{
 +	static int lastCheck;
++	static int lastLength = -1;
 +	const int now = Sys_Milliseconds();
 +	if( !com_cmdFile.GetString()[0] || now - lastCheck < 500 )
 +	{
@@ -41,11 +45,22 @@ index 829ae22..4e71bd7 100644
 +	idFile* file = fileSystem->OpenExplicitFileRead( osPath );
 +	if( file == NULL )
 +	{
++		lastLength = -1;
 +		return;
 +	}
++	// run once it has kept its length from one look to the next: a file
++	// still being written (cat > file over ssh) would run cut short, and
++	// the rest would go into a removed file
 +	const int length = file->Length();
-+	char* buffer = new char[ Max( length, 0 ) + 1 ];
-+	const int got = length > 0 ? file->Read( buffer, length ) : 0;
++	if( length <= 0 || length != lastLength )
++	{
++		lastLength = length;
++		delete file;
++		return;
++	}
++	lastLength = -1;
++	char* buffer = new char[ length + 1 ];
++	const int got = file->Read( buffer, length );
 +	buffer[ Max( got, 0 ) ] = '\0';
 +	delete file;
 +	remove( osPath.c_str() );
@@ -59,7 +74,7 @@ index 829ae22..4e71bd7 100644
  void idCommonLocal::Frame()
  {
  	try
-@@ -456,6 +490,8 @@ void idCommonLocal::Frame()
+@@ -456,6 +502,8 @@ void idCommonLocal::Frame()
  		// This is the only place this is incremented
  		idLib::frameNumber++;
  		

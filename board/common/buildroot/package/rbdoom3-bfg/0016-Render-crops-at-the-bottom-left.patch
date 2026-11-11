@@ -1,4 +1,4 @@
-From a9fc71ca293618cd6c59c74fcb146677f9ea8cf7 Mon Sep 17 00:00:00 2001
+From ff5190f523880f3a113fbf8228945912a9776dad Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 15:10:55 +0100
 Subject: [PATCH 16/17] Render crops at the bottom left
@@ -13,10 +13,10 @@ glass read the wrong part of the scene: it looked opaque.
  1 file changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/neo/renderer/RenderSystem.cpp b/neo/renderer/RenderSystem.cpp
-index 6036769..e3221d7 100644
+index 9a18b28..9432bc7 100644
 --- a/neo/renderer/RenderSystem.cpp
 +++ b/neo/renderer/RenderSystem.cpp
-@@ -902,10 +902,14 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
+@@ -911,10 +911,14 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
  	
  	idScreenRect& current = renderCrops[currentRenderCrop];
  	

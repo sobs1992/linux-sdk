@@ -1,4 +1,4 @@
-From b7054651f0fa725fd77ced35b4b39094f48b7be7 Mon Sep 17 00:00:00 2001
+From 0fa94f5aa3aebd9500055fb39ba3f0ec7f1bdfa0 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 09:18:04 +0100
 Subject: [PATCH 06/17] GLSL ES 3.00: highp floats and samplers

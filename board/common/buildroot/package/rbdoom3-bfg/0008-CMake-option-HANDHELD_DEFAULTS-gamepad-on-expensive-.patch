@@ -1,4 +1,4 @@
-From 3ed3913c50d2994171caf9953fa8834d59d7253b Mon Sep 17 00:00:00 2001
+From 672a040d156ad1b3ae277831aceb5fde42376b9c Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Wed, 11 Nov 2026 09:18:04 +0100
 Subject: [PATCH 08/17] CMake option HANDHELD_DEFAULTS: gamepad on, expensive

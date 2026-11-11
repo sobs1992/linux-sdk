@@ -15,7 +15,10 @@ which did, GPU job faults (DATA_INVALID) and a crash writing job
 descriptors were seen with DOOM 3 BFG under memory pressure, after the
 kernel had purged BOs (perhaps the bad page maps seen with Pirates! too;
 not proven). The cache still frees BOs unused for two seconds, but the
-kernel can no longer reclaim mapped ones before that.
+kernel cannot reclaim mapped ones before that, and stale BOs are only
+freed when another one goes into the cache: so cached BOs keep their
+mapping up to 64 MB in all, and past that one goes into the cache as in
+stock Mesa, unmapped and evictable.
 
 --- a/src/gallium/drivers/panfrost/pan_bo.c
 +++ b/src/gallium/drivers/panfrost/pan_bo.c
@@ -38,9 +41,36 @@ kernel can no longer reclaim mapped ones before that.
     /* BO will be freed with the sparse array, but zero to indicate free */
     memset(bo, 0, sizeof(*bo));
  
-@@ -232,7 +237,9 @@
-       list_del(&entry->bucket_link);
-       list_del(&entry->lru_link);
+@@ -205,6 +210,22 @@
+    return &dev->bo_cache.buckets[pan_bucket_index(size)];
+ }
+ 
++/* Cached BOs keep their CPU mapping up to this many bytes in all: such a BO
++ * is not made evictable, so the kernel cannot reclaim it while it waits in
++ * the cache (two seconds at most while BOs come and go). Past that a BO
++ * goes into the cache as in stock Mesa: unmapped and evictable. */
++#define PAN_BO_CACHE_MAPPED_MAX (64 << 20)
++
++/* Takes a BO out of the cache's lists (the cache lock held) */
++static void
++panfrost_bo_cache_unlink(struct panfrost_device *dev, struct panfrost_bo *bo)
++{
++   list_del(&bo->bucket_link);
++   list_del(&bo->lru_link);
++   if (bo->ptr.cpu)
++      dev->bo_cache.mapped_size -= panfrost_bo_size(bo);
++}
++
+ /* Tries to fetch a BO of sufficient size with the appropriate flags from the
+  * BO cache. If it succeeds, it returns that BO and removes the BO from the
+  * cache. If it fails, it returns NULL signaling the caller to allocate a new
+@@ -229,10 +250,11 @@
+          break;
+ 
+       /* This one works, splice it out of the cache */
+-      list_del(&entry->bucket_link);
+-      list_del(&entry->lru_link);
++      panfrost_bo_cache_unlink(dev, entry);
  
 -      if (!pan_kmod_bo_make_unevictable(entry->kmod_bo)) {
 +      /* A BO that kept its CPU mapping was never made evictable (see
@@ -49,7 +79,17 @@ kernel can no longer reclaim mapped ones before that.
           panfrost_bo_free(entry);
           continue;
        }
-@@ -288,7 +295,12 @@
+@@ -265,8 +287,7 @@
+       if (time.tv_sec - entry->last_used <= 2)
+          break;
+ 
+-      list_del(&entry->bucket_link);
+-      list_del(&entry->lru_link);
++      panfrost_bo_cache_unlink(dev, entry);
+       panfrost_bo_free(entry);
+    }
+ }
+@@ -288,7 +309,21 @@
     struct list_head *bucket = pan_bucket(dev, MAX2(panfrost_bo_size(bo), 4096));
     struct timespec time;
  
@@ -57,13 +97,32 @@ kernel can no longer reclaim mapped ones before that.
 +   /* A BO keeping its CPU mapping is not handed to the kernel's shrinker
 +    * (stock Mesa never leaves a purgeable BO mapped; with that, GPU job
 +    * faults and crashes writing descriptors were seen under memory
-+    * pressure). The cache drops it after two seconds unused anyway. */
-+   if (!bo->ptr.cpu)
++    * pressure). The cache drops it after two seconds unused anyway, and
++    * past PAN_BO_CACHE_MAPPED_MAX bytes of them a BO is unmapped and made
++    * evictable as in stock Mesa, so what the kernel cannot reclaim stays
++    * bounded (a game that stops drawing puts no more BOs: the stale ones
++    * are not freed then). */
++   if (bo->ptr.cpu &&
++       dev->bo_cache.mapped_size + panfrost_bo_size(bo) > PAN_BO_CACHE_MAPPED_MAX)
++      panfrost_bo_munmap(bo);
++   if (bo->ptr.cpu)
++      dev->bo_cache.mapped_size += panfrost_bo_size(bo);
++   else
 +      pan_kmod_bo_make_evictable(bo->kmod_bo);
  
     /* Add us to the bucket */
     list_addtail(&bo->bucket_link, bucket);
-@@ -458,9 +470,10 @@
+@@ -325,8 +360,7 @@
+       struct list_head *bucket = &dev->bo_cache.buckets[i];
+ 
+       list_for_each_entry_safe(struct panfrost_bo, entry, bucket, bucket_link) {
+-         list_del(&entry->bucket_link);
+-         list_del(&entry->lru_link);
++         panfrost_bo_cache_unlink(dev, entry);
+          panfrost_bo_free(entry);
+       }
+    }
+@@ -458,9 +492,10 @@
      * lock, let's make sure it's still not referenced before freeing it.
      */
     if (p_atomic_read(&bo->refcnt) == 0) {
@@ -77,3 +136,16 @@ kernel can no longer reclaim mapped ones before that.
        if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC))
           pandecode_inject_free(dev->decode_ctx, bo->ptr.gpu,
                                 panfrost_bo_size(bo));
+--- a/src/gallium/drivers/panfrost/pan_device.h
++++ b/src/gallium/drivers/panfrost/pan_device.h
+@@ -148,6 +148,10 @@
+        * Each bucket is a linked list of free panfrost_bo objects. */
+ 
+       struct list_head buckets[NR_BO_CACHE_BUCKETS];
++
++      /* Bytes of the cached BOs that kept their CPU mapping (at most
++       * PAN_BO_CACHE_MAPPED_MAX, see panfrost_bo_cache_put) */
++      size_t mapped_size;
+    } bo_cache;
+ 
+    struct pan_fb_preload_cache fb_preload_cache;

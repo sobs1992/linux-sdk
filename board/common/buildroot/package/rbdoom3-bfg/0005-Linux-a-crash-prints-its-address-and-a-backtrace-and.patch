@@ -1,0 +1,246 @@
+From bd7e4c31c3e70c1b357cd40e71a47624be77336c Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 09:18:04 +0100
+Subject: [PATCH 05/17] Linux: a crash prints its address and a backtrace, and
+ ends the game at once
+
+The signal handler prints the faulting address and a backtrace: offsets
+into the files, for addr2line on an unstripped build. It writes with
+write(2) only, no stdio and no allocation (a crash inside malloc or
+stdio would hang there); backtrace() is called once at start, which
+loads libgcc's unwinder. A crash (SIGSEGV, SIGBUS, SIGILL, SIGABRT,
+SIGTRAP) then takes the signal's default action: the graceful quit the
+handler tried ran the engine's whole shutdown on a broken state and could
+hang in locks the crashed code held, leaving the game frozen on the
+screen; bare_app now sees the game ended by its signal. SIGHUP, SIGQUIT
+and SIGPIPE still quit gracefully.
+---
+ neo/sys/posix/posix_signal.cpp | 185 +++++++++++++++++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+
+diff --git a/neo/sys/posix/posix_signal.cpp b/neo/sys/posix/posix_signal.cpp
+index 5c33b34..9b8491d 100644
+--- a/neo/sys/posix/posix_signal.cpp
++++ b/neo/sys/posix/posix_signal.cpp
+@@ -30,6 +30,13 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include <string.h>
+ #include <errno.h>
++#if defined(__linux__) && defined(__GLIBC__)
++#include <execinfo.h>
++#include <dlfcn.h>
++#include <ucontext.h>
++#define POSIX_SIG_BACKTRACE
++#endif
++#include <unistd.h>
+ 
+ const int siglist[] =
+ {
+@@ -66,6 +73,150 @@ const char* signames[] =
+ 
+ static char fatalError[ 1024 ];
+ 
++#ifdef POSIX_SIG_BACKTRACE
++/*
++================
++Output from the signal handler: write(2) only, no stdio and no allocation,
++as a crash inside malloc or stdio would hang in their locks there
++================
++*/
++static void SigWrite( const char* s )
++{
++	size_t n = strlen( s );
++	while( n > 0 )
++	{
++		const ssize_t w = write( 2, s, n );
++		if( w <= 0 )
++		{
++			return;
++		}
++		s += w;
++		n -= w;
++	}
++}
++
++static void SigWriteNumber( unsigned long v, int base )
++{
++	char buf[ 24 ];
++	char* p = buf + sizeof( buf ) - 1;
++	*p = '\0';
++	do
++	{
++		*--p = "0123456789abcdef"[ v % base ];
++		v /= base;
++	}
++	while( v != 0 && p > buf + 2 );
++	if( base == 16 )
++	{
++		*--p = 'x';
++		*--p = '0';
++	}
++	SigWrite( p );
++}
++
++static const char* SigName( int signum )
++{
++	switch( signum )
++	{
++		case SIGSEGV:
++			return "SIGSEGV";
++		case SIGBUS:
++			return "SIGBUS";
++		case SIGILL:
++			return "SIGILL";
++		case SIGABRT:
++			return "SIGABRT";
++		case SIGTRAP:
++			return "SIGTRAP";
++		case SIGFPE:
++			return "SIGFPE";
++		case SIGHUP:
++			return "SIGHUP";
++		case SIGQUIT:
++			return "SIGQUIT";
++		case SIGPIPE:
++			return "SIGPIPE";
++	}
++	return "signal";
++}
++
++/*
++================
++SigBacktrace
++
++Where it happened: addresses as offsets into their files, for addr2line.
++backtrace() was called once at start (Posix_InitSigs), so libgcc's
++unwinder is loaded and it allocates nothing here.
++================
++*/
++static void SigBacktrace( int signum, siginfo_t* info, void* context )
++{
++	void* frames[ 48 ];
++	const int n = backtrace( frames, 48 );
++	void* pc = NULL;
++#if defined(__aarch64__)
++	pc = ( void* )( ( ucontext_t* )context )->uc_mcontext.pc;
++#elif defined(__x86_64__)
++	pc = ( void* )( ( ucontext_t* )context )->uc_mcontext.gregs[ REG_RIP ];
++#endif
++	SigWrite( SigName( signum ) );
++	SigWrite( " (" );
++	SigWriteNumber( signum, 10 );
++	SigWrite( info->si_code < 0 ? ", si_code -" : ", si_code " );
++	SigWriteNumber( ( unsigned long )( info->si_code < 0 ? -info->si_code : info->si_code ), 10 );
++	SigWrite( "): fault address " );
++	SigWriteNumber( ( unsigned long )info->si_addr, 16 );
++	SigWrite( ", pc " );
++	SigWriteNumber( ( unsigned long )pc, 16 );
++	SigWrite( "\n" );
++	for( int i = -1; i < n; i++ )
++	{
++		void* a = i < 0 ? pc : frames[ i ];
++		Dl_info dl;
++		if( a && dladdr( a, &dl ) && dl.dli_fname )
++		{
++			SigWrite( "  #" );
++			SigWriteNumber( i + 1, 10 );
++			SigWrite( " " );
++			SigWrite( dl.dli_fname );
++			SigWrite( "+" );
++			SigWriteNumber( ( unsigned long )( ( char* )a - ( char* )dl.dli_fbase ), 16 );
++			SigWrite( " (" );
++			SigWrite( dl.dli_sname ? dl.dli_sname : "?" );
++			SigWrite( ")\n" );
++		}
++	}
++}
++#endif
++
++/*
++================
++SigDefaultAction
++
++A crash (SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP): the default action
++for it, at once. A graceful quit from here ran the engine's whole
++shutdown on a broken state, from inside a signal handler; it could hang
++(locks held by the crashed code, the GPU) and the game stayed on the
++screen. The process ends by the signal, which the program that started
++it can tell.
++================
++*/
++static void SigDefaultAction( int signum )
++{
++	struct sigaction action;
++	memset( &action, 0, sizeof( action ) );
++	action.sa_handler = SIG_DFL;
++	sigemptyset( &action.sa_mask );
++	sigaction( signum, &action, NULL );
++	raise( signum );
++	_exit( 128 + signum );
++}
++
++static bool SigIsCrash( int signum )
++{
++	return signum == SIGSEGV || signum == SIGBUS || signum == SIGILL || signum == SIGABRT || signum == SIGTRAP;
++}
++
+ /*
+ ================
+ Posix_ClearSigs
+@@ -103,12 +254,37 @@ static void sig_handler( int signum, siginfo_t* info, void* context )
+ 	
+ 	if( double_fault )
+ 	{
++		if( SigIsCrash( signum ) )
++		{
++#ifdef POSIX_SIG_BACKTRACE
++			SigWrite( "double fault, bailing out\n" );
++#endif
++			SigDefaultAction( signum );
++		}
+ 		Sys_Printf( "double fault %s, bailing out\n", strsignal( signum ) );
+ 		Posix_Exit( signum );
+ 	}
+ 	
+ 	double_fault = true;
+ 	
++#ifdef POSIX_SIG_BACKTRACE
++	SigBacktrace( signum, info, context );
++#endif
++	
++	if( SigIsCrash( signum ) )
++	{
++#ifdef POSIX_SIG_BACKTRACE
++		if( fatalError[ 0 ] )
++		{
++			SigWrite( "Was in fatal error shutdown: " );
++			SigWrite( fatalError );
++			SigWrite( "\n" );
++		}
++		SigWrite( "Crashed: no graceful exit\n" );
++#endif
++		SigDefaultAction( signum );
++	}
++	
+ 	// NOTE: see sigaction man page, could verbose the whole siginfo_t and print human readable si_code
+ 	Sys_Printf( "signal caught: %s\nsi_code %d\n", strsignal( signum ), info->si_code );
+ 	
+@@ -136,6 +312,15 @@ void Posix_InitSigs( )
+ 	
+ 	fatalError[0] = '\0';
+ 	
++#ifdef POSIX_SIG_BACKTRACE
++	// the first backtrace() loads libgcc's unwinder (dlopen, malloc): not
++	// in the signal handler
++	{
++		void* frame[ 1 ];
++		backtrace( frame, 1 );
++	}
++#endif
++	
+ 	/* Set up the structure */
+ 	action.sa_sigaction = sig_handler;
+ 	sigemptyset( &action.sa_mask );
+-- 
+2.53.0
+
