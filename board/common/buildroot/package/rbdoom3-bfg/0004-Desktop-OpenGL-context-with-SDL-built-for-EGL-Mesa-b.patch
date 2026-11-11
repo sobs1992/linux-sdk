@@ -1,0 +1,62 @@
+From ff13fcc7e27247b9af388b059f10d7abbab0bff0 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 00:40:35 +0100
+Subject: [PATCH 04/17] Desktop OpenGL context with SDL built for EGL; Mesa by
+ vendor string
+
+---
+ neo/renderer/OpenGL/RenderBackend_GL.cpp |  2 ++
+ neo/sys/sdl/sdl_glimp.cpp                | 17 ++++++++++++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/neo/renderer/OpenGL/RenderBackend_GL.cpp b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+index e5f30db..84f8856 100644
+--- a/neo/renderer/OpenGL/RenderBackend_GL.cpp
++++ b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+@@ -177,6 +177,8 @@ static void R_CheckPortableExtensions()
+ 	// RB: Mesa support
+ 	if( idStr::Icmpn( glConfig.renderer_string, "Mesa", 4 ) == 0 || idStr::Icmpn( glConfig.renderer_string, "X.org", 5 ) == 0 || idStr::Icmpn( glConfig.renderer_string, "Gallium", 7 ) == 0 ||
+ 			strcmp( glConfig.vendor_string, "X.Org" ) == 0 ||
++			// Mesa's own drivers: vendor "Mesa", renderer "Mali-G52 (Panfrost)"
++			strcmp( glConfig.vendor_string, "Mesa" ) == 0 ||
+ 			idStr::Icmpn( glConfig.renderer_string, "llvmpipe", 8 ) == 0 )
+ 	{
+ 		if( glConfig.driverType == GLDRV_OPENGL32_CORE_PROFILE )
+diff --git a/neo/sys/sdl/sdl_glimp.cpp b/neo/sys/sdl/sdl_glimp.cpp
+index 7c7967d..56bd1fe 100644
+--- a/neo/sys/sdl/sdl_glimp.cpp
++++ b/neo/sys/sdl/sdl_glimp.cpp
+@@ -215,6 +215,21 @@ bool GLimp_Init( glimpParms_t parms )
+ 			
+ 			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE );
+ 		}
++#if defined(USE_EGL)
++		// An SDL built for EGL and OpenGL ES only would make an OpenGL ES 2
++		// context of "no version": ask for desktop OpenGL (Mesa gives its
++		// highest compatibility version, 3.1 on panfrost)
++		if( r_useOpenGL32.GetInteger() == 0 )
++		{
++			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY );
++			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 3 );
++			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 1 );
++		}
++		else if( r_useOpenGL32.GetInteger() == 1 )
++		{
++			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY );
++		}
++#endif
+ 		// RB end
+ 		
+ 		// DG: set display num for fullscreen
+@@ -311,7 +326,7 @@ bool GLimp_Init( glimpParms_t parms )
+ 		return false;
+ 	}
+ 	
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(USE_EGL)
+ 	glewExperimental = GL_TRUE;
+ #endif
+ 	
+-- 
+2.53.0
+

@@ -123,3 +123,22 @@ data = /media/C/Windows/Fonts/pala*.ttf -> wine/prefix/drive_c/windows/Fonts/
 data = /media/C/Windows/Fonts/Meatcm__.ttf -> wine/prefix/drive_c/windows/Fonts/
 cover = /media/D/Games/Daemonica/Bitmaps/Externals/MMenubcg.png
 cover_crop = center
+
+[doom3]
+; DOOM 3 BFG Edition (GOG), RBDOOM-3-BFG (bare-app.DOOM3=y): base/ only,
+; without the multiplayer maps (about 0.6 GB). All three campaigns are
+; 6.4 GB; Resurrection of Evil (erebus*, phobos*, deltax, hell) and The Lost
+; Mission (le_*) can be left out the same way when /games is small.
+source = /media/D/Games/DOOM 3 BFG Edition
+exclude = *.exe
+exclude = *.dll
+exclude = *.ico
+exclude = goggame-*
+exclude = webcache.zip
+exclude = EULA.txt
+exclude = Uninstall
+exclude = base/maps/d3ctf*
+exclude = base/maps/d3dm*
+exclude = base/maps/d3xpdm*
+cover = /media/D/Games/DOOM 3 BFG Edition/2.ico
+cover_crop = fit

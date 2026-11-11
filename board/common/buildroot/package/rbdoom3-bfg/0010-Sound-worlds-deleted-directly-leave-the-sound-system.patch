@@ -1,0 +1,31 @@
+From d9549fdec64fa44a31c210cf8941df79fd1d4a74 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 11:04:59 +0100
+Subject: [PATCH 10/17] Sound worlds deleted directly leave the sound system's
+ list
+
+idCommonLocal::Shutdown deletes the sound worlds itself; the samples
+freed at sound system shutdown then looked for voices in the deleted
+worlds and the game crashed on quitting (SIGTERM from bare_app too).
+---
+ neo/sound/snd_world.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/neo/sound/snd_world.cpp b/neo/sound/snd_world.cpp
+index 2275df2..f8b8e3b 100644
+--- a/neo/sound/snd_world.cpp
++++ b/neo/sound/snd_world.cpp
+@@ -94,6 +94,10 @@ idSoundWorldLocal::~idSoundWorldLocal()
+ 	{
+ 		soundSystemLocal.currentSoundWorld = NULL;
+ 	}
++	// worlds deleted directly (idCommonLocal::Shutdown) and not through
++	// FreeSoundWorld must not stay in the list: the samples freed at sound
++	// system shutdown look for voices in every world
++	soundSystemLocal.soundWorlds.Remove( this );
+ 	
+ 	for( int i = 0; i < emitters.Num(); i++ )
+ 	{
+-- 
+2.53.0
+

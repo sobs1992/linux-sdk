@@ -70,11 +70,12 @@ APPS_AUTOSTART := bare-app
 # the Heroes III engine VCMI (game data on /games, see README), Wine for
 # Windows games (a wine.ini per game on /games), SDL2 with bare_app's
 # drivers for SDL2 games (a game.ini each), the RTSP stream of the screen and
-# the sound (Settings > Internet). Chocolate Doom (an SDL2 game
+# the sound (Settings > Internet), DOOM 3 BFG Edition (RBDOOM-3-BFG, an SDL2
+# game; game files on /games/doom3). Chocolate Doom (an SDL2 game
 # as it is: bare-app.CHOCOLATE_DOOM=y) is left out: bare_app has its own Doom
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y \
-                  bare-app.SDL=y bare-app.STREAM=y
+                  bare-app.SDL=y bare-app.STREAM=y bare-app.DOOM3=y
 
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,

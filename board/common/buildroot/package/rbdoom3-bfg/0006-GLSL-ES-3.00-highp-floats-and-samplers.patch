@@ -1,0 +1,55 @@
+From da62adb840c13af665e82d5cfe8b2bf2db3db1a0 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 09:18:04 +0100
+Subject: [PATCH 06/17] GLSL ES 3.00: highp floats and samplers
+
+mediump is real FP16 on Mali (Mesa's panfrost): positions, texture
+coordinates, depth and HDR lose so much precision that walls show blocks
+and the vertex positions wobble. Full floats in both stages.
+---
+ neo/renderer/RenderProgs_GLSL.cpp | 22 +++++++++++++---------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/neo/renderer/RenderProgs_GLSL.cpp b/neo/renderer/RenderProgs_GLSL.cpp
+index 6e73c18..21ba5cc 100644
+--- a/neo/renderer/RenderProgs_GLSL.cpp
++++ b/neo/renderer/RenderProgs_GLSL.cpp
+@@ -821,7 +821,8 @@ const char* vertexInsert_GLSL_ES_3_00 =
+ {
+ 	"#version 300 es\n"
+ 	"#define PC\n"
+-	"precision mediump float;\n"
++	// positions and texture coordinates need full floats (mediump is FP16 on Mali)
++	"precision highp float;\n"
+ 	
+ 	//"#extension GL_ARB_gpu_shader5 : enable\n"
+ 	"\n"
+@@ -837,14 +838,17 @@ const char* fragmentInsert_GLSL_ES_3_00 =
+ {
+ 	"#version 300 es\n"
+ 	"#define PC\n"
+-	"precision mediump float;\n"
+-	"precision lowp sampler2D;\n"
+-	"precision lowp sampler2DShadow;\n"
+-	"precision lowp sampler2DArray;\n"
+-	"precision lowp sampler2DArrayShadow;\n"
+-	"precision lowp samplerCube;\n"
+-	"precision lowp samplerCubeShadow;\n"
+-	"precision lowp sampler3D;\n"
++	// depth, HDR and texture coordinates need full floats: drivers such as
++	// Mesa's panfrost really compute mediump in FP16 and return lowp
++	// samplers' texels as FP16
++	"precision highp float;\n"
++	"precision highp sampler2D;\n"
++	"precision highp sampler2DShadow;\n"
++	"precision highp sampler2DArray;\n"
++	"precision highp sampler2DArrayShadow;\n"
++	"precision highp samplerCube;\n"
++	"precision highp samplerCubeShadow;\n"
++	"precision highp sampler3D;\n"
+ 	"\n"
+ 	"void clip( float v ) { if ( v < 0.0 ) { discard; } }\n"
+ 	"void clip( vec2 v ) { if ( any( lessThan( v, vec2( 0.0 ) ) ) ) { discard; } }\n"
+-- 
+2.53.0
+

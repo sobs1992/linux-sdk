@@ -1,0 +1,36 @@
+From 4646a5c7b2aa93357924402a18cbfb1f35137dfc Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 11:04:59 +0100
+Subject: [PATCH 09/17] CMake: -fsigned-char
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The code takes char for signed, as it is on x86: the glyph offsets of
+the fonts (glyphInfo_t top and left) are chars, and on ARM a left of -1
+became 255, so letters such as Д, л and х were drawn far off and the
+Russian texts missed them.
+---
+ neo/CMakeLists.txt | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/neo/CMakeLists.txt b/neo/CMakeLists.txt
+index 20464c7..1d33999 100644
+--- a/neo/CMakeLists.txt
++++ b/neo/CMakeLists.txt
+@@ -62,6 +62,12 @@ if(USE_EGL)
+ 	add_definitions(-DGLEW_NO_GLU -DUSE_EGL)
+ endif()
+ 
++# the code takes char for signed, as it is on x86 (font glyph offsets,
++# ...); on ARM it is unsigned
++if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
++	add_compile_options(-fsigned-char)
++endif()
++
+ # defaults for small devices with a gamepad (handhelds): the gamepad on, the
+ # expensive renderer effects off; the menu still turns them on
+ option(HANDHELD_DEFAULTS "Default settings for handhelds" OFF)
+-- 
+2.53.0
+

@@ -1,0 +1,35 @@
+From 3be47897899198be99d697bfdf38fc8bfda5cd4d Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 12:56:16 +0100
+Subject: [PATCH 15/17] HANDHELD_DEFAULTS: r_syncEveryFrame 0
+
+GL_BlockingSwapBuffers waited for the GPU to finish the frame just
+swapped, so the CPU (about 24 ms of a Mali-G52 frame in a big hall)
+and the GPU (about 29 ms) took turns. Waiting for the frame before lets
+them overlap: 18.6 -> 27.8 fps in that hall, most maps near 60. The
+picture is a frame later.
+---
+ neo/renderer/OpenGL/RenderBackend_GL.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/neo/renderer/OpenGL/RenderBackend_GL.cpp b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+index 0fc27f5..50f294a 100644
+--- a/neo/renderer/OpenGL/RenderBackend_GL.cpp
++++ b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+@@ -46,7 +46,13 @@ idCVar stereoRender_warpParmW( "stereoRender_warpParmW", "0", CVAR_RENDERER | CV
+ idCVar stereoRender_warpTargetFraction( "stereoRender_warpTargetFraction", "1.0", CVAR_RENDERER | CVAR_FLOAT | CVAR_ARCHIVE, "fraction of half-width the through-lens view covers" );
+ 
+ idCVar r_showSwapBuffers( "r_showSwapBuffers", "0", CVAR_BOOL, "Show timings from GL_BlockingSwapBuffers" );
++// handhelds: the CPU prepares the next frame while the GPU draws this one
++// (with 1 they take turns: a Mali-G52 hall at 18 instead of 28 fps)
++#if defined(HANDHELD_DEFAULTS)
++idCVar r_syncEveryFrame( "r_syncEveryFrame", "0", CVAR_BOOL, "Don't let the GPU buffer execution past swapbuffers" );
++#else
+ idCVar r_syncEveryFrame( "r_syncEveryFrame", "1", CVAR_BOOL, "Don't let the GPU buffer execution past swapbuffers" );
++#endif
+ 
+ static int		swapIndex;		// 0 or 1 into renderSync
+ static GLsync	renderSync[2];
+-- 
+2.53.0
+

@@ -1,0 +1,368 @@
+From 7ec5fc36dfba283b358d709820bfd741319f29a7 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 14:43:52 +0100
+Subject: [PATCH 16/17] Dynamic resolution of the 3D view (BFG's resolution
+ scaling, wired up)
+
+When frames are slow, FullscreenFXManager::Process draws the player's
+view cropped to a smaller size (CropRenderSize: the front end computes
+viewport, light scissors and window coordinates for it), captures it
+into the image _scaledSceneImage and stretches it over the screen with
+the material _scaledScene (opaque; translucent so it is not depth
+tested EQUAL in the 2D view). The HUD, texts and menus drawn after it
+stay at the full size.
+
+rs_enable 4: both axes alike; rs_minimum: the smallest scale. Without
+GPU timer queries (Mesa: off in RBDOOM, and panfrost's split batches)
+idResolutionScale::SetCurrentFrameTime steers by the time between
+frames: it drops proportionally when frames take rs_frameDropMilliseconds
+longer than the engine's rate, and rises a step after waiting at the
+full rate, waiting longer after a rise that had to be taken back.
+
+Handhelds: rs_enable 4, rs_minimum 0.6. Mali-G52 (854x480): the start of
+mars_city2 27.8 -> 46 fps, the mars_city1 hangar 34 -> 54 fps; light
+scenes keep the full size at 60 fps.
+---
+ neo/d3xp/PlayerView.cpp          | 24 ++++++++
+ neo/d3xp/PlayerView.h            |  1 +
+ neo/renderer/Image_intrinsic.cpp |  3 +
+ neo/renderer/Material.cpp        | 18 ++++++
+ neo/renderer/RenderBackend.cpp   | 16 +++++-
+ neo/renderer/RenderCommon.h      |  2 +-
+ neo/renderer/RenderSystem.h      |  4 ++
+ neo/renderer/ResolutionScale.cpp | 98 +++++++++++++++++++++++++++++++-
+ neo/renderer/ResolutionScale.h   | 10 ++++
+ 9 files changed, 172 insertions(+), 4 deletions(-)
+
+diff --git a/neo/d3xp/PlayerView.cpp b/neo/d3xp/PlayerView.cpp
+index c45329f..370b3b1 100644
+--- a/neo/d3xp/PlayerView.cpp
++++ b/neo/d3xp/PlayerView.cpp
+@@ -1762,6 +1762,7 @@ FullscreenFXManager::FullscreenFXManager()
+ {
+ 	playerView = NULL;
+ 	blendBackMaterial = NULL;
++	scaledSceneMaterial = NULL;
+ }
+ 
+ /*
+@@ -1854,6 +1855,7 @@ void FullscreenFXManager::Initialize( idPlayerView* pv )
+ 	// set the playerview
+ 	playerView = pv;
+ 	blendBackMaterial = declManager->FindMaterial( "textures/d3bfg/blendBack" );
++	scaledSceneMaterial = declManager->FindMaterial( "_scaledScene" );
+ 	
+ 	// allocate the fx
+ 	CreateFX( "helltime", "helltime", 1000 );
+@@ -1937,8 +1939,30 @@ void FullscreenFXManager::Process( const renderView_t* view )
+ 	}
+ 	
+ 	// do the first render
++	// dynamic resolution (rs_enable): the 3D view at a smaller size when the
++	// frames are slow, stretched to the screen; the HUD, texts and menus
++	// drawn after it stay at the full size
++	int sceneWidth = renderSystem->GetWidth();
++	int sceneHeight = renderSystem->GetHeight();
++	renderSystem->PerformResolutionScaling( sceneWidth, sceneHeight );
++	const bool scaledScene = scaledSceneMaterial != NULL && !IsGameStereoRendered() &&
++							 ( sceneWidth < renderSystem->GetWidth() || sceneHeight < renderSystem->GetHeight() ) &&
++							 sceneWidth > 0 && sceneHeight > 0;
++	if( scaledScene )
++	{
++		renderSystem->CropRenderSize( sceneWidth, sceneHeight );
++	}
++	
+ 	gameRenderWorld->RenderScene( view );
+ 	
++	if( scaledScene )
++	{
++		renderSystem->CaptureRenderToImage( "_scaledSceneImage" );
++		renderSystem->UnCrop();
++		renderSystem->SetColor4( 1.0f, 1.0f, 1.0f, 1.0f );
++		renderSystem->DrawStretchPic( 0.0f, 0.0f, renderSystem->GetVirtualWidth(), renderSystem->GetVirtualHeight(), 0.0f, 1.0f, 1.0f, 0.0f, scaledSceneMaterial );
++	}
++	
+ 	// we should consider these on a case-by-case basis for stereo rendering
+ 	// double vision could be implemented "for real" by shifting the
+ 	// eye views
+diff --git a/neo/d3xp/PlayerView.h b/neo/d3xp/PlayerView.h
+index 87588bd..0ec79d9 100644
+--- a/neo/d3xp/PlayerView.h
++++ b/neo/d3xp/PlayerView.h
+@@ -360,6 +360,7 @@ class FullscreenFXManager
+ 	
+ 	idPlayerView* 			playerView;
+ 	const idMaterial*		blendBackMaterial;
++	const idMaterial* 		scaledSceneMaterial;	// dynamic resolution: the smaller 3D view stretched
+ 	
+ 	void					CreateFX( idStr name, idStr fxtype, int fade );
+ 	
+diff --git a/neo/renderer/Image_intrinsic.cpp b/neo/renderer/Image_intrinsic.cpp
+index c2456b6..bd9d114 100644
+--- a/neo/renderer/Image_intrinsic.cpp
++++ b/neo/renderer/Image_intrinsic.cpp
+@@ -882,6 +882,9 @@ void idImageManager::CreateIntrinsicImages()
+ 	scratchImage2 = ImageFromFunction( "_scratch2", R_RGBA8Image );
+ 	accumImage = ImageFromFunction( "_accum", R_RGBA8Image );
+ 	currentRenderImage = ImageFromFunction( "_currentRender", R_RGBA8Image );
++	// dynamic resolution: the smaller 3D view, stretched at the end of the
++	// frame (_currentRender is captured again before that)
++	ImageFromFunction( "_scaledSceneImage", R_RGBA8Image );
+ 	currentDepthImage = ImageFromFunction( "_currentDepth", R_DepthImage );
+ 	
+ 	// save a copy of this for material comparison, because currentRenderImage may get
+diff --git a/neo/renderer/Material.cpp b/neo/renderer/Material.cpp
+index 4d75c2c..455ef1c 100644
+--- a/neo/renderer/Material.cpp
++++ b/neo/renderer/Material.cpp
+@@ -3272,6 +3272,24 @@ idMaterial::SetDefaultText
+ */
+ bool idMaterial::SetDefaultText()
+ {
++	// the 3D view drawn smaller (dynamic resolution), stretched over the
++	// screen: opaque, as the alpha of _currentRender means nothing
++	if( idStr::Icmp( GetName(), "_scaledScene" ) == 0 )
++	{
++		// translucent: opaque materials get the depth test EQUAL, made for 3D
++		// views with their depth drawn first, and a 2D view has none
++		SetText( "material _scaledScene // IMPLICITLY GENERATED\n"
++				 "{\n"
++				 "translucent\n"
++				 "{\n"
++				 "blend GL_ONE, GL_ZERO\n"
++				 "map _scaledSceneImage\n"
++				 "clamp\n"
++				 "}\n"
++				 "}\n" );
++		return true;
++	}
++	
+ 	// if there exists an image with the same name
+ 	if( 1 )    //fileSystem->ReadFile( GetName(), NULL ) != -1 ) {
+ 	{
+diff --git a/neo/renderer/RenderBackend.cpp b/neo/renderer/RenderBackend.cpp
+index 8420ec2..c5e106d 100644
+--- a/neo/renderer/RenderBackend.cpp
++++ b/neo/renderer/RenderBackend.cpp
+@@ -5200,7 +5200,21 @@ void idRenderBackend::ExecuteBackEndCommands( const emptyCommand_t* cmds )
+ 	int c_setBuffers = 0;
+ 	int c_copyRenders = 0;
+ 	
+-	resolutionScale.SetCurrentGPUFrameTime( commonLocal.GetRendererGPUMicroseconds() );
++	if( glConfig.timerQueryAvailable )
++	{
++		resolutionScale.SetCurrentGPUFrameTime( commonLocal.GetRendererGPUMicroseconds() );
++	}
++	else
++	{
++		// no GPU timing (Mesa): by the time from one frame to the next
++		static uint64 lastFrameMicroseconds;
++		const uint64 now = Sys_Microseconds();
++		if( lastFrameMicroseconds != 0 )
++		{
++			resolutionScale.SetCurrentFrameTime( ( int )( now - lastFrameMicroseconds ) );
++		}
++		lastFrameMicroseconds = now;
++	}
+ 	
+ 	ResizeImages();
+ 	
+diff --git a/neo/renderer/RenderCommon.h b/neo/renderer/RenderCommon.h
+index f009c0a..b73543a 100644
+--- a/neo/renderer/RenderCommon.h
++++ b/neo/renderer/RenderCommon.h
+@@ -781,7 +781,7 @@ public:
+ 	
+ 	void					Clear();
+ 	void					GetCroppedViewport( idScreenRect* viewport );
+-	void					PerformResolutionScaling( int& newWidth, int& newHeight );
++	virtual void			PerformResolutionScaling( int& newWidth, int& newHeight );
+ 	int						GetFrameCount() const
+ 	{
+ 		return frameCount;
+diff --git a/neo/renderer/RenderSystem.h b/neo/renderer/RenderSystem.h
+index 4b44b0b..9a6fe1d 100644
+--- a/neo/renderer/RenderSystem.h
++++ b/neo/renderer/RenderSystem.h
+@@ -363,6 +363,10 @@ public:
+ 	virtual void			CaptureRenderToFile( const char* fileName, bool fixAlpha = false ) = 0;
+ 	virtual void			UnCrop() = 0;
+ 	
++	// the size the 3D view is drawn at now (dynamic resolution, rs_enable):
++	// the full size or less
++	virtual void			PerformResolutionScaling( int& newWidth, int& newHeight ) = 0;
++	
+ 	// the image has to be already loaded ( most straightforward way would be through a FindMaterial )
+ 	// texture filter / mipmapping / repeat won't be modified by the upload
+ 	// returns false if the image wasn't found
+diff --git a/neo/renderer/ResolutionScale.cpp b/neo/renderer/ResolutionScale.cpp
+index 2c54d15..6c69300 100644
+--- a/neo/renderer/ResolutionScale.cpp
++++ b/neo/renderer/ResolutionScale.cpp
+@@ -35,11 +35,17 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ idResolutionScale	resolutionScale;
+ 
+-static const float MINIMUM_RESOLUTION_SCALE = 0.5f;
+ static const float MAXIMUM_RESOLUTION_SCALE = 1.0f;
+ 
+ // RB: turned this off. It is only useful on mobile devices or consoles
+-idCVar rs_enable( "rs_enable", "0", CVAR_INTEGER, "Enable dynamic resolution scaling, 0 - off, 1 - horz only, 2 - vert only, 3 - both" );
++#if defined(HANDHELD_DEFAULTS)
++idCVar rs_enable( "rs_enable", "4", CVAR_INTEGER, "Enable dynamic resolution scaling, 0 - off, 1 - horz only, 2 - vert only, 3 - both, 4 - both alike" );
++idCVar rs_minimum( "rs_minimum", "0.6", CVAR_FLOAT, "smallest dynamic resolution scale", 0.25f, 1.0f );
++#else
++idCVar rs_enable( "rs_enable", "0", CVAR_INTEGER, "Enable dynamic resolution scaling, 0 - off, 1 - horz only, 2 - vert only, 3 - both, 4 - both alike" );
++idCVar rs_minimum( "rs_minimum", "0.5", CVAR_FLOAT, "smallest dynamic resolution scale", 0.25f, 1.0f );
++#endif
++#define MINIMUM_RESOLUTION_SCALE rs_minimum.GetFloat()
+ // Rb end
+ idCVar rs_forceFractionX( "rs_forceFractionX", "0", CVAR_FLOAT, "Force a specific 0.0 to 1.0 horizontal resolution scale" );
+ idCVar rs_forceFractionY( "rs_forceFractionY", "0", CVAR_FLOAT, "Force a specific 0.0 to 1.0 vertical resolution scale" );
+@@ -49,6 +55,12 @@ idCVar rs_raiseMilliseconds( "rs_raiseMilliseconds", "13.0", CVAR_FLOAT, "Raise
+ idCVar rs_dropFraction( "rs_dropFraction", "0.11", CVAR_FLOAT, "Drop the resolution in increments of this" );
+ idCVar rs_raiseFraction( "rs_raiseFraction", "0.06", CVAR_FLOAT, "Raise the resolution in increments of this" );
+ idCVar rs_raiseFrames( "rs_raiseFrames", "5", CVAR_INTEGER, "Require this many frames below rs_raiseMilliseconds" );
++// SetCurrentFrameTime: margins over the engine's frame time (16.7 ms at 60 Hz)
++idCVar rs_frameDropMilliseconds( "rs_frameDropMilliseconds", "1.8", CVAR_FLOAT, "without GPU timing: drop the resolution when frames take this much longer than the engine's rate" );
++idCVar rs_frameRaiseMilliseconds( "rs_frameRaiseMilliseconds", "0.6", CVAR_FLOAT, "without GPU timing: raise the resolution while frames take less than this longer than the engine's rate" );
++
++extern float com_engineHz_latched;
++
+ idCVar rs_display( "rs_display", "0", CVAR_INTEGER, "0 - percentages, 1 - pixels per frame" );
+ 
+ 
+@@ -63,6 +75,10 @@ idResolutionScale::idResolutionScale()
+ 	raiseMilliseconds = 13.0f;
+ 	framesAboveRaise = 0;
+ 	currentResolution = 1.0f;
++	frameMsAverage = 0.0f;
++	framesSinceChange = 0;
++	raiseWait = 60;
++	lastChangeWasRaise = false;
+ }
+ 
+ /*
+@@ -108,6 +124,9 @@ void idResolutionScale::GetCurrentResolutionScale( float& x, float& y )
+ 		case 2:
+ 			y = currentResolution;
+ 			break;
++		case 4:
++			x = y = currentResolution;
++			break;
+ 		case 3:
+ 		{
+ 			const float middle = ( MINIMUM_RESOLUTION_SCALE + MAXIMUM_RESOLUTION_SCALE ) * 0.5f;
+@@ -190,6 +209,81 @@ void idResolutionScale::SetCurrentGPUFrameTime( int microseconds )
+ 	}
+ }
+ 
++/*
++========================
++idResolutionScale::SetCurrentFrameTime
++
++For GPUs without usable timer queries: frames are paced to the engine's
++rate (com_engineHz), so a frame that keeps that rate tells nothing about
++the time to spare. The scale drops at once (proportionally to the miss,
++pixels cost about the area) when frames take too long; it rises a step
++after raiseWait frames at the full rate, and a rise that had to be taken
++back soon makes the next wait longer, so the picture does not keep
++changing between two sizes.
++========================
++*/
++void idResolutionScale::SetCurrentFrameTime( int microseconds )
++{
++	const float old = currentResolution;
++	const float target = 1000.0f / idMath::ClampFloat( 10.0f, 240.0f, com_engineHz_latched );
++	float ms = microseconds * 0.001f;
++	
++	if( ms <= 0.0f || ms > 500.0f )
++	{
++		return;	// loading, a pause: nothing to learn
++	}
++	if( frameMsAverage <= 0.0f )
++	{
++		frameMsAverage = ms;
++	}
++	frameMsAverage = frameMsAverage * 0.8f + ms * 0.2f;
++	framesSinceChange++;
++	
++	const float drop = target + rs_frameDropMilliseconds.GetFloat();
++	const float raise = target + rs_frameRaiseMilliseconds.GetFloat();
++	
++	if( frameMsAverage > drop && framesSinceChange >= 6 )
++	{
++		float want = currentResolution * idMath::Sqrt( target / frameMsAverage );
++		want = Max( want, currentResolution - 0.15f );
++		want = Min( want, currentResolution - 0.02f );
++		currentResolution = Max( want, MINIMUM_RESOLUTION_SCALE );
++		if( lastChangeWasRaise && framesSinceChange < raiseWait )
++		{
++			raiseWait = Min( raiseWait * 2, 1200 );	// that rise was too much
++		}
++		lastChangeWasRaise = false;
++		framesSinceChange = 0;
++		framesAboveRaise = 0;
++		frameMsAverage = target;	// judge the new size by its own frames
++	}
++	else if( frameMsAverage < raise && currentResolution < MAXIMUM_RESOLUTION_SCALE )
++	{
++		if( ++framesAboveRaise >= raiseWait )
++		{
++			currentResolution = Min( currentResolution + rs_raiseFraction.GetFloat(), MAXIMUM_RESOLUTION_SCALE );
++			lastChangeWasRaise = true;
++			framesSinceChange = 0;
++			framesAboveRaise = 0;
++		}
++	}
++	else
++	{
++		framesAboveRaise = 0;
++		if( framesSinceChange > 1200 )
++		{
++			raiseWait = Max( raiseWait / 2, 60 );	// calm for a while: try sooner again
++			framesSinceChange = 600;
++		}
++	}
++	
++	if( rs_showResolutionChanges.GetInteger() > 1 ||
++			( rs_showResolutionChanges.GetInteger() == 1 && currentResolution != old ) )
++	{
++		idLib::Printf( "frame msec: %4.1f (average %4.1f) resolutionScale: %4.2f, raise wait %d\n", ms, frameMsAverage, currentResolution, raiseWait );
++	}
++}
++
+ /*
+ ========================
+ idResolutionScale::GetConsoleText
+diff --git a/neo/renderer/ResolutionScale.h b/neo/renderer/ResolutionScale.h
+index 5d8cc5d..c534605 100644
+--- a/neo/renderer/ResolutionScale.h
++++ b/neo/renderer/ResolutionScale.h
+@@ -50,6 +50,11 @@ public:
+ 	// to this, which will effectively disable resolution scaling.
+ 	void	SetCurrentGPUFrameTime( int microseconds );
+ 	
++	// Without GPU timing (Mesa): the time from one frame to the next; the
++	// scale drops when frames take longer than rs_dropMilliseconds and
++	// rises again, carefully, while they keep the engine's rate
++	void	SetCurrentFrameTime( int microseconds );
++	
+ 	// return console display text
+ 	void	GetConsoleText( idStr& s );
+ 	
+@@ -58,6 +63,11 @@ private:
+ 	float			raiseMilliseconds;
+ 	int				framesAboveRaise;
+ 	float			currentResolution;
++	// SetCurrentFrameTime
++	float			frameMsAverage;
++	int				framesSinceChange;
++	int				raiseWait;
++	bool			lastChangeWasRaise;
+ };
+ 
+ extern idResolutionScale resolutionScale;
+-- 
+2.53.0
+

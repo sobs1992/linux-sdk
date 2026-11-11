@@ -1,0 +1,65 @@
+From 0086c14f4969585443191c0d678920758dba0579 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 11:04:59 +0100
+Subject: [PATCH 11/17] EGL: no GLEW experimental mode; extensions of OpenGL's
+ core by version
+
+eglGetProcAddress gives a function for every name, so the experimental
+mode took every extension for supported (GL_EXT_depth_bounds_test: a
+GL_INVALID_ENUM every frame on Mali). Mesa lists no extension that is
+part of the core any more, so those are set from the version.
+---
+ neo/sys/sdl/sdl_glimp.cpp | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/neo/sys/sdl/sdl_glimp.cpp b/neo/sys/sdl/sdl_glimp.cpp
+index 1d00c55..b74f5c3 100644
+--- a/neo/sys/sdl/sdl_glimp.cpp
++++ b/neo/sys/sdl/sdl_glimp.cpp
+@@ -326,7 +326,9 @@ bool GLimp_Init( glimpParms_t parms )
+ 		return false;
+ 	}
+ 	
+-#if defined(__APPLE__) || defined(USE_EGL)
++// not with EGL: eglGetProcAddress gives a function for every name, so
++// GLEW's experimental mode would take every extension for supported
++#if defined(__APPLE__)
+ 	glewExperimental = GL_TRUE;
+ #endif
+ 	
+@@ -341,6 +343,32 @@ bool GLimp_Init( glimpParms_t parms )
+ 		common->Printf( "Using GLEW %s\n", glewGetString( GLEW_VERSION ) );
+ 	}
+ 	
++#if defined(USE_EGL)
++	// without the experimental mode GLEW knows only the extensions the driver
++	// lists, and Mesa does not list those of OpenGL's own core any more
++	if( GLEW_VERSION_1_3 )
++	{
++		__GLEW_ARB_multitexture = GL_TRUE;
++		__GLEW_ARB_texture_compression = GL_TRUE;
++	}
++	if( GLEW_VERSION_1_5 )
++	{
++		__GLEW_ARB_vertex_buffer_object = GL_TRUE;
++		__GLEW_ARB_occlusion_query = GL_TRUE;
++	}
++	if( GLEW_VERSION_3_0 )
++	{
++		__GLEW_ARB_map_buffer_range = GL_TRUE;
++		__GLEW_ARB_vertex_array_object = GL_TRUE;
++		__GLEW_ARB_framebuffer_object = GL_TRUE;
++		__GLEW_EXT_framebuffer_blit = GL_TRUE;
++	}
++	if( GLEW_VERSION_3_1 )
++	{
++		__GLEW_ARB_uniform_buffer_object = GL_TRUE;
++	}
++#endif
++	
+ 	// DG: disable cursor, we have two cursors in menu (because mouse isn't grabbed in menu)
+ 	SDL_ShowCursor( SDL_DISABLE );
+ 	// DG end
+-- 
+2.53.0
+

@@ -1,0 +1,21 @@
+config BR2_PACKAGE_RBDOOM3_BFG
+	bool "rbdoom3-bfg"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS # sdl2
+	depends on BR2_PACKAGE_MESA_PANFROST # OpenGL through EGL
+	select BR2_PACKAGE_SDL2
+	select BR2_PACKAGE_OPENAL
+	select BR2_PACKAGE_ZLIB
+	help
+	  RBDOOM-3-BFG 1.2.0 (GPLv3), the engine of DOOM 3 BFG Edition,
+	  an SDL2 game for bare_app: its OpenGL renderer drawn by the
+	  GPU (mesa-panfrost) through SDL's bareapp driver, sound by
+	  OpenAL Soft, the Bink videos by its own libbinkdec. The game
+	  files (base/ of a bought BFG Edition) are not included.
+
+	  https://github.com/RobertBeckebans/RBDOOM-3-BFG
+
+comment "rbdoom3-bfg needs mesa-panfrost and a toolchain w/ C++, threads, dynamic library"
+	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_INSTALL_LIBSTDCPP || \
+		!BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

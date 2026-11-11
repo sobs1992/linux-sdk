@@ -1,0 +1,38 @@
+From 4ad79f9f5fd707f753b4b576a5cd7552c3429846 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 15:10:55 +0100
+Subject: [PATCH 17/17] Render crops at the bottom left
+
+Shaders sampling _currentRender (glass, mirrors, heat haze) turn the
+fragment position into texture coordinates by the viewport's size
+alone (rpWindowCoord, no offset). BFG put crops at the top, right for y
+going down; in OpenGL that shifted them, and with the dynamic resolution
+glass read the wrong part of the scene: it looked opaque.
+---
+ neo/renderer/RenderSystem.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/neo/renderer/RenderSystem.cpp b/neo/renderer/RenderSystem.cpp
+index 3b42d4f..bf0835c 100644
+--- a/neo/renderer/RenderSystem.cpp
++++ b/neo/renderer/RenderSystem.cpp
+@@ -895,10 +895,14 @@ void idRenderSystemLocal::CropRenderSize( int width, int height )
+ 	
+ 	idScreenRect& current = renderCrops[currentRenderCrop];
+ 	
++	// at the bottom left, where OpenGL's window coordinates start: shaders
++	// sampling _currentRender (glass, heat haze) turn the fragment position
++	// into texture coordinates by the viewport's size alone, so a crop at
++	// the top (as BFG had it, for y going down) read the wrong part
+ 	current.x1 = previous.x1;
+ 	current.x2 = previous.x1 + width - 1;
+-	current.y1 = previous.y2 - height + 1;
+-	current.y2 = previous.y2;
++	current.y1 = previous.y1;
++	current.y2 = previous.y1 + height - 1;
+ }
+ 
+ /*
+-- 
+2.53.0
+

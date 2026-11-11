@@ -1,0 +1,50 @@
+From 8ddbcab7fdc9fe3d97e577e10cf8e23eac3575be Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 09:18:04 +0100
+Subject: [PATCH 07/17] com_speeds: GPU and swap times too
+
+The swap includes the wait for the GPU with SDL drivers that read the
+picture back.
+---
+ neo/framework/common_frame.cpp | 3 ++-
+ neo/sys/sdl/sdl_glimp.cpp      | 6 ++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/neo/framework/common_frame.cpp b/neo/framework/common_frame.cpp
+index c9b11c8..829ae22 100644
+--- a/neo/framework/common_frame.cpp
++++ b/neo/framework/common_frame.cpp
+@@ -857,7 +857,8 @@ void idCommonLocal::Frame()
+ 			int	nowTime = Sys_Milliseconds();
+ 			int	com_frameMsec = nowTime - lastTime;
+ 			lastTime = nowTime;
+-			Printf( "frame:%d all:%3d gfr:%3d rf:%3lld bk:%3lld\n", idLib::frameNumber, com_frameMsec, time_gameFrame, time_frontend / 1000, time_backend / 1000 );
++			extern uint64 glimp_swapMicroSec;
++			Printf( "frame:%d all:%3d gfr:%3d rf:%3lld bk:%3lld gpu:%3lld swap:%3lld\n", idLib::frameNumber, com_frameMsec, time_gameFrame, time_frontend / 1000, time_backend / 1000, time_gpu / 1000, glimp_swapMicroSec / 1000 );
+ 			time_gameFrame = 0;
+ 			time_gameDraw = 0;
+ 		}
+diff --git a/neo/sys/sdl/sdl_glimp.cpp b/neo/sys/sdl/sdl_glimp.cpp
+index 56bd1fe..1d00c55 100644
+--- a/neo/sys/sdl/sdl_glimp.cpp
++++ b/neo/sys/sdl/sdl_glimp.cpp
+@@ -543,10 +543,16 @@ void GLimp_Shutdown()
+ GLimp_SwapBuffers
+ ===================
+ */
++// time spent in the last swap (com_speeds): with SDL drivers that read the
++// picture back it includes waiting for the GPU
++uint64 glimp_swapMicroSec;
++
+ void GLimp_SwapBuffers()
+ {
+ #if SDL_VERSION_ATLEAST(2, 0, 0)
++	uint64 start = Sys_Microseconds();
+ 	SDL_GL_SwapWindow( window );
++	glimp_swapMicroSec = Sys_Microseconds() - start;
+ #else
+ 	SDL_GL_SwapBuffers();
+ #endif
+-- 
+2.53.0
+

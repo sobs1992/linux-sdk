@@ -1,0 +1,96 @@
+From f3bd90d501a5e86c32b90f87c435088cab6fd149 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 13:29:39 +0100
+Subject: [PATCH 14/17] Vertex cache: three frames of temporary geometry
+
+The game thread writes frame N+1 into one set while the back end draws
+frame N; the set last held frame N-1. With r_syncEveryFrame 0 only frame
+N-2 is waited for, so the GPU could still be drawing N-1 from vertexes,
+indexes and joints being overwritten: garbage triangles, GPU job
+timeouts and faults (Mali-G52, the mars_city1 intro within a minute).
+A third set leaves N-1 alone.
+
+Handhelds: 16 MB of vertexes and of indexes per frame instead of 31 MB
+(a frame uses about 3 MB even in big halls), so the three sets take less
+memory than the two did.
+---
+ neo/renderer/VertexCache.cpp |  6 +++---
+ neo/renderer/VertexCache.h   | 20 +++++++++++++++++---
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/neo/renderer/VertexCache.cpp b/neo/renderer/VertexCache.cpp
+index f7aa061..b9038ac 100644
+--- a/neo/renderer/VertexCache.cpp
++++ b/neo/renderer/VertexCache.cpp
+@@ -130,7 +130,7 @@ void idVertexCache::Init( int _uniformBufferOffsetAlignment )
+ 	mostUsedIndex = 0;
+ 	mostUsedJoint = 0;
+ 	
+-	for( int i = 0; i < NUM_FRAME_DATA; i++ )
++	for( int i = 0; i < VERTCACHE_NUM_FRAMES; i++ )
+ 	{
+ 		AllocGeoBufferSet( frameData[i], VERTCACHE_VERTEX_MEMORY_PER_FRAME, VERTCACHE_INDEX_MEMORY_PER_FRAME, VERTCACHE_JOINT_MEMORY_PER_FRAME, BU_DYNAMIC );
+ 	}
+@@ -150,7 +150,7 @@ idVertexCache::Shutdown
+ */
+ void idVertexCache::Shutdown()
+ {
+-	for( int i = 0; i < NUM_FRAME_DATA; i++ )
++	for( int i = 0; i < VERTCACHE_NUM_FRAMES; i++ )
+ 	{
+ 		frameData[i].vertexBuffer.FreeBufferObject();
+ 		frameData[i].indexBuffer.FreeBufferObject();
+@@ -501,7 +501,7 @@ void idVertexCache::BeginBackEnd()
+ 	// prepare the next frame for writing to by the CPU
+ 	currentFrame++;
+ 	
+-	listNum = currentFrame % NUM_FRAME_DATA;
++	listNum = currentFrame % VERTCACHE_NUM_FRAMES;
+ 	const int startMap = Sys_Milliseconds();
+ 	MapGeoBufferSet( frameData[ listNum ] );
+ 	const int endMap = Sys_Milliseconds();
+diff --git a/neo/renderer/VertexCache.h b/neo/renderer/VertexCache.h
+index 7e86c77..d4e4542 100644
+--- a/neo/renderer/VertexCache.h
++++ b/neo/renderer/VertexCache.h
+@@ -29,8 +29,22 @@ If you have questions concerning this license or the applicable additional terms
+ #ifndef __VERTEXCACHE_H__
+ #define __VERTEXCACHE_H__
+ 
++// Frames of temporary geometry: the game thread writes frame N+1 while the
++// back end draws frame N, and with r_syncEveryFrame 0 the GPU may still be
++// drawing frame N-1 then (only N-2 is waited for). With two sets frame
++// N+1 overwrote the vertices, indexes and joints of N-1 under the GPU:
++// garbage triangles, GPU job timeouts and faults (Mali, mars_city1 intro).
++const int VERTCACHE_NUM_FRAMES = 3;
++
++#if defined(HANDHELD_DEFAULTS)
++// a frame uses about 3 MB of each even in big halls; 3 sets of 31 MB are
++// too much memory for a 2 GB handheld
++const int VERTCACHE_INDEX_MEMORY_PER_FRAME = 16 * 1024 * 1024;
++const int VERTCACHE_VERTEX_MEMORY_PER_FRAME = 16 * 1024 * 1024;
++#else
+ const int VERTCACHE_INDEX_MEMORY_PER_FRAME = 31 * 1024 * 1024;
+ const int VERTCACHE_VERTEX_MEMORY_PER_FRAME = 31 * 1024 * 1024;
++#endif
+ const int VERTCACHE_JOINT_MEMORY_PER_FRAME = 256 * 1024;
+ 
+ // there are a lot more static indexes than vertexes, because interactions are just new
+@@ -113,11 +127,11 @@ public:
+ 	
+ public:
+ 	int				currentFrame;	// for determining the active buffers
+-	int				listNum;		// currentFrame % NUM_FRAME_DATA
+-	int				drawListNum;	// (currentFrame-1) % NUM_FRAME_DATA
++	int				listNum;		// currentFrame % VERTCACHE_NUM_FRAMES
++	int				drawListNum;	// (currentFrame-1) % VERTCACHE_NUM_FRAMES
+ 	
+ 	geoBufferSet_t	staticData;
+-	geoBufferSet_t	frameData[ NUM_FRAME_DATA ];
++	geoBufferSet_t	frameData[ VERTCACHE_NUM_FRAMES ];
+ 	
+ 	int				uniformBufferOffsetAlignment;
+ 	
+-- 
+2.53.0
+

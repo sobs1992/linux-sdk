@@ -139,4 +139,20 @@ config BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM
 	  entry of bare_app's menu, the example of an SDL2 game. In the
 	  SDK: APPS_CONFIG += bare-app.CHOCOLATE_DOOM=y
 
+config BR2_PACKAGE_BARE_APP_DOOM3
+	bool "DOOM 3 BFG Edition (RBDOOM-3-BFG, an SDL2 game)"
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # mesa-panfrost
+	select BR2_PACKAGE_MESA_PANFROST
+	select BR2_PACKAGE_RBDOOM3_BFG
+	help
+	  The RBDOOM-3-BFG engine (package rbdoom3-bfg, GPLv3) for
+	  DOOM 3 BFG Edition, drawn by the GPU, with games/doom3.ini
+	  as its entry of the main menu. The game files are not
+	  included: copy base/ of a bought BFG Edition (GOG or Steam)
+	  to doom3/ of the games partition (GAMES, /games). In the
+	  SDK: APPS_CONFIG += bare-app.DOOM3=y
+
 endif

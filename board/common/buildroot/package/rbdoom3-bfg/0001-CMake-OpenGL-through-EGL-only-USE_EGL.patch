@@ -1,0 +1,44 @@
+From 55ddf0e3da5e2937a5a53c98b5e077db94b3a03f Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 00:33:00 +0100
+Subject: [PATCH 01/17] CMake: OpenGL through EGL only (USE_EGL)
+
+---
+ neo/CMakeLists.txt | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/neo/CMakeLists.txt b/neo/CMakeLists.txt
+index a5db8a0..a72a323 100644
+--- a/neo/CMakeLists.txt
++++ b/neo/CMakeLists.txt
+@@ -57,6 +57,8 @@ set(CPU_OPTIMIZATION "-mmmx -msse -msse2" CACHE STRING "Which CPU specific optim
+ 
+ option(USE_INTRINSICS "Compile using intrinsics (e.g mmx, sse, msse2)" ON)
+ 
++option(USE_EGL "OpenGL through EGL, no libGL" OFF)
++
+ if(FFMPEG AND BINKDEC)
+ 	message(FATAL_ERROR "Only one of FFMPEG and BINKDEC (or neither) can be enabled at a time")
+ endif()
+@@ -1477,8 +1479,16 @@ else()
+ 	list(APPEND RBDOOM3_SOURCES
+ 		${SYS_INCLUDES} ${SYS_SOURCES})
+ 	
+-	find_package(OpenGL REQUIRED)
+-	include_directories(${OPENGL_INCLUDE_DIRS})
++	if(USE_EGL)
++		# OpenGL through EGL only (Mesa without GLX, no libGL): GLEW and
++		# the core functions are looked up by eglGetProcAddress
++		find_library(EGL_LIBRARY EGL REQUIRED)
++		add_definitions(-DGLEW_EGL -DUSE_EGL)
++		set(OPENGL_LIBRARIES ${EGL_LIBRARY})
++	else()
++		find_package(OpenGL REQUIRED)
++		include_directories(${OPENGL_INCLUDE_DIRS})
++	endif()
+ 
+ 	if(UNIX)
+ 		if(FFMPEG)
+-- 
+2.53.0
+

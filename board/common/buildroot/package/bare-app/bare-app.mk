@@ -97,6 +97,7 @@ endif
 
 # The game.ini of the SDL2 games we bring: bare_app's menu entries
 BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM) += chocolate-doom.ini
+BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_DOOM3) += doom3.ini
 ifneq ($(BARE_APP_GAME_INIS-y),)
 define BARE_APP_INSTALL_GAME_INIS
 	$(foreach f,$(BARE_APP_GAME_INIS-y),\

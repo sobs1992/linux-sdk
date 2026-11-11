@@ -1,0 +1,103 @@
+From 3166727bdad6147e088cb9d44b9024a6c4ed7eeb Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 11 Nov 2026 11:35:18 +0100
+Subject: [PATCH 12/17] Readable small texts on small screens
+
+swf_textMinHeight: SWF texts drawn smaller than this many pixels grow,
+at most swf_textMaxScale (1.35) times; headings stay as they are.
+r_fontLodBias: mip map LOD bias of the font images, below 0 for sharper
+small letters (live). The BFG interface is made for 1280x720 and up: at
+854x480 its small texts were about 7 pixels high and blurred. With
+HANDHELD_DEFAULTS: 14 pixels and -0.5; else both off.
+---
+ neo/renderer/OpenGL/Image_GL.cpp         |  7 +++++++
+ neo/renderer/OpenGL/RenderBackend_GL.cpp |  4 +++-
+ neo/renderer/RenderSystem_init.cpp       |  5 +++++
+ neo/swf/SWF_Render.cpp                   | 13 +++++++++++++
+ 4 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/neo/renderer/OpenGL/Image_GL.cpp b/neo/renderer/OpenGL/Image_GL.cpp
+index c78a0e3..c62cbdc 100644
+--- a/neo/renderer/OpenGL/Image_GL.cpp
++++ b/neo/renderer/OpenGL/Image_GL.cpp
+@@ -549,6 +549,13 @@ void idImage::SetTexParameters()
+ 		}
+ 	}
+ 	
++	// small texts on small screens: the fonts' mip maps a bit sharper
++	if( glConfig.textureLODBiasAvailable && usage == TD_FONT )
++	{
++		extern idCVar r_fontLodBias;
++		glTexParameterf( target, GL_TEXTURE_LOD_BIAS, r_fontLodBias.GetFloat() );
++	}
++	
+ 	// RB: disabled use of unreliable extension that can make the game look worse
+ 	/*
+ 	if( glConfig.textureLODBiasAvailable && ( usage != TD_FONT ) )
+diff --git a/neo/renderer/OpenGL/RenderBackend_GL.cpp b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+index 84f8856..0fc27f5 100644
+--- a/neo/renderer/OpenGL/RenderBackend_GL.cpp
++++ b/neo/renderer/OpenGL/RenderBackend_GL.cpp
+@@ -1333,9 +1333,11 @@ void idRenderBackend::CheckCVars()
+ 	}
+ 	
+ 	// filtering
+-	if( r_maxAnisotropicFiltering.IsModified() || r_useTrilinearFiltering.IsModified() || r_lodBias.IsModified() )
++	extern idCVar r_fontLodBias;
++	if( r_maxAnisotropicFiltering.IsModified() || r_useTrilinearFiltering.IsModified() || r_lodBias.IsModified() || r_fontLodBias.IsModified() )
+ 	{
+ 		idLib::Printf( "Updating texture filter parameters.\n" );
++		r_fontLodBias.ClearModified();
+ 		r_maxAnisotropicFiltering.ClearModified();
+ 		r_useTrilinearFiltering.ClearModified();
+ 		r_lodBias.ClearModified();
+diff --git a/neo/renderer/RenderSystem_init.cpp b/neo/renderer/RenderSystem_init.cpp
+index a2124e2..4211fe9 100644
+--- a/neo/renderer/RenderSystem_init.cpp
++++ b/neo/renderer/RenderSystem_init.cpp
+@@ -90,6 +90,11 @@ idCVar r_useSRGB( "r_useSRGB", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_ARCHIVE,
+ idCVar r_maxAnisotropicFiltering( "r_maxAnisotropicFiltering", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "limit aniso filtering" );
+ idCVar r_useTrilinearFiltering( "r_useTrilinearFiltering", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "Extra quality filtering" );
+ // RB: not used anymore
++#if defined(HANDHELD_DEFAULTS)
++idCVar r_fontLodBias( "r_fontLodBias", "-0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "mip map LOD bias of the fonts: below 0 sharper small texts" );
++#else
++idCVar r_fontLodBias( "r_fontLodBias", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "mip map LOD bias of the fonts: below 0 sharper small texts" );
++#endif
+ idCVar r_lodBias( "r_lodBias", "0.5", CVAR_RENDERER | CVAR_ARCHIVE, "UNUSED: image lod bias" );
+ // RB end
+ 
+diff --git a/neo/swf/SWF_Render.cpp b/neo/swf/SWF_Render.cpp
+index 841d4c1..60e1442 100644
+--- a/neo/swf/SWF_Render.cpp
++++ b/neo/swf/SWF_Render.cpp
+@@ -33,6 +33,15 @@ If you have questions concerning this license or the applicable additional terms
+ idCVar swf_timescale( "swf_timescale", "1", CVAR_FLOAT, "timescale for swf files" );
+ idCVar swf_stopat( "swf_stopat", "0", CVAR_FLOAT, "stop at a specific frame" );
+ 
++// small screens (handhelds): texts drawn smaller than swf_textMinHeight
++// pixels grow, at most swf_textMaxScale times; headings stay as they are
++#if defined(HANDHELD_DEFAULTS)
++idCVar swf_textMinHeight( "swf_textMinHeight", "14", CVAR_FLOAT | CVAR_ARCHIVE, "texts smaller than this many pixels are drawn bigger (0: off)", 0.0f, 64.0f );
++#else
++idCVar swf_textMinHeight( "swf_textMinHeight", "0", CVAR_FLOAT | CVAR_ARCHIVE, "texts smaller than this many pixels are drawn bigger (0: off)", 0.0f, 64.0f );
++#endif
++idCVar swf_textMaxScale( "swf_textMaxScale", "1.35", CVAR_FLOAT | CVAR_ARCHIVE, "how much bigger swf_textMinHeight makes a text at most", 1.0f, 3.0f );
++
+ idCVar swf_titleSafe( "swf_titleSafe", "0.005", CVAR_FLOAT, "space between UI elements and screen edge", 0.0f, 0.075f );
+ 
+ idCVar swf_forceAlpha( "swf_forceAlpha", "0", CVAR_FLOAT, "force an alpha value on all elements, useful to show invisible animating elements", 0.0f, 1.0f );
+@@ -1009,6 +1018,10 @@ void idSWF::RenderEditText( idRenderSystem* gui, idSWFTextInstance* textInstance
+ 	idSWFFont* swfFont = fontEntry->font;
+ 	
+ 	float postTransformHeight = SWFTWIP( shape->fontHeight ) * yScale;
++	if( postTransformHeight > 0.0f && postTransformHeight < swf_textMinHeight.GetFloat() )
++	{
++		postTransformHeight *= idMath::ClampFloat( 1.0f, swf_textMaxScale.GetFloat(), swf_textMinHeight.GetFloat() / postTransformHeight );
++	}
+ 	
+ 	const idFont* fontInfo = swfFont->fontID;
+ 	
+-- 
+2.53.0
+
