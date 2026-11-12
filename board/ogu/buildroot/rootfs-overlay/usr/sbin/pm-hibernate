@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# Hibernate: the RAM goes to /data/hibernate.swap, the device turns off
+# (no current at all, unlike suspend); the power key starts it and the
+# kernel resumes where it left off. Returns once resumed, like pm-suspend:
+# bare_app runs it when the screen has been off for a while.
+#
+# Only when /etc/init.d/S06hibernate has set this boot and the next one up
+# (/run/hibernate.ready) and the image fits; otherwise, or if hibernating
+# fails (a device that refuses), it sleeps with pm-suspend.
+
+SWAP=/data/hibernate.swap
+
+[ -e /run/hibernate.ready ] || exec /usr/sbin/pm-suspend
+
+# The kernel copies the image into free RAM before it writes it, outside
+# the CMA area: what cannot be dropped (programs, GPU buffers) must fit in
+# less than half of the rest. DOOM 3 BFG holds ~1.4 GB (its textures are
+# pinned GPU memory): trying took 16 s and failed. Sleep at once then.
+awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } /^CmaTotal:/ { c = $2 }
+     END { exit !(t - a < (t - c) * 0.45) }' /proc/meminfo || exec /usr/sbin/pm-suspend
+
+# swap only for the image: not used while the device runs
+grep -q "^$SWAP " /proc/swaps || swapon "$SWAP" 2>/dev/null || exec /usr/sbin/pm-suspend
+sync
+echo shutdown > /sys/power/disk
+echo disk > /sys/power/state
+rc=$?
+swapoff "$SWAP"
+[ $rc -eq 0 ] || exec /usr/sbin/pm-suspend
+exit 0

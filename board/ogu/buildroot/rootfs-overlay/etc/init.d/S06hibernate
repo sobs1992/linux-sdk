@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# Hibernation (suspend to disk) of the ODROID-GO Ultra, set up at boot:
+# the RAM goes to a swap file on /data (the MBR of the boot disk has no
+# room for a fifth partition), /usr/sbin/pm-hibernate (bare_app's sleep
+# command) writes it there and turns the device off, the power key starts
+# it and the kernel resumes from the file.
+#
+# The kernel resumes only from its command line ("resume=PARTUUID=<disk>-03
+# resume_offset=<first block of the file> resumewait"), before anything is
+# mounted: this script keeps those in /boot/extlinux/extlinux.conf right
+# for the file (the image is written without them). It also clears an
+# image that was never resumed (booted without them, from another disk):
+# resuming it later, after the file systems changed, would break them.
+# /run/hibernate.ready tells pm-hibernate that the next boot resumes.
+#
+# The file is made once, in the background (1 GiB written: some seconds);
+# until then pm-hibernate sleeps as before (suspend to idle).
+
+SWAP=/data/hibernate.swap
+SIZE_MB=1024
+READY=/run/hibernate.ready
+EXTLINUX=/boot/extlinux/extlinux.conf
+
+log() { echo "hibernate: $*"; logger -t hibernate "$*" 2>/dev/null; }
+
+disk_of() {
+	p=$(readlink -f "/sys/class/block/${1#/dev/}") || return 1
+	basename "$(dirname "$p")"
+}
+
+# the hibernation signature at the end of the file's first page
+has_image() {
+	[ "$(dd if="$SWAP" bs=1 skip=4086 count=10 2>/dev/null)" = S1SUSPEND ]
+}
+
+# physical block of the file's first block (filefrag: extent 0)
+first_block() {
+	filefrag -v "$SWAP" 2>/dev/null |
+		sed -n 's/^ *0: *0\.\. *[0-9]*: *\([0-9]*\)\.\..*/\1/p'
+}
+
+# extlinux.conf's kernel arguments with these resume ones, if not already
+setup_cmdline() {
+	part=$1 offset=$2
+	[ -f "$EXTLINUX" ] || { log "no $EXTLINUX"; return 1; }
+	# the BOOT partition of the disk the system runs from, not another one
+	[ "$(disk_of "$(findmnt -n -o SOURCE /boot)")" = "$(disk_of "$(findmnt -n -o SOURCE /)")" ] ||
+		{ log "/boot is not on the root disk"; return 1; }
+	want="resume=PARTUUID=$part resume_offset=$offset resumewait"
+	grep -q "^[[:space:]]*append .* $want\$" "$EXTLINUX" && return 0
+	sed -e '/^[[:space:]]*append /{s/ resume=[^ ]*//g; s/ resume_offset=[^ ]*//g; s/ resumewait//g; s/ noresume//g; s/$/ '"$want"'/}' \
+		"$EXTLINUX" > "$EXTLINUX.new" &&
+		mv "$EXTLINUX.new" "$EXTLINUX" && sync ||
+		{ log "cannot write $EXTLINUX"; return 1; }
+	log "resume from $part, block $offset, from the next boot on"
+}
+
+setup() {
+	dev=$(findmnt -n -o SOURCE /data) || { log "/data is not mounted"; return 1; }
+	if [ ! -f "$SWAP" ]; then
+		log "making $SWAP ($SIZE_MB MiB)"
+		# zeroes, not fallocate: a swap file must have every block written
+		dd if=/dev/zero of="$SWAP.new" bs=1M count=$SIZE_MB conv=fsync 2>/dev/null &&
+			chmod 600 "$SWAP.new" && mkswap "$SWAP.new" > /dev/null &&
+			mv "$SWAP.new" "$SWAP" ||
+			{ log "cannot make $SWAP"; rm -f "$SWAP.new"; return 1; }
+	elif has_image; then
+		log "an image the kernel did not resume: cleared"
+		mkswap "$SWAP" > /dev/null || return 1
+	fi
+	offset=$(first_block)
+	part=$(blkid -p -o value -s PART_ENTRY_UUID "$dev" 2>/dev/null)
+	[ -n "$offset" ] && [ -n "$part" ] || { log "no offset or PARTUUID for $SWAP"; return 1; }
+	# for this boot (the cleared image first: a resume device set here
+	# makes the kernel look for an image at once)
+	echo "$offset" > /sys/power/resume_offset &&
+		cat "/sys/class/block/${dev#/dev/}/dev" > /sys/power/resume || return 1
+	setup_cmdline "$part" "$offset" || return 1
+	touch $READY
+}
+
+case "$1" in
+start)
+	printf "Setting up hibernation: "
+	rm -f $READY
+	if [ -f "$SWAP" ]; then
+		setup && echo "OK" || echo "FAIL"
+	else
+		( setup ) </dev/null >/dev/null 2>&1 &
+		echo "making the swap file in the background"
+	fi
+	;;
+stop)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac
