@@ -118,8 +118,8 @@ copy() {
 run() { if [ -z "$host" ]; then sh -c "$1"; else ssh "$host" "$1"; fi; }
 
 if [ -n "$host" ]; then
-	ssh "$host" "mount -o remount,rw /games"
-	trap 'rm -rf "$staging"; ssh "$host" "sync; mount -o remount,ro /games"' EXIT
+	ssh "$host" "games-mount rw"
+	trap 'rm -rf "$staging"; ssh "$host" "games-mount ro"' EXIT
 fi
 
 echo "Copying game data to ${host:+$host:}$dest: $(du -shL "$staging/game" | cut -f1)"

@@ -1,25 +1,25 @@
 #!/bin/sh
 #
-# The games partition (/games, FAT32 "GAMES") as a USB disk for the
-# computer, next to the network of the USB gadget (S42usbnet): a mass
-# storage function is added to the running configfs gadget while the
-# partition is shared and removed afterwards. Used by bare_app's "USB disk"
-# screen.
+# The games partitions (/games, FAT32 "GAMES": the boot disk's and an SD
+# card's, see games-mount) as USB disks for the computer, a disk each,
+# next to the network of the USB gadget (S42usbnet): a mass storage
+# function is added to the running configfs gadget while they are shared
+# and removed afterwards. Used by bare_app's "USB disk" screen.
 #
-#   usb-disk start    unmount /games and give the partition to the computer
+#   usb-disk start    unmount /games and give the partitions to the computer
 #                     exit 0, 2: /games is in use (a game has files open),
 #                     1: anything else
 #   usb-disk status   exit 0: shared, the computer has it
 #                     3: the computer ejected the disk (then "stop")
 #                     4: no computer on the cable (not configured)
 #                     1: not shared
-#   usb-disk stop     take the partition back, check it, mount /games again
+#   usb-disk stop     take the partitions back, check them, mount /games again
 #
-# The disk is "removable": ejecting it on the computer empties the
-# function's file, which "status" reports, so the board takes the disk back
-# once the computer is done with it.
+# The disks are "removable": ejecting one on the computer empties its
+# LUN's file, which "status" reports, so the board takes the disks back
+# once the computer is done with them.
 
-STATE=/run/usb-disk		# "device mount-options" while shared
+STATE=/run/usb-disk		# the devices shared, a line each
 FUNC=mass_storage.games
 
 log() { echo "usb-disk: $*" >&2; logger -t usb-disk "$*" 2>/dev/null; }
@@ -39,24 +39,24 @@ udc_state() {
 start() {
 	[ ! -e $STATE ] || { log "already shared"; return 0; }
 	G=$(gadget) || { log "no USB gadget running"; return 1; }
-	set -- $(awk '$2 == "/games" { print $1, $4 }' /proc/mounts)
-	dev=$1 opts=$2
-	[ -b "$dev" ] || { log "/games is not mounted"; return 1; }
-	umount /games 2>/dev/null || { log "/games is in use"; return 2; }
-	echo "$dev $opts" > $STATE
+	devs=$(games-mount devices) || { log "/games is not mounted"; return 1; }
+	games-mount stop 2>/dev/null
+	case $? in
+	0) ;;
+	2) log "/games is in use"; return 2 ;;
+	*) return 1 ;;
+	esac
+	echo "$devs" > $STATE
 
 	modprobe usb_f_mass_storage 2>/dev/null
 	cfg=$(ls -d "$G"/configs/*/ | head -n 1)
 	udc=$(cat "$G/UDC")
-	if mkdir "$G/functions/$FUNC" &&
-	   echo 1 > "$G/functions/$FUNC/lun.0/removable" &&
-	   echo 0 > "$G/functions/$FUNC/lun.0/ro" &&
-	   echo "ODROID  GAMES" > "$G/functions/$FUNC/lun.0/inquiry_string" &&
-	   echo "$dev" > "$G/functions/$FUNC/lun.0/file" &&
+	F=$G/functions/$FUNC
+	if mkdir "$F" && share $devs &&
 	   echo "" > "$G/UDC" &&
-	   ln -s "$G/functions/$FUNC" "$cfg" &&
+	   ln -s "$F" "$cfg" &&
 	   echo "$udc" > "$G/UDC"; then
-		log "$dev shared"
+		log "shared:" $devs
 		return 0
 	fi
 	log "cannot add the mass storage function"
@@ -64,32 +64,55 @@ start() {
 	return 1
 }
 
+# a LUN of function $F for each device: lun.0 is there already
+share() {
+	n=0
+	for dev; do
+		lun=$F/lun.$n
+		{ [ -d "$lun" ] || mkdir "$lun"; } &&
+		echo 1 > "$lun/removable" &&
+		echo 0 > "$lun/ro" &&
+		echo "ODROID  GAMES $n" > "$lun/inquiry_string" &&
+		echo "$dev" > "$lun/file" || return 1
+		n=$((n + 1))
+	done
+}
+
+# Ejected: the computer is done with all of them once it ejects one (it
+# would keep the others till the cable goes)
 status() {
 	[ -e $STATE ] || return 1
 	G=$(gadget) || return 1
-	[ -n "$(cat "$G/functions/$FUNC/lun.0/file" 2>/dev/null)" ] || return 3
+	for lun in "$G/functions/$FUNC"/lun.*; do
+		[ -n "$(cat "$lun/file" 2>/dev/null)" ] || return 3
+	done
 	[ "$(udc_state)" = configured ] || return 4
 	return 0
 }
 
 stop() {
 	[ -e $STATE ] || return 0
-	read -r dev opts < $STATE
+	devs=$(cat $STATE)
 	if G=$(gadget) && [ -d "$G/functions/$FUNC" ]; then
 		udc=$(cat "$G/UDC")
 		echo "" > "$G/UDC"
 		rm -f "$G"/configs/*/$FUNC
+		for lun in "$G/functions/$FUNC"/lun.*; do
+			[ "${lun##*.}" = 0 ] || rmdir "$lun"
+		done
 		rmdir "$G/functions/$FUNC"
 		echo "$udc" > "$G/UDC"
 	fi
-	# Ejected or not, the computer may have left it dirty
+	# Ejected or not, the computer may have left them dirty
 	if command -v fsck.fat >/dev/null; then
-		fsck.fat -a -w "$dev" >/dev/null 2>&1
-		[ $? -le 1 ] || log "fsck.fat found errors it could not fix on $dev"
+		for dev in $devs; do
+			fsck.fat -a -w "$dev" >/dev/null 2>&1
+			[ $? -le 1 ] || log "fsck.fat found errors it could not fix on $dev"
+		done
 	fi
-	mount -t vfat -o "$opts" "$dev" /games || { log "cannot mount $dev on /games"; return 1; }
+	games-mount start $devs || { log "cannot mount /games"; return 1; }
 	rm -f $STATE
-	log "$dev back on /games"
+	log "back on /games:" $devs
 }
 
 case "$1" in

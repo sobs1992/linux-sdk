@@ -78,5 +78,11 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
   упаковка — `lzss_pack.py`, формат — `wrs.py`). OpenAL берётся из `SysWOW64`
   Windows, шрифты Arial и Palatino — из её `Fonts` в префикс Wine на `/data`.
 
+- **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
+  сетевых карт. Все три кампании — 6,4 ГБ; если образ не помещается, карты
+  Resurrection of Evil (`deltax`, `erebus*`, `hell`, `phobos*`) и The Lost Mission
+  (`le_*`) можно исключить строками `exclude` и положить на отдельную SD-карту
+  с играми (README, «SD-карта с играми к eMMC»).
+
 Doom (shareware `doom1.wad`) уже есть в rootfs; полный `doom.wad`/`doom2.wad` можно
 добавить секцией с `install = none` и `file = .../doom2.wad`, `dir = doom`.

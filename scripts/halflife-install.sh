@@ -59,8 +59,8 @@ pack() {
 run() { if [ -z "$host" ]; then sh -c "$1"; else ssh "$host" "$1"; fi; }
 
 if [ -n "$host" ]; then
-	ssh "$host" "mount -o remount,rw /games"
-	trap 'ssh "$host" "sync; mount -o remount,ro /games"' EXIT
+	ssh "$host" "games-mount rw"
+	trap 'ssh "$host" "games-mount ro"' EXIT
 fi
 
 echo "Copying $dirs to ${host:+$host:}$dest"

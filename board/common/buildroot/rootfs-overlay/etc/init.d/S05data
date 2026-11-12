@@ -6,6 +6,11 @@
 #   p4  FAT32 "GAMES" right after p3 to the end of the disk (optional),
 #       mounted read-only on /games: game files, copied there from a PC
 #
+# An SD card the board did not boot from adds its FAT "GAMES" partition
+# to /games (a card of game files: the board boots from the eMMC when the
+# card has no boot files). /usr/sbin/games-mount joins them: the boot
+# disk's files first, the card's next to them, in the same directories.
+#
 # The image has only BOOT and rootfs; scripts/mkimage.sh writes "start
 # size" of p3 in sectors to /etc/data-partition when the firmware config
 # sets IMAGE_DATA_START_MB (and IMAGE_DATA_SIZE_MB: without a size p3 goes
@@ -16,7 +21,8 @@
 # partition with another file system is never touched.
 #
 # /games is read-only, so switching the board off never leaves the FAT
-# dirty; "mount -o remount,rw /games" to write there from the board.
+# dirty; "games-mount rw" to write there from the board ("games-mount ro"
+# after).
 # Needs sfdisk, partx and blkid (util-linux), mke2fs (e2fsprogs), mkdosfs.
 
 CONF=/etc/data-partition
@@ -106,23 +112,42 @@ games() {
 		log "formatting $p4"
 		mkdosfs -n GAMES "/dev/$p4" > /dev/null || return 1
 	fi
-	mkdir -p /games
-	mount -t vfat -o ro,noatime,utf8,umask=022 "/dev/$p4" /games || { log "cannot mount $p4"; return 1; }
-	log "$p4 on /games"
+}
+
+# the FAT "GAMES" partition of an SD card that is not the boot disk
+card_games() {
+	for b in /sys/block/mmcblk*; do
+		c=${b##*/}
+		[ "$c" != "$disk" ] && [ "$(cat "$b/device/type" 2>/dev/null)" = SD ] || continue
+		for p in "$b/${c}"p*; do
+			[ -e "$p" ] || continue
+			wait_node "${p##*/}"
+			if is_fs "${p##*/}" vfat GAMES; then
+				echo "/dev/${p##*/}"
+				return 0
+			fi
+		done
+	done
+	return 1
 }
 
 start() {
-	[ -f "$CONF" ] || return 0
-	read -r data_start data_size < "$CONF"
-	games_start=${data_size:+$((data_start + data_size))}
 	disk=$(root_disk) || { log "cannot find the root disk"; return 1; }
-	disk_size=$(cat "/sys/block/$disk/size")
-	p2=$(part_name "$disk" 2)
-	p3=$(part_name "$disk" 3)
-	p4=$(part_name "$disk" 4)
+	main=
+	if [ -f "$CONF" ]; then
+		read -r data_start data_size < "$CONF"
+		games_start=${data_size:+$((data_start + data_size))}
+		disk_size=$(cat "/sys/block/$disk/size")
+		p2=$(part_name "$disk" 2)
+		p3=$(part_name "$disk" 3)
+		p4=$(part_name "$disk" 4)
 
-	data || return 1
-	[ -z "$games_start" ] || games
+		if data && [ -n "$games_start" ] && games; then
+			main=/dev/$p4
+		fi
+	fi
+	card=$(card_games) && log "$card: games of the SD card"
+	games-mount start $main $card
 }
 
 case "$1" in
@@ -130,9 +155,8 @@ start)
 	start
 	;;
 stop)
-	for m in /games /data; do
-		! mountpoint -q $m || umount $m
-	done
+	games-mount stop
+	! mountpoint -q /data || umount /data
 	;;
 *)
 	echo "Usage: $0 {start|stop}"

@@ -1,0 +1,173 @@
+#!/bin/sh
+#
+# /games from one or more FAT "GAMES" partitions, read-only: the boot
+# disk's own (p4, /etc/init.d/S05data) and an SD card's that the board did
+# not boot from (a card with only game files on it, an add-on).
+#
+#   games-mount start DEV...   mount them on /games, the first one first
+#   games-mount stop           unmount /games and the partitions under it
+#                              (exit 2: a game has files open there)
+#   games-mount devices        the partitions mounted, a line each
+#   games-mount rw             the first partition writable on /games
+#   games-mount ro             back to read-only (and all of them again)
+#
+# One partition is mounted on /games itself. More are mounted on
+# /run/games/N and /games is a tmpfs of symbolic links into them: an entry
+# found in one partition is a link to it; a directory in more than one is
+# a directory whose entries are joined the same way, so a card can add
+# files to a game's directory (DOOM 3's base/maps of its add-ons). When
+# two have the same file the earlier partition's is used. FAT compares
+# names without case, and so does the joining: "DOOM3" on the card is the
+# same directory as "doom3". (overlayfs would do this, but it does not
+# take FAT file systems.)
+#
+# "rw" puts the first partition alone on /games, writable, for copying a
+# game onto the board; "ro" makes it read-only and joins the others again.
+# To write on the card: mount -o remount,rw /run/games/1.
+
+STATE=/run/games/mounted	# "device directory", a line each, in order
+BASE=/run/games
+OPTS=noatime,utf8,umask=022
+
+log() { echo "games: $*" >&2; logger -t games "$*" 2>/dev/null; }
+
+# join DST REL SRC...: the entries of REL in each SRC as links in DST
+join() {
+	local dst=$1 rel=$2 d e p n k s seen
+	shift 2
+	for d; do
+		for p in "$d$rel"/* "$d$rel"/.[!.]*; do
+			[ -e "$p" ] || [ -L "$p" ] || continue
+			n=${p##*/}
+			# taken from an earlier partition (FAT: whatever its case)
+			seen=
+			for e; do
+				[ "$e" = "$d" ] && break
+				if [ -e "$e$rel/$n" ] || [ -L "$e$rel/$n" ]; then
+					seen=1
+					break
+				fi
+			done
+			[ -z "$seen" ] || continue
+			k=0
+			if [ -d "$p" ]; then
+				for s; do
+					[ -d "$s$rel/$n" ] && k=$((k + 1))
+				done
+			fi
+			if [ $k -gt 1 ]; then
+				mkdir -m 755 "$dst/$n" && join "$dst/$n" "$rel/$n" "$@"
+			else
+				ln -s "$p" "$dst/$n"
+			fi
+		done
+	done
+}
+
+# /games of the partitions in $STATE: the only one, or the tmpfs of links
+show() {
+	set --
+	while read -r dev dir; do
+		set -- "$@" "$dir"
+	done < $STATE
+	[ $# -gt 1 ] || return 0
+	mount -t tmpfs -o mode=755,size=4m games /games || return 1
+	join /games "" "$@"
+	mount -o remount,ro /games
+}
+
+start() {
+	[ $# -gt 0 ] || return 0
+	[ ! -e $STATE ] || { log "already mounted"; return 0; }
+	mkdir -p /games $BASE
+	: > $STATE
+	if [ $# -eq 1 ]; then
+		mount -t vfat -o ro,$OPTS "$1" /games || { log "cannot mount $1"; rm -f $STATE; return 1; }
+		echo "$1 /games" >> $STATE
+		log "$1 on /games"
+		return 0
+	fi
+	n=0
+	for dev; do
+		dir=$BASE/$n
+		mkdir -p "$dir"
+		if mount -t vfat -o ro,$OPTS "$dev" "$dir"; then
+			echo "$dev $dir" >> $STATE
+			log "$dev on /games ($dir)"
+		else
+			log "cannot mount $dev"
+		fi
+		n=$((n + 1))
+	done
+	[ -s $STATE ] || { rm -f $STATE; return 1; }
+	if [ "$(wc -l < $STATE)" -eq 1 ]; then
+		# only one could be mounted: on /games itself
+		read -r dev dir < $STATE
+		umount "$dir" && mount -t vfat -o ro,$OPTS "$dev" /games &&
+			echo "$dev /games" > $STATE
+		return
+	fi
+	show
+}
+
+stop() {
+	[ -e $STATE ] || return 0
+	# a game's open files are in the partitions, not in the links
+	while read -r dev dir; do
+		[ "$dir" = /games ] && continue
+		if fuser -m "$dir" > /dev/null 2>&1; then
+			log "$dir is in use"
+			return 2
+		fi
+	done < $STATE
+	if mountpoint -q /games && ! umount /games; then
+		log "/games is in use"
+		return 2
+	fi
+	while read -r dev dir; do
+		[ "$dir" = /games ] || umount "$dir" || { log "cannot unmount $dir"; return 2; }
+	done < $STATE
+	rm -f $STATE
+}
+
+devices() {
+	[ -e $STATE ] || return 1
+	while read -r dev dir; do
+		echo "$dev"
+	done < $STATE
+}
+
+rw() {
+	[ -e $STATE ] || { log "/games is not mounted"; return 1; }
+	read -r dev dir < $STATE
+	mount -o remount,rw "$dir" || return 1
+	if [ "$dir" != /games ] && [ ! -e $BASE/rw ]; then
+		# a bind mount is as writable as its source when it is made
+		umount /games || { log "/games is in use"; return 2; }
+		mount --bind "$dir" /games || return 1
+		touch $BASE/rw
+	fi
+}
+
+ro() {
+	[ -e $STATE ] || return 0
+	read -r dev dir < $STATE
+	sync
+	mount -o remount,ro "$dir"
+	if [ -e $BASE/rw ]; then
+		umount /games || { log "/games is in use"; return 2; }
+		rm -f $BASE/rw
+		show
+	fi
+}
+
+cmd=$1
+[ $# -eq 0 ] || shift
+case "$cmd" in
+start) start "$@" ;;
+stop) stop ;;
+devices) devices ;;
+rw) rw ;;
+ro) ro ;;
+*) echo "Usage: $0 {start DEV...|stop|devices|rw|ro}" >&2; exit 1 ;;
+esac
