@@ -1,0 +1,245 @@
+From 1e68d6bdbac0b9ccc3ca988d4b416d8d447cde9c Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Thu, 12 Nov 2026 16:48:02 +0100
+Subject: [PATCH 19/19] Handheld gamepad: its layout, Start and Back as on Windows,
+ sticks in menus
+
+SDL's game controller code numbered Back as Start (K_JOY9, the menu) and
+Start as Back (K_JOY10, the PDA): now as XInput does. Buttons past
+SDL_CONTROLLER_BUTTON_DPAD_RIGHT (misc1, paddles, touchpad of SDL 2.0.14)
+read past the remap table: they are ignored.
+
+The sticks and the triggers are keys too (JOY_STICK1_UP..., JOY_TRIGGER1/2),
+as the Windows joystick code posts them: the menus move with the left
+stick. A direction is down past half way and up again under 0.4 of it.
+In the game such keys only reach console-command bindings (usercmd
+actions take the joystick polls), as on Windows.
+
+HANDHELD_DEFAULTS: the gamepad's buttons over joy_360_0.cfg: R1 fire, L1
+reload, L2/R2 previous/next weapon, A use, B jump, X crouch, Y
+flashlight. A profile gets them once (archived cvar in_padLayout, the
+layout's version), then the player's own bindings stay.
+---
+ neo/framework/PlayerProfile.cpp | 59 ++++++++++++++++++++++++
+ neo/sys/sdl/sdl_events.cpp      | 81 ++++++++++++++++++++++++++++++++-
+ 2 files changed, 138 insertions(+), 2 deletions(-)
+
+diff --git a/neo/framework/PlayerProfile.cpp b/neo/framework/PlayerProfile.cpp
+index 892466a..8ca286c 100644
+--- a/neo/framework/PlayerProfile.cpp
++++ b/neo/framework/PlayerProfile.cpp
+@@ -116,6 +116,44 @@ idPlayerProfile::~idPlayerProfile()
+ {
+ }
+ 
++#if defined(HANDHELD_DEFAULTS)
++/*
++========================
++The handheld's gamepad (its buttons by label) over the Xbox 360 layout of
++joy_360_0.cfg: fire and reload on the shoulders, weapons on the triggers,
++A use, B jump, X crouch, Y flashlight. in_padLayout is the version of it
++the profile has: a newer one goes once over the player's own bindings,
++after that the player may change them.
++========================
++*/
++static const int HANDHELD_PAD_LAYOUT = 1;
++idCVar in_padLayout( "in_padLayout", "0", CVAR_ARCHIVE | CVAR_INTEGER | CVAR_NOCHEAT, "the version of the handheld's gamepad layout in the bindings" );
++
++static void BindHandheldPad()
++{
++	static const struct
++	{
++		int key;
++		const char* binding;
++	} binds[] =
++	{
++		{ K_JOY1,			"_use" },			// A
++		{ K_JOY2,			"_moveup" },		// B: jump
++		{ K_JOY3,			"_movedown" },		// X: crouch
++		{ K_JOY4,			"_impulse16" },		// Y: flashlight
++		{ K_JOY5,			"_impulse13" },		// L1: reload
++		{ K_JOY6,			"_attack" },		// R1
++		{ K_JOY_TRIGGER1,	"_impulse15" },		// L2: previous weapon
++		{ K_JOY_TRIGGER2,	"_impulse14" },		// R2: next weapon
++	};
++	
++	for( int i = 0; i < ( int )( sizeof( binds ) / sizeof( binds[0] ) ); i++ )
++	{
++		idKeyInput::SetBinding( binds[i].key, binds[i].binding );
++	}
++}
++#endif
++
+ /*
+ ========================
+ idPlayerProfile::Serialize
+@@ -151,10 +189,18 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
+ 	
+ 	// Archived cvars (all the menu settings for Doom3 are archived cvars)
+ 	idDict cvarDict;
++#if defined(HANDHELD_DEFAULTS)
++	int padLayout = 0;
++#endif
+ 	cvarSystem->MoveCVarsToDict( CVAR_ARCHIVE, cvarDict );
+ 	cvarDict.Serialize( ser );
+ 	if( ser.IsReading() )
+ 	{
++#if defined(HANDHELD_DEFAULTS)
++		// the layout this profile's bindings have: the cvar itself may
++		// come from D3BFGConfig.cfg, written over bindings of another load
++		padLayout = cvarDict.GetInt( "in_padLayout", 0 );
++#endif
+ 		// Never sync these cvars with Steam because they require an engine or video restart
+ 		cvarDict.Delete( "r_fullscreen" );
+ 		cvarDict.Delete( "r_vidMode" );
+@@ -201,6 +247,16 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
+ 				idKeyInput::SetBinding( i, bind.c_str() );
+ 			}
+ 		}
++#if defined(HANDHELD_DEFAULTS)
++		if( padLayout < HANDHELD_PAD_LAYOUT )
++		{
++			// once over the player's bindings, and saved with them: a
++			// profile read again before that gets it again
++			BindHandheldPad();
++			in_padLayout.SetInteger( HANDHELD_PAD_LAYOUT );
++			SaveSettings( true );
++		}
++#endif
+ 	}
+ 	else
+ 	{
+@@ -447,6 +503,9 @@ void idPlayerProfile::ExecConfig( bool save, bool forceDefault )
+ 	}
+ 	
+ 	cmdSystem->ExecuteCommandBuffer();
++#if defined(HANDHELD_DEFAULTS)
++	BindHandheldPad();
++#endif
+ 	
+ 	if( !save )
+ 	{
+diff --git a/neo/sys/sdl/sdl_events.cpp b/neo/sys/sdl/sdl_events.cpp
+index c3f1d5b..8ac1577 100644
+--- a/neo/sys/sdl/sdl_events.cpp
++++ b/neo/sys/sdl/sdl_events.cpp
+@@ -857,6 +857,67 @@ void Sys_GrabMouseCursor( bool grabIt )
+ Sys_GetEvent
+ ================
+ */
++#if SDL_VERSION_ATLEAST(2, 0, 0)
++/*
++================
++The sticks and the triggers of a game controller as keys too, as the
++Windows code posts them: the menus move with the left stick
++(JOY_STICK1_*). A stick direction is down past half way and up again
++under 0.4 of it; a trigger past half way. They wait in padKeys and
++Sys_GetEvent() returns one each call.
++================
++*/
++#define PAD_KEY_DOWN	16384
++#define PAD_KEY_UP		13107
++static sysEvent_t padKeys[32];
++static int padKeysFirst, padKeysCount;
++static bool padKeyHeld[SDL_CONTROLLER_AXIS_MAX][2];
++
++static void PadKey( int key, bool down )
++{
++	if( padKeysCount < ( int )( sizeof( padKeys ) / sizeof( padKeys[0] ) ) )
++	{
++		sysEvent_t& ev = padKeys[( padKeysFirst + padKeysCount++ ) % ( sizeof( padKeys ) / sizeof( padKeys[0] ) )];
++		ev = sysEvent_t();
++		ev.evType = SE_KEY;
++		ev.evValue = key;
++		ev.evValue2 = down ? 1 : 0;
++	}
++}
++
++static void PadAxisKeys( int axis, int value )
++{
++	// the key of the negative and of the positive end of each axis
++	static const int keys[SDL_CONTROLLER_AXIS_MAX][2] =
++	{
++		{ K_JOY_STICK1_LEFT, K_JOY_STICK1_RIGHT },
++		{ K_JOY_STICK1_UP, K_JOY_STICK1_DOWN },
++		{ K_JOY_STICK2_LEFT, K_JOY_STICK2_RIGHT },
++		{ K_JOY_STICK2_UP, K_JOY_STICK2_DOWN },
++		{ 0, K_JOY_TRIGGER1 },
++		{ 0, K_JOY_TRIGGER2 },
++	};
++	
++	if( axis < 0 || axis >= SDL_CONTROLLER_AXIS_MAX )
++	{
++		return;
++	}
++	for( int end = 0; end < 2; end++ )
++	{
++		int v = end ? value : -value;
++		bool& held = padKeyHeld[axis][end];
++		bool down = held ? v > PAD_KEY_UP : v >= PAD_KEY_DOWN;
++		
++		if( !keys[axis][end] || down == held )
++		{
++			continue;
++		}
++		held = down;
++		PadKey( keys[axis][end], down );
++	}
++}
++#endif
++
+ sysEvent_t Sys_GetEvent()
+ {
+ 	sysEvent_t res = { };
+@@ -905,6 +966,16 @@ sysEvent_t Sys_GetEvent()
+ 	// DG end
+ #endif // SDL2
+ 	
++#if SDL_VERSION_ATLEAST(2, 0, 0)
++	if( padKeysCount )
++	{
++		res = padKeys[padKeysFirst];
++		padKeysFirst = ( padKeysFirst + 1 ) % ( sizeof( padKeys ) / sizeof( padKeys[0] ) );
++		padKeysCount--;
++		return res;
++	}
++#endif
++	
+ 	static int32 uniChar = 0;
+ 	
+ 	if( uniChar )
+@@ -1274,6 +1345,7 @@ sysEvent_t Sys_GetEvent()
+ 				res.evValue2 = ev.caxis.value;
+ 				
+ 				joystick_polls.Append( joystick_poll_t( res.evValue, res.evValue2 ) );
++				PadAxisKeys( ev.caxis.axis, ev.caxis.value );
+ 				return res;
+ 				
+ 			case SDL_CONTROLLERBUTTONDOWN:
+@@ -1284,9 +1356,9 @@ sysEvent_t Sys_GetEvent()
+ 					{K_JOY2, J_ACTION2},
+ 					{K_JOY3, J_ACTION3},
+ 					{K_JOY4, J_ACTION4},
+-					{K_JOY9, J_ACTION9},
++					{K_JOY10, J_ACTION10},	// Back: as Back on Windows (PDA)
+ 					{K_JOY11, J_ACTION11},
+-					{K_JOY10, J_ACTION10},
++					{K_JOY9, J_ACTION9},	// Start: as Start on Windows (the menu)
+ 					{K_JOY7, J_ACTION7},
+ 					{K_JOY8, J_ACTION8},
+ 					{K_JOY5, J_ACTION5},
+@@ -1296,6 +1368,11 @@ sysEvent_t Sys_GetEvent()
+ 					{K_JOY_DPAD_LEFT, J_DPAD_LEFT},
+ 					{K_JOY_DPAD_RIGHT, J_DPAD_RIGHT},
+ 				};
++				// SDL 2.0.14 has more buttons (misc1, paddles, touchpad): none here
++				if( ev.cbutton.button >= sizeof( controllerButtonRemap ) / sizeof( controllerButtonRemap[0] ) )
++				{
++					continue;
++				}
+ 				joystick_polls.Append( joystick_poll_t( controllerButtonRemap[ev.cbutton.button][1], ev.cbutton.state == SDL_PRESSED ? 1 : 0 ) );
+ 				
+ 				res.evType = SE_KEY;
+-- 
+2.53.0
+
