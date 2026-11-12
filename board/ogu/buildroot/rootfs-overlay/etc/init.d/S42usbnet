@@ -45,8 +45,12 @@ stop() {
 
 case "$1" in
 start)
-	printf "Starting the network over USB: "
-	start && echo "OK ($ADDR)" || echo "FAIL"
+	# in the background: bare_app (S90) does not wait for it
+	(
+		start && msg="OK ($ADDR)" || msg=FAIL
+		echo "Network over USB: $msg" > /dev/console
+	) </dev/null >/dev/null 2>&1 &
+	echo "Starting the network over USB: in the background"
 	;;
 stop)
 	printf "Stopping the network over USB: "

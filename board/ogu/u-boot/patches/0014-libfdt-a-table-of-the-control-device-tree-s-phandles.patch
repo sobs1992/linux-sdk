@@ -1,0 +1,102 @@
+From: OdroidLinux SDK
+Subject: [PATCH] libfdt: a table of the control device tree's phandles
+
+fdt_node_offset_by_phandle() walks the whole tree for each lookup: ~1.4 ms
+on the S922X for the ~100 KiB device tree of the ODROID-GO Ultra. Driver
+model looks phandles up all the time, and a list is worse: parsing entry
+N of "resets" or "clocks" looks up the phandles of entries 0..N first.
+The VPU power controller's 11 resets took 150 ms, the whole display start
+~200 ms of lookups.
+
+After relocation the lookups in the control device tree go through a
+table made in one walk: phandle -> node offset. A hit is checked against
+the tree (the node still has that phandle); a miss, another tree (the
+kernel's copy), a phandle of 4096 or more, or a tree changed since the
+table was made go the old way, and a stale entry has the table made
+again. Before relocation nothing changes (no BSS, no malloc). The power
+controller probe: 210 ms -> 16 ms.
+
+diff --git a/lib/libfdt/fdt_ro.c b/lib/libfdt/fdt_ro.c
+index 7ede074537e..e8c99041409 100644
+--- a/lib/libfdt/fdt_ro.c
++++ b/lib/libfdt/fdt_ro.c
+@@ -1,2 +1,79 @@
+ #include <linux/libfdt_env.h>
++
++#if !defined(CONFIG_XPL_BUILD)
++/* the scan of libfdt, under another name: the cached lookup is below */
++#define fdt_node_offset_by_phandle fdt_node_offset_by_phandle_scan
++#endif
++
+ #include "../../scripts/dtc/libfdt/fdt_ro.c"
++
++#if !defined(CONFIG_XPL_BUILD)
++#undef fdt_node_offset_by_phandle
++
++#include <malloc.h>
++#include <asm/global_data.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++/*
++ * libfdt finds a phandle by walking the whole tree, ~1.4 ms on an S922X
++ * for a 100 KiB device tree, and driver model asks for phandles all the
++ * time: a "resets" list of 11 entries took 150 ms to parse (each entry
++ * looks up the phandles before it). After relocation, a table of the
++ * control device tree's phandles: one walk, then each lookup is an index.
++ * A hit is checked against the tree, and anything else (another tree, a
++ * phandle the table cannot hold, a tree changed since the table was made)
++ * walks the tree as before.
++ */
++#define PHANDLE_TABLE_SIZE	4096
++
++int fdt_node_offset_by_phandle(const void *fdt, uint32_t phandle);
++
++static const void *phandle_table_fdt;
++static int *phandle_table;	/* node offset + 1, 0 for none */
++
++static void phandle_table_make(const void *fdt)
++{
++	uint32_t phandle;
++	int offset;
++
++	phandle_table_fdt = NULL;
++	if (!phandle_table)
++		phandle_table = calloc(PHANDLE_TABLE_SIZE, sizeof(*phandle_table));
++	else
++		memset(phandle_table, 0, PHANDLE_TABLE_SIZE * sizeof(*phandle_table));
++	if (!phandle_table)
++		return;
++
++	for (offset = fdt_next_node(fdt, -1, NULL);
++	     offset >= 0;
++	     offset = fdt_next_node(fdt, offset, NULL)) {
++		phandle = fdt_get_phandle(fdt, offset);
++		if (phandle && phandle < PHANDLE_TABLE_SIZE)
++			phandle_table[phandle] = offset + 1;
++	}
++	phandle_table_fdt = fdt;
++}
++
++int fdt_node_offset_by_phandle(const void *fdt, uint32_t phandle)
++{
++	int offset;
++
++	if (!(gd->flags & GD_FLG_RELOC) || fdt != gd->fdt_blob ||
++	    phandle == 0 || phandle >= PHANDLE_TABLE_SIZE)
++		return fdt_node_offset_by_phandle_scan(fdt, phandle);
++
++	if (phandle_table_fdt != fdt)
++		phandle_table_make(fdt);
++	if (phandle_table_fdt == fdt) {
++		offset = phandle_table[phandle] - 1;
++		if (offset >= 0 && fdt_get_phandle(fdt, offset) == phandle)
++			return offset;
++		/* changed since: make the table again next time */
++		if (offset >= 0)
++			phandle_table_fdt = NULL;
++	}
++
++	return fdt_node_offset_by_phandle_scan(fdt, phandle);
++}
++#endif

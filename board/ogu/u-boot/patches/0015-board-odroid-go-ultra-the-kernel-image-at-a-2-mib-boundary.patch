@@ -1,0 +1,25 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: the kernel Image at a 2 MiB boundary
+
+meson64's kernel_addr_r is 0x08080000; booti runs an Image at a 2 MiB
+boundary and moved it there first (memmove of the whole Image, 0.2 s for
+the 42 MiB arm64 defconfig kernel). Load it at 0x08200000 instead,
+unless the environment was changed.
+
+diff --git a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+index a5b46f2ea09..03269e3ef07 100644
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -243,6 +243,12 @@ int meson_board_late_init(void)
+ {
+ 	ogu_charge_wait();
+ 	ogu_ums_key();
++	/*
++	 * The kernel Image where booti runs it: at meson64's 0x08080000
++	 * booti first moves it to the next 2 MiB boundary (tens of MiB).
++	 */
++	if (!strcmp(env_get("kernel_addr_r") ?: "", "0x08080000"))
++		env_set("kernel_addr_r", "0x08200000");
+ 	return 0;
+ }
+ 

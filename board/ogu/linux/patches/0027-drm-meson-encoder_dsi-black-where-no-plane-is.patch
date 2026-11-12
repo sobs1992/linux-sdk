@@ -1,0 +1,27 @@
+From: OdroidLinux SDK
+Subject: [PATCH] drm/meson: encoder_dsi: black where no plane is
+
+Where no plane covers the screen the VPP sends its post-blend dummy
+colour, VPP_POST_BLEND_BLEND_DUMMY_DATA. Nothing sets it on G12A: its
+reset value 0x008080 is black in YUV, and with the POST2 YUV->RGB matrix
+off for the panel (patch 0005) it reaches the ODROID-GO Ultra's panel as
+RGB (0, 128, 128), turquoise. It shows after a modeset until the first
+plane update: at boot, the panel kept from U-Boot (patch 0026) flashed
+turquoise as the backlight came on. Set it to RGB black with the rest of
+the DSI output.
+
+--- a/drivers/gpu/drm/meson/meson_encoder_dsi.c
++++ b/drivers/gpu/drm/meson/meson_encoder_dsi.c
+@@ -81,6 +81,12 @@
+ 	 * screen), which turns the RGB output into wrong colors.
+ 	 */
+ 	writel_bits_relaxed(BIT(0), 0, priv->io_base + _REG(VPP_POST2_MATRIX_EN_CTRL));
++	/*
++	 * What the VPP sends where no plane is: its reset value 0x008080 is
++	 * black in YUV, without POST2 it reaches the panel as RGB turquoise
++	 * (until the first plane update, after every modeset). Black in RGB.
++	 */
++	writel_relaxed(0, priv->io_base + _REG(VPP_POST_BLEND_BLEND_DUMMY_DATA));
+ 
+ 	writel_relaxed(1, priv->io_base + _REG(ENCL_VIDEO_EN));
+ }

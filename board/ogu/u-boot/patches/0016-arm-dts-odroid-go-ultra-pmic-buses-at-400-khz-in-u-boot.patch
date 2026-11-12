@@ -1,0 +1,28 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm: dts: odroid-go-ultra: PMIC buses at 400 kHz in U-Boot
+
+U-Boot probes the RK817's and RK818's regulators register by register
+before the display and the storage; at the default 100 kHz that was
+~140 ms. Both PMICs take fast mode (400 kHz). Linux keeps its own setting.
+
+diff --git a/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi b/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
+index 1a06c5ca678..4cdf70cd3b8 100644
+--- a/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
++++ b/arch/arm/dts/meson-g12b-odroid-go-ultra-u-boot.dtsi
+@@ -85,3 +85,16 @@
+ 	pinctrl-0 = <&pwm_f_h_pins>;
+ 	pinctrl-names = "default";
+ };
++
++/*
++ * The two PMICs at 400 kHz instead of the default 100 kHz (RK817 and
++ * RK818: fast mode): U-Boot probes their regulators one register at a
++ * time before the display and the storage.
++ */
++&i2c_AO {
++	clock-frequency = <400000>;
++};
++
++&i2c3 {
++	clock-frequency = <400000>;
++};

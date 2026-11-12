@@ -33,7 +33,7 @@ log() { echo "games: $*" >&2; logger -t games "$*" 2>/dev/null; }
 
 # join DST REL SRC...: the entries of REL in each SRC as links in DST
 join() {
-	local dst=$1 rel=$2 d e p n k s seen
+	local dst=$1 rel=$2 d e p n k s seen links=
 	shift 2
 	for d; do
 		for p in "$d$rel"/* "$d$rel"/.[!.]*; do
@@ -58,10 +58,15 @@ join() {
 			if [ $k -gt 1 ]; then
 				mkdir -m 755 "$dst/$n" && join "$dst/$n" "$rel/$n" "$@"
 			else
-				ln -s "$p" "$dst/$n"
+				links="$links$p
+"
 			fi
 		done
 	done
+	# the links of DST with one ln (FAT names have no newlines): an ln
+	# each was most of the time at boot
+	[ -z "$links" ] ||
+		printf %s "$links" | tr '\n' '\0' | xargs -0 sh -c 'ln -s "$@" "$0"' "$dst"
 }
 
 # /games of the partitions in $STATE: the only one, or the tmpfs of links

@@ -1,0 +1,94 @@
+From: OdroidLinux SDK
+Subject: [PATCH] video: st7701: shorter waits around the reset
+
+The power-up of Linux's st7701_prepare() waited 120 ms after turning the
+supplies on and 150 ms after the reset, 270 ms of the ~0.9 s it took to
+light the GO Ultra's panel. vcc_lcd is always on (the PMIC turns it on
+at power-on): when the supplies were already on, 10 ms in reset do. After
+the reset the panel takes commands 5 ms later from Sleep In, 120 ms later
+from Sleep Out (ST7701S datasheet, tRT): 120 ms, but counted from the
+release in probe, so the DSI host's setup before the first command
+(~60 ms) is part of it. The waits of the init sequence stay.
+
+diff --git a/drivers/video/sitronix-st7701.c b/drivers/video/sitronix-st7701.c
+index 5be135f25cc..e1ca435ce82 100644
+--- a/drivers/video/sitronix-st7701.c
++++ b/drivers/video/sitronix-st7701.c
+@@ -11,6 +11,7 @@
+ 
+ #include <backlight.h>
+ #include <dm.h>
++#include <time.h>
+ #include <log.h>
+ #include <mipi_display.h>
+ #include <mipi_dsi.h>
+@@ -33,8 +34,17 @@ struct st7701_priv {
+ 	struct udevice *iovcc;
+ 	struct udevice *backlight;
+ 	struct gpio_desc reset;
++	ulong reset_released;	/* timer_get_us() */
+ };
+ 
++/*
++ * After the reset the panel takes commands 5 ms later if it was in Sleep
++ * In, 120 ms if it was in Sleep Out (ST7701S datasheet, tRT): 120 ms, as
++ * before, but counted from the release in probe, so the DSI host's setup
++ * between probe and the first command (~60 ms) is part of it.
++ */
++#define ST7701_RESET_MS		120
++
+ #define st7701_write(dsi, cmd, seq...) do {				\
+ 		static const u8 d[] = { seq };				\
+ 		int ret;						\
+@@ -133,6 +143,9 @@ static int st7701_enable_backlight(struct udevice *dev)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	while (timer_get_us() - priv->reset_released < ST7701_RESET_MS * 1000)
++		udelay(100);
++
+ 	ret = priv->desc->init(dsi);
+ 	if (ret < 0) {
+ 		dev_err(dev, "init sequence failed (%d)\n", ret);
+@@ -231,15 +244,27 @@ static int st7701_supply_on(struct udevice *reg)
+ 	return 0;
+ }
+ 
+-/* Power up and reset, as Linux st7701_prepare() */
++static bool st7701_supply_is_on(struct udevice *reg)
++{
++	return !reg || regulator_get_enable(reg) > 0;
++}
++
++/*
++ * Power up and reset, as Linux st7701_prepare(). Its 120 ms between the
++ * supplies and the reset are for supplies that were off: vcc_lcd is
++ * always on, the PMIC turns it on at power-on.
++ */
+ static int st7701_probe(struct udevice *dev)
+ {
+ 	struct mipi_dsi_panel_plat *plat = dev_get_plat(dev);
+ 	struct st7701_priv *priv = dev_get_priv(dev);
++	bool settled;
+ 	int ret;
+ 
+ 	dm_gpio_set_value(&priv->reset, 0);
+ 
++	settled = st7701_supply_is_on(priv->vcc) &&
++		  st7701_supply_is_on(priv->iovcc);
+ 	ret = st7701_supply_on(priv->vcc);
+ 	if (!ret && priv->iovcc != priv->vcc)
+ 		ret = st7701_supply_on(priv->iovcc);
+@@ -247,10 +272,10 @@ static int st7701_probe(struct udevice *dev)
+ 		dev_err(dev, "supply: %d\n", ret);
+ 		return ret;
+ 	}
+-	mdelay(120);
++	mdelay(settled ? 10 : 120);
+ 
+ 	dm_gpio_set_value(&priv->reset, 1);
+-	mdelay(150);
++	priv->reset_released = timer_get_us();
+ 
+ 	plat->lanes = priv->desc->lanes;
+ 	plat->format = priv->desc->format;

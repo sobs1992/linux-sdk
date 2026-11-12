@@ -1,0 +1,122 @@
+From: OdroidLinux SDK
+Subject: [PATCH] drm/panel: st7701: keep the ODROID-GO Ultra panel the bootloader lit
+
+Mainline U-Boot lights the GO Ultra's panel (SDK U-Boot patches
+0003-0010) with the same command sequence as this driver. Linux then put
+the panel back into reset at probe (reset GPIO requested low) and went
+through the whole sequence again in prepare: 120 + 150 ms around the
+reset, a software reset and sleep-out with 5 + 240 ms in
+st7701_init_sequence(), then the GO Ultra sequence with its own software
+reset, sleep-out and 5 + 120 + 120 + 50 ms. ~0.8 s, during the first
+modeset of the fbdev client, while the kernel waits for the probes before
+it mounts the root file system: the whole boot waits for it.
+
+A panel the bootloader lit has its reset line driven high, as an output
+(after a SoC reset the pad is an input). Probe now takes the line as it
+is and, if so, keeps it high; the first prepare only takes the supplies.
+Later prepares (after an unprepare: suspend, display off) do it all as
+before. While the VPU and the DSI host are set up again (until the first
+modeset) the kept panel shows garbage: probe turns the backlight off, and
+the first enable waits a frame before drm_panel_enable() turns it on. Only for the GO Ultra's sequence: it starts with a software reset,
+so the panel ends up in the same state whoever sent it.
+
+--- a/drivers/gpu/drm/panel/panel-sitronix-st7701.c
++++ b/drivers/gpu/drm/panel/panel-sitronix-st7701.c
+@@ -9,6 +9,7 @@
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+ 
++#include <linux/backlight.h>
+ #include <linux/bitfield.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/delay.h>
+@@ -138,6 +139,10 @@
+ 	struct regulator_bulk_data supplies[2];
+ 	struct gpio_desc *reset;
+ 	unsigned int sleep_delay;
++	/* lit by the bootloader: the first prepare finds it running */
++	bool handover;
++	/* the first enable after it: a frame before the backlight */
++	bool handover_enable;
+ 	enum drm_panel_orientation orientation;
+ 
+ 	int (*write_command)(struct st7701 *st7701, u8 cmd, const u8 *seq,
+@@ -607,6 +612,19 @@
+ 	struct st7701 *st7701 = panel_to_st7701(panel);
+ 	int ret;
+ 
++	if (st7701->handover) {
++		/*
++		 * Left on and initialised by the bootloader: take the
++		 * supplies as they are, without the reset and the ~0.8 s of
++		 * waits of the sequence below. Later prepares (after an
++		 * unprepare) do it all.
++		 */
++		st7701->handover = false;
++		st7701->handover_enable = true;
++		return regulator_bulk_enable(ARRAY_SIZE(st7701->supplies),
++					     st7701->supplies);
++	}
++
+ 	gpiod_set_value(st7701->reset, 0);
+ 
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(st7701->supplies),
+@@ -635,6 +653,12 @@
+ 
+ 	ST7701_WRITE(st7701, MIPI_DCS_SET_DISPLAY_ON, 0x00);
+ 
++	/* after the handover: the backlight (next) once a frame is in */
++	if (st7701->handover_enable) {
++		st7701->handover_enable = false;
++		msleep(20);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1449,11 +1473,29 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	st7701->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	st7701->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+ 	if (IS_ERR(st7701->reset)) {
+ 		dev_err(dev, "Couldn't get our reset GPIO\n");
+ 		return PTR_ERR(st7701->reset);
+ 	}
++	/*
++	 * A panel the bootloader has lit has its reset line driven high (an
++	 * output: after a SoC reset the pad is an input) and its supplies
++	 * on: it is kept as it is. Only for the ODROID-GO Ultra's sequence:
++	 * it starts with a software reset, so the panel ends up the same
++	 * whoever sent it (mainline U-Boot sends the same one). Otherwise it
++	 * is held in reset until prepare, as before.
++	 */
++	st7701->handover = desc->gip_sequence == go_ultra_gip_sequence &&
++			   gpiod_get_direction(st7701->reset) == GPIO_LINE_DIRECTION_OUT &&
++			   gpiod_get_value_cansleep(st7701->reset) == 1 &&
++			   regulator_is_enabled(st7701->supplies[0].consumer) > 0 &&
++			   regulator_is_enabled(st7701->supplies[1].consumer) > 0;
++	ret = gpiod_direction_output(st7701->reset, st7701->handover);
++	if (ret)
++		return dev_err_probe(dev, ret, "Couldn't set our reset GPIO\n");
++	if (st7701->handover)
++		dev_info(dev, "lit by the bootloader, kept\n");
+ 
+ 	ret = of_drm_get_panel_orientation(dev->of_node, &st7701->orientation);
+ 	if (ret < 0)
+@@ -1476,6 +1518,14 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * A panel kept lit from the bootloader shows garbage while the VPU
++	 * and the DSI host are set up again (until the first modeset): dark
++	 * until then, drm_panel_enable() turns the backlight on.
++	 */
++	if (st7701->handover)
++		backlight_disable(st7701->panel.backlight);
++
+ 	drm_panel_add(&st7701->panel);
+ 
+ 	dev_set_drvdata(dev, st7701);

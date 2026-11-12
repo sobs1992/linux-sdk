@@ -1,0 +1,74 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm: meson: caches on from U-Boot's start
+
+BL31 enters U-Boot (BL33) with the MMU and both caches off, and U-Boot
+turns them on only after relocation: until then every instruction fetch,
+load and store goes to DRAM. On the ODROID-GO Ultra (S922X) that was
+~1.7 s between U-Boot's start and the board info, more than the whole
+rest of U-Boot without the boot delay.
+
+arch_cpu_init() now turns both caches on, with page tables of their own
+16 MiB below the early stack, DRAM nothing uses before relocation. The
+relocation flushes what it copied (relocate_code() does it when the data
+cache is on); enable_caches() after it turns the data cache off, writes
+it back, and on again with the tables reserved at the top of RAM, as
+before. From start to board info: 1.69 s -> 0.18 s.
+
+A U-Boot chainloaded by one that left its MMU on (no "dcache off" before
+"go") would build on the first one's page tables, in RAM it is about to
+overwrite: the data cache goes off first.
+
+diff --git a/arch/arm/mach-meson/board-common.c b/arch/arm/mach-meson/board-common.c
+index c34b81e5e78..a34a0a0460a 100644
+--- a/arch/arm/mach-meson/board-common.c
++++ b/arch/arm/mach-meson/board-common.c
+@@ -6,6 +6,8 @@
+ #include <cpu_func.h>
+ #include <fastboot.h>
+ #include <init.h>
++#include <system-constants.h>
++#include <linux/sizes.h>
+ #include <net.h>
+ #include <asm/arch/boot.h>
+ #include <env.h>
+@@ -31,6 +33,40 @@ __weak int board_init(void)
+ }
+ 
+ #ifndef CONFIG_SPL_BUILD
++/*
++ * BL31 enters U-Boot (BL33) with the MMU and both caches off, and U-Boot
++ * turns the caches on only after relocation: until then every instruction
++ * and every load and store goes to DRAM, ~1.7 s on the S922X between
++ * U-Boot's start and the board info. Turn them on at once, with page
++ * tables of their own below the early stack (DRAM that nothing uses
++ * before relocation). The relocation flushes what it copied; after it,
++ * enable_caches() moves to the tables reserved at the top of RAM.
++ */
++#define EARLY_TLB_ADDR	(SYS_INIT_SP_ADDR - SZ_16M)
++
++int arch_cpu_init(void)
++{
++	/*
++	 * Chainloaded by a U-Boot that left its MMU on (no "dcache off"):
++	 * its page tables are in the RAM this one relocates to. Off first.
++	 */
++	dcache_disable();
++	gd->arch.tlb_addr = EARLY_TLB_ADDR;
++	gd->arch.tlb_size = PGTABLE_SIZE;
++	icache_enable();
++	dcache_enable();
++	return 0;
++}
++
++void enable_caches(void)
++{
++	/* off, written back, and on again with the reserved tables */
++	dcache_disable();
++	gd->arch.tlb_fillptr = 0;
++	icache_enable();
++	dcache_enable();
++}
++
+ int dram_init(void)
+ {
+ 	const fdt64_t *val;

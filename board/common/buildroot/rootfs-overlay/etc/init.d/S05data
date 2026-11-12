@@ -61,13 +61,15 @@ add_part() {
 	wait_node "$(part_name "$disk" "$1")"
 }
 
-# the file system on partition $1 is of type $2 and labelled $3
+# the file system on partition $1 is of type $2 and labelled $3 (one
+# probe for both: each costs tens of ms on a card)
 is_fs() {
-	[ "$(blkid -p -o value -s TYPE "/dev/$1" 2>/dev/null)" = "$2" ] &&
-		[ "$(blkid -p -o value -s LABEL "/dev/$1" 2>/dev/null)" = "$3" ]
+	fs=$(blkid -p -o export "/dev/$1" 2>/dev/null) || return 1
+	echo "$fs" | grep -qxF "TYPE=$2" && echo "$fs" | grep -qxF "LABEL=$3"
 }
 
 data() {
+	new=
 	if [ ! -e "/sys/class/block/$p3" ]; then
 		if [ "$(part_end "$p2")" -gt "$data_start" ]; then
 			log "rootfs ends at sector $(part_end "$p2"), past the data start $data_start"
@@ -78,12 +80,14 @@ data() {
 			log "no room for a data partition on $disk"
 			return 1
 		fi
+		new=1
 		add_part 3 "$data_start" "$data_size" 83 || return 1
 	elif ! is_fs "$p3" ext4 data; then
 		log "$p3 is not an ext4 \"data\" file system, leaving it alone"
 		return 1
 	fi
-	if ! is_fs "$p3" ext4 data; then
+	# only a new partition can still be empty (the check above passed)
+	if [ -n "$new" ] && ! is_fs "$p3" ext4 data; then
 		log "formatting $p3"
 		mke2fs -q -t ext4 -L data "/dev/$p3" || return 1
 	fi
@@ -94,6 +98,7 @@ data() {
 }
 
 games() {
+	new=
 	if [ ! -e "/sys/class/block/$p4" ]; then
 		if [ "$(part_end "$p3")" -gt "$games_start" ]; then
 			log "$p3 ends at sector $(part_end "$p3"), past the games start $games_start"
@@ -103,12 +108,14 @@ games() {
 			log "no room for a games partition on $disk"
 			return 1
 		fi
+		new=1
 		add_part 4 "$games_start" "" c || return 1
 	elif ! is_fs "$p4" vfat GAMES; then
 		log "$p4 is not a FAT \"GAMES\" file system, leaving it alone"
 		return 1
 	fi
-	if ! is_fs "$p4" vfat GAMES; then
+	# only a new partition can still be empty (the check above passed)
+	if [ -n "$new" ] && ! is_fs "$p4" vfat GAMES; then
 		log "formatting $p4"
 		mkdosfs -n GAMES "/dev/$p4" > /dev/null || return 1
 	fi

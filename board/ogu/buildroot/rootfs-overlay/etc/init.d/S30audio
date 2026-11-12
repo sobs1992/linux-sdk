@@ -2,9 +2,16 @@
 # ODROID-GO Ultra: set the DPCM route of the meson axg sound card, without
 # which every playback fails with EINVAL (/etc/asound-route.state). Only
 # those controls: -I keeps alsactl from initialising the others.
+# First the end of the module coldplug of S03mdev (in the background):
+# with it the sound card and the power key are there for bare_app.
 
 case "$1" in
 start)
+	i=0
+	while [ ! -e /run/coldplug.done ] && [ $i -lt 100 ]; do
+		sleep 0.05
+		i=$((i + 1))
+	done
 	i=0
 	while [ ! -e /dev/snd/controlC0 ] && [ $i -lt 50 ]; do
 		sleep 0.1
