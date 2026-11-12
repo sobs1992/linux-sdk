@@ -1,0 +1,27 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] arm64: dts: rockchip: odroid-go: the RK817 restarts the
+ board
+
+A reboot only reset the SoC: the RK817 kept the SD card powered and its
+signals at 1.8 V (UHS SDR104), so the factory SPI loader of the GO Advance
+Black Edition timed out on the card (mmc_init: -110) and the board hung
+until the power key was held. With system-power-controller the rk8xx
+driver restarts through the PMIC (SYS_CFG3 DEV_RST, RST_FUNC = whole
+device), which powers every rail down and up again, and powers off
+through it too.
+---
+ arch/arm64/boot/dts/rockchip/rk3326-odroid-go.dtsi | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/boot/dts/rockchip/rk3326-odroid-go.dtsi b/arch/arm64/boot/dts/rockchip/rk3326-odroid-go.dtsi
+index bf4554eff47d..1350037a34fb 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3326-odroid-go.dtsi
++++ b/arch/arm64/boot/dts/rockchip/rk3326-odroid-go.dtsi
+@@ -274,6 +274,7 @@ rk817: pmic@20 {
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&pmic_int>, <&i2s1_2ch_mclk>;
+ 		wakeup-source;
++		system-power-controller;
+ 		#clock-cells = <1>;
+ 		#sound-dai-cells = <0>;
+ 
