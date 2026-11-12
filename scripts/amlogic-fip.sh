@@ -12,7 +12,14 @@
 # aml_encrypt_g12b is an x86-64 Linux binary; on other hosts it runs under
 # qemu-x86_64 (QEMU_LD_PREFIX).
 #
-# Usage: amlogic-fip.sh <blob dir> <u-boot.bin> <out dir>
+# AML_DDR_FREQ=<MT/s> (optional): acs.bin holds two DDR configurations that
+# BL2 tries in turn, the next one when a configuration fails its training
+# or its data or address bus test. The first becomes a copy of the second
+# at this data rate, the second stays as it is: BL2 falls back to the
+# blob's own rate whenever the slower one does not work. For boards whose
+# first configuration never trains (the ODROID-GO Ultra's is for two ranks).
+#
+# Usage: [AML_DDR_FREQ=<MT/s>] amlogic-fip.sh <blob dir> <u-boot.bin> <out dir>
 set -euo pipefail
 
 BLOBS=$(readlink -f "$1") BL33=$(readlink -f "$2") OUT=$(readlink -f "$3")
@@ -45,8 +52,25 @@ pad2() {
 	  cat "$b"; head -c $(( b_lim - $(stat -c %s "$b") )) /dev/zero; } > "$out"
 }
 
+ACS=$BLOBS/acs.bin
+if [ -n "${AML_DDR_FREQ:-}" ]; then
+	# ddr_set_t (Amlogic's arch-g12b/timing.h, 0x270 bytes, magic "cfg.")
+	# at 0x10 and 0x280; DRAMFreq[0] at 52 in it
+	ACS=$TMP/acs.bin
+	python3 - "$BLOBS/acs.bin" "$ACS" "$AML_DDR_FREQ" <<'PY' || die "acs.bin: cannot set the DDR rate"
+import struct, sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+first, second, size = 0x10, 0x280, 0x270
+assert d[first:first + 4] == b'cfg.' and d[second:second + 4] == b'cfg.', 'no ddr_set_t at 0x10 and 0x280'
+d[first:first + size] = d[second:second + size]
+struct.pack_into('<H', d, first + 52, int(sys.argv[3]))
+open(sys.argv[2], 'wb').write(d)
+PY
+	echo "acs.bin: DDR at $AML_DDR_FREQ MT/s first, then $(python3 -c "import struct,sys; print(struct.unpack_from('<H', open(sys.argv[1],'rb').read(), 0x280 + 52)[0])" "$BLOBS/acs.bin") MT/s"
+fi
+
 pad2 "$BLOBS/bl30.bin" 40960 "$BLOBS/bl301.bin" 13312 "$TMP/bl30_new.bin"
-pad2 "$BLOBS/bl2.bin" 57344 "$BLOBS/acs.bin" 4096 "$TMP/bl2_new.bin"
+pad2 "$BLOBS/bl2.bin" 57344 "$ACS" 4096 "$TMP/bl2_new.bin"
 
 enc --bl30sig --input "$TMP/bl30_new.bin" --output "$TMP/bl30_new.bin.g12a.enc" --level v3
 enc --bl3sig --input "$TMP/bl30_new.bin.g12a.enc" --output "$TMP/bl30_new.bin.enc" --level v3 --type bl30

@@ -216,7 +216,7 @@ endif
 ifneq ($(strip $(AML_FIP_FILES)),)
 	$(SDK_DIR)/scripts/fetch-files.sh $(AML_FIP_URL) $(DL_DIR)/$(AML_FIP_NAME) \
 		$(call sdkpath,$(AML_FIP_HASH)) $(AML_FIP_BLOBS) $(AML_FIP_FILES)
-	$(SDK_DIR)/scripts/amlogic-fip.sh $(AML_FIP_BLOBS) $(UBOOT_OUT)/u-boot.bin $(IMAGES_DIR)
+	AML_DDR_FREQ=$(AML_DDR_FREQ) $(SDK_DIR)/scripts/amlogic-fip.sh $(AML_FIP_BLOBS) $(UBOOT_OUT)/u-boot.bin $(IMAGES_DIR)
 endif
 
 uboot-configure: check-cc $(UBOOT_OUT)/.config

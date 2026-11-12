@@ -1,0 +1,38 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: GPU up to 666 MHz
+
+In DOOM 3 BFG's soak test (doom3-test.py soak) with a memory checker
+running beside it on the A73 cores, this board reads bit 42 of a 64-bit
+word wrong in bursts on several cores at once: the line in the CPU cache
+holds the wrong value, the DRAM the right one (memcheck reads it again
+after "dc civac"). It happens in the first minutes of the soak, while the
+Mali-G52 still runs at 800 MHz; later the ddr-thermal trip at 85 C holds
+the GPU lower and the errors stop. GPU faults (DATA_INVALID, bad page
+map), half a frozen screen and crashes in the game come with them.
+
+Soaks with the GPU's top at 800 MHz: 4 out of 4 with errors (8, 3, 6 and
+5 words); with the top at 666 MHz: 0 out of 5, from hot and cool
+starts (342136 checker passes in the last). Frame rates stay as they
+were: the game's dynamic resolution makes up for it. Turn off the
+800 MHz operating point, 17 % of the GPU's clock.
+
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -709,6 +709,17 @@
+ 	status = "okay";
+ };
+ 
++&gpu_opp_table {
++	/*
++	 * Under DOOM 3 at 800 MHz this board reads bit 42 of a 64-bit word
++	 * wrong now and then (the cache line wrong, the DRAM right): the GPU
++	 * stops at 666 MHz.
++	 */
++	opp-799999987 {
++		status = "disabled";
++	};
++};
++
+ &mipi_analog_dphy {
+ 	status = "okay";
+ };
