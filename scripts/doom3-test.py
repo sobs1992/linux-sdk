@@ -185,17 +185,24 @@ def mark():
 
 KERNEL = [("gpu_faults", re.compile(r"js fault|Page fault|AS_ACTIVE")),
           ("gpu_timeouts", re.compile(r"sched timeout|job timeout|gpu sched")),
-          ("kernel_errors", re.compile(r"BUG:|Oops|Unable to handle|bad page map|Call trace|WARNING: CPU")),
-          ("oom", re.compile(r"Out of memory|oom-kill")),
+          ("oom", re.compile(r"Out of memory|oom-kill|invoked oom-killer")),
+          ("kernel_errors", re.compile(r"BUG:|Oops|Unable to handle|bad page map|Call trace|WARNING: CPU|WARNING: \S+:\d+ at")),
           ("purges", re.compile(r"Purging"))]
 
 
 def kernel_since(m):
     """Kernel messages after the mark, sorted by kind"""
     found = {k: [] for k, _ in KERNEL}
+    in_oom = False	# an OOM report's stack dump is the OOM's, not a kernel error
     for line in sh("dmesg | grep -v rk818", timeout=30).splitlines():
         t = re.match(r"\[\s*([0-9.]+)\]", line)
         if not t or float(t.group(1)) <= m["dmesg"]:
+            continue
+        if "invoked oom-killer" in line:
+            in_oom = True
+        elif in_oom and re.search(r"Out of memory|oom-kill", line):
+            in_oom = False
+        elif in_oom:
             continue
         for kind, rx in KERNEL:
             if rx.search(line):

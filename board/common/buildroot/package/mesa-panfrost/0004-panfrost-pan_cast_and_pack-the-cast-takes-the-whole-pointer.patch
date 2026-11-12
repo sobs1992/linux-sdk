@@ -1,0 +1,35 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] panfrost: pan_cast_and_pack: the cast takes the whole pointer
+
+pan_cast_and_pack(dst, T, name) cast "dst" without parentheses, so for
+an expression the cast took only its first operand. The framebuffer
+preload's padding descriptor (Bifrost: an empty ATTRIBUTE_BUFFER marks
+the end of prefetching),
+
+   pan_cast_and_pack(varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER), ...)
+
+became (struct mali_attribute_buffer_packed *)varying_buffer.cpu + 16:
+16 descriptors on, 256 bytes instead of 16, 240 bytes past the end of
+the 32-byte allocation. Every preload of a framebuffer (a batch that
+draws over what an earlier one left) wrote {type 1D, pointer 0} there:
+over another descriptor of the pool (GPU job faults, DATA_INVALID and
+reads at VA 0xc0, 0x1c0, 0x2c0: a null pointer plus an offset), and
+with the allocation at the end of the pool's BO, past it (a crash in
+pan_preload_emit_pre_frame_dcd from glCopyTexImage2D's blit, DOOM 3 BFG
+with its 3D view resized). Parenthesize the argument.
+
+--- a/src/panfrost/lib/genxml/pan_pack_helpers.h
++++ b/src/panfrost/lib/genxml/pan_pack_helpers.h
+@@ -98,10 +98,10 @@
+         }))
+ 
+ #define pan_cast_and_pack(dst, T, name)                                        \
+-   pan_pack((PREFIX2(T, PACKED_T) *)dst, T, name)
++   pan_pack((PREFIX2(T, PACKED_T) *)(dst), T, name)
+ 
+ #define pan_cast_and_pack_nodefaults(dst, T, name)                             \
+-   pan_pack_nodefaults((PREFIX2(T, PACKED_T) *)dst, T, name)
++   pan_pack_nodefaults((PREFIX2(T, PACKED_T) *)(dst), T, name)
+ 
+ #define pan_unpack(src, T, name)                                               \
+    UNUSED struct PREFIX1(T) name;                                              \

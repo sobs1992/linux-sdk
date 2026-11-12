@@ -1,0 +1,91 @@
+From: Sobs <antohasobne@gmail.com>
+Date: Thu, 12 Nov 2026 12:00:00 +0100
+Subject: [PATCH 18/18] Two leaks on every map load: Bink bundles and map
+ resource files
+
+A Bink decoder allocates its symbol bundles in Open (InitBundles: nine
+buffers of 64 bytes a block, 576 KB for a 256x256 video) and nothing
+freed them: FreeBundles was never called. Materials with videos (the
+screens of the levels) open their decoders again on every map load, so
+each load lost several MB of them (DOOM 3 BFG on a 2 GB handheld: 12 MB
+a load of alphalabs1, until the OOM killer ended the game). The
+destructor frees them now.
+
+AddResourceFile looked for a map's resource file by its bare name
+(alphalabs1.resources) among containers that keep the name they were
+opened by (maps/alphalabs1.resources): never found, so loading a map
+again opened its resource file again, a new container every time (its
+table, 0.7 MB for alphalabs1, and an open file; the container index is a
+uint8). It looks by the full name now, and frees a container that fails
+to open.
+
+---
+diff --git a/neo/framework/FileSystem.cpp b/neo/framework/FileSystem.cpp
+index 20c7d7d..1a2f315 100644
+--- a/neo/framework/FileSystem.cpp
++++ b/neo/framework/FileSystem.cpp
+@@ -2858,15 +2858,18 @@ idFileSystemLocal::AddResourceFile
+ */
+ int idFileSystemLocal::AddResourceFile( const char* resourceFileName )
+ {
++	idStrStatic< MAX_OSPATH > resourceFile = va( "maps/%s", resourceFileName );
++
+ 	// RB: check if it was already added
+-	int idx = FindResourceFile( resourceFileName );
++	// (by the name it was opened by, maps/ included: without it, a map loaded
++	// again opened its resource file again, a new container every time)
++	int idx = FindResourceFile( resourceFile );
+ 	if( idx != -1 )
+ 	{
+ 		return idx;
+ 	}
+ 	// RB end
+ 	
+-	idStrStatic< MAX_OSPATH > resourceFile = va( "maps/%s", resourceFileName );
+ 	idResourceContainer* rc = new idResourceContainer();
+ 	if( rc->Init( resourceFile, resourceFiles.Num() ) )
+ 	{
+@@ -2874,6 +2877,7 @@ int idFileSystemLocal::AddResourceFile( const char* resourceFileName )
+ 		common->Printf( "Loaded resource file %s\n", resourceFile.c_str() );
+ 		return resourceFiles.Num() - 1;
+ 	}
++	delete rc;
+ 	return -1;
+ }
+ 
+diff --git a/neo/libs/libbinkdec/src/BinkDecoder.cpp b/neo/libs/libbinkdec/src/BinkDecoder.cpp
+index 521a8ea..963a179 100644
+--- a/neo/libs/libbinkdec/src/BinkDecoder.cpp
++++ b/neo/libs/libbinkdec/src/BinkDecoder.cpp
+@@ -164,10 +164,16 @@ BinkDecoder::BinkDecoder()
+ {
+ 	nFrames = 0;
+ 	currentFrame = 0;
++
++	// allocated by Open (InitBundles), freed by the destructor
++	for (int i = 0; i < BINK_NB_SRC; i++)
++		bundle[i].data = NULL;
+ }
+ 
+ BinkDecoder::~BinkDecoder()
+ {
++	FreeBundles();
++
+ 	for (uint32_t i = 0; i < planes.size(); i++)
+ 	{
+ 		delete[] planes[i].current;
+diff --git a/neo/libs/libbinkdec/src/BinkVideo.cpp b/neo/libs/libbinkdec/src/BinkVideo.cpp
+index 976b918..b8128fa 100644
+--- a/neo/libs/libbinkdec/src/BinkVideo.cpp
++++ b/neo/libs/libbinkdec/src/BinkVideo.cpp
+@@ -105,7 +105,10 @@ void BinkDecoder::InitBundles()
+ void BinkDecoder::FreeBundles()
+ {
+ 	for (int i = 0; i < BINK_NB_SRC; i++)
++	{
+ 		delete[] bundle[i].data;
++		bundle[i].data = NULL;
++	}
+ }
+ 
+ uint8_t BinkDecoder::GetHuffSymbol(BinkCommon::BitReader &bits, Tree &tree)
