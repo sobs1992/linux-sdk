@@ -1,4 +1,4 @@
-From 1e68d6bdbac0b9ccc3ca988d4b416d8d447cde9c Mon Sep 17 00:00:00 2001
+From 175eb3a0fb76a7f6f58739d813b7299d84a78c83 Mon Sep 17 00:00:00 2001
 From: Sobs <antohasobne@gmail.com>
 Date: Thu, 12 Nov 2026 16:48:02 +0100
 Subject: [PATCH 19/19] Handheld gamepad: its layout, Start and Back as on Windows,
@@ -20,15 +20,15 @@ reload, L2/R2 previous/next weapon, A use, B jump, X crouch, Y
 flashlight. A profile gets them once (archived cvar in_padLayout, the
 layout's version), then the player's own bindings stay.
 ---
- neo/framework/PlayerProfile.cpp | 59 ++++++++++++++++++++++++
+ neo/framework/PlayerProfile.cpp | 69 ++++++++++++++++++++++++++++
  neo/sys/sdl/sdl_events.cpp      | 81 ++++++++++++++++++++++++++++++++-
- 2 files changed, 138 insertions(+), 2 deletions(-)
+ 2 files changed, 148 insertions(+), 2 deletions(-)
 
 diff --git a/neo/framework/PlayerProfile.cpp b/neo/framework/PlayerProfile.cpp
-index 892466a..8ca286c 100644
+index 892466a..b8dec62 100644
 --- a/neo/framework/PlayerProfile.cpp
 +++ b/neo/framework/PlayerProfile.cpp
-@@ -116,6 +116,44 @@ idPlayerProfile::~idPlayerProfile()
+@@ -116,6 +116,54 @@ idPlayerProfile::~idPlayerProfile()
  {
  }
  
@@ -37,35 +37,45 @@ index 892466a..8ca286c 100644
 +========================
 +The handheld's gamepad (its buttons by label) over the Xbox 360 layout of
 +joy_360_0.cfg: fire and reload on the shoulders, weapons on the triggers,
-+A use, B jump, X crouch, Y flashlight. in_padLayout is the version of it
-+the profile has: a newer one goes once over the player's own bindings,
-+after that the player may change them.
++A use, B jump, X crouch, Y flashlight (version 1); the D-pad moves as the
++left stick does (version 2: it chose weapons). in_padLayout is the version
++the profile has: the bindings of each newer version go once over the
++player's own, after that the player may change them.
 +========================
 +*/
-+static const int HANDHELD_PAD_LAYOUT = 1;
++static const int HANDHELD_PAD_LAYOUT = 2;
 +idCVar in_padLayout( "in_padLayout", "0", CVAR_ARCHIVE | CVAR_INTEGER | CVAR_NOCHEAT, "the version of the handheld's gamepad layout in the bindings" );
 +
-+static void BindHandheldPad()
++// the bindings of the layout versions after "from"
++static void BindHandheldPad( int from = 0 )
 +{
 +	static const struct
 +	{
++		int version;
 +		int key;
 +		const char* binding;
 +	} binds[] =
 +	{
-+		{ K_JOY1,			"_use" },			// A
-+		{ K_JOY2,			"_moveup" },		// B: jump
-+		{ K_JOY3,			"_movedown" },		// X: crouch
-+		{ K_JOY4,			"_impulse16" },		// Y: flashlight
-+		{ K_JOY5,			"_impulse13" },		// L1: reload
-+		{ K_JOY6,			"_attack" },		// R1
-+		{ K_JOY_TRIGGER1,	"_impulse15" },		// L2: previous weapon
-+		{ K_JOY_TRIGGER2,	"_impulse14" },		// R2: next weapon
++		{ 1, K_JOY1,			"_use" },			// A
++		{ 1, K_JOY2,			"_moveup" },		// B: jump
++		{ 1, K_JOY3,			"_movedown" },		// X: crouch
++		{ 1, K_JOY4,			"_impulse16" },		// Y: flashlight
++		{ 1, K_JOY5,			"_impulse13" },		// L1: reload
++		{ 1, K_JOY6,			"_attack" },		// R1
++		{ 1, K_JOY_TRIGGER1,	"_impulse15" },		// L2: previous weapon
++		{ 1, K_JOY_TRIGGER2,	"_impulse14" },		// R2: next weapon
++		{ 2, K_JOY_DPAD_UP,		"_forward" },
++		{ 2, K_JOY_DPAD_DOWN,	"_back" },
++		{ 2, K_JOY_DPAD_LEFT,	"_moveleft" },
++		{ 2, K_JOY_DPAD_RIGHT,	"_moveright" },
 +	};
 +	
 +	for( int i = 0; i < ( int )( sizeof( binds ) / sizeof( binds[0] ) ); i++ )
 +	{
-+		idKeyInput::SetBinding( binds[i].key, binds[i].binding );
++		if( binds[i].version > from )
++		{
++			idKeyInput::SetBinding( binds[i].key, binds[i].binding );
++		}
 +	}
 +}
 +#endif
@@ -73,7 +83,7 @@ index 892466a..8ca286c 100644
  /*
  ========================
  idPlayerProfile::Serialize
-@@ -151,10 +189,18 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
+@@ -151,10 +199,18 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
  	
  	// Archived cvars (all the menu settings for Doom3 are archived cvars)
  	idDict cvarDict;
@@ -92,7 +102,7 @@ index 892466a..8ca286c 100644
  		// Never sync these cvars with Steam because they require an engine or video restart
  		cvarDict.Delete( "r_fullscreen" );
  		cvarDict.Delete( "r_vidMode" );
-@@ -201,6 +247,16 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
+@@ -201,6 +257,16 @@ bool idPlayerProfile::Serialize( idSerializer& ser )
  				idKeyInput::SetBinding( i, bind.c_str() );
  			}
  		}
@@ -101,7 +111,7 @@ index 892466a..8ca286c 100644
 +		{
 +			// once over the player's bindings, and saved with them: a
 +			// profile read again before that gets it again
-+			BindHandheldPad();
++			BindHandheldPad( padLayout );
 +			in_padLayout.SetInteger( HANDHELD_PAD_LAYOUT );
 +			SaveSettings( true );
 +		}
@@ -109,7 +119,7 @@ index 892466a..8ca286c 100644
  	}
  	else
  	{
-@@ -447,6 +503,9 @@ void idPlayerProfile::ExecConfig( bool save, bool forceDefault )
+@@ -447,6 +513,9 @@ void idPlayerProfile::ExecConfig( bool save, bool forceDefault )
  	}
  	
  	cmdSystem->ExecuteCommandBuffer();
