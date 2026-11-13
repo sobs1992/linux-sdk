@@ -194,7 +194,7 @@ power-off` отключает USB-устройство целиком, вмес�
 Карту со старой разметкой (p3 `data` до конца карты, без p4) скрипт не переразмечает:
 `/data` подключается как раньше, `/games` нет. Перенос: сохранить с платы всё нужное
 из `/data` (`ssh root@<адрес> 'tar -cf - -C /data .' > data.tar`), затем на плате
-`/etc/init.d/S90bare-app stop; umount /data`,
+`/etc/init.d/S*bare-app stop; umount /data` (S90, на GO Advance S06),
 `dd if=/dev/zero of=/dev/mmcblk0p3 bs=1M count=4`, `sfdisk --delete /dev/mmcblk0 3`,
 `partx -d --nr 3 /dev/mmcblk0`, `/etc/init.d/S05data start` и вернуть сохранения и
 настройки в `/data`, а файлы игр — на `/games`.
@@ -230,6 +230,21 @@ U-Boot определяет ревизию платы по SARADC (`rockchip/rk3
 `-go2-v11.dtb`, `-go3.dtb`). Консоль `ttyS2`, 115200 начиная с U-Boot
 (DDR-блоб и miniloader из SPI печатают на 1500000, CP2102 это не читает).
 Таблица разделов — MBR: GPT (сектора 2–33) пересекается с окружением U-Boot на 16K.
+
+### Быстрая загрузка
+
+От кнопки до меню bare_app около 5 с (было 14.7): загрузчики 2.6 с, ядро 1.3 с,
+init 1.0 с, bare_app 0.2 с. Время меряется по счётчику таймера ARM, который идёт
+с включения: `cntvct_el0 / 24 МГц` минус время ядра — это загрузчики.
+
+- U-Boot: `CONFIG_BOOTDELAY=0` (2 с ожидания клавиши). Остановить его: держать
+  Enter в UART с момента включения.
+- Ядро (`board/oga/linux/oga.config`): только платформа Rockchip, без ACPI, UEFI,
+  PCI, MTD и т. п. — Image 22.6 МБ вместо 42.6, U-Boot читает его с карты на ~17 МБ/с;
+  `quiet` (синхронная консоль 115200 стоила ~2 с). Звук, кнопка питания и батарея
+  RK817 встроены, а не модулями.
+- init: модули загружаются в фоне (`S03mdev` вместо `S10mdev`, который ждал
+  драйвер Wi-Fi 3–4 с), bare_app стартует сразу после `S05data` (`S06bare-app`).
 
 ### Приложения через UART
 
@@ -267,7 +282,7 @@ scripts/oga-serial.py key right right a f6          # «нажать» кноп�
 
 ```make
 APPS           := bare-app oga-pad
-APPS_AUTOSTART := bare-app                          # /etc/init.d/S90bare-app, лог /var/log/bare_app.log
+APPS_AUTOSTART := bare-app                          # /etc/init.d/S90bare-app (GO Advance: S06), лог /var/log/bare_app.log
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig   # состав: Kconfig приложения, имя из
                                                     # apps/bare_app/configs/ или путь
 ```

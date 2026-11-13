@@ -1,0 +1,168 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app: the window as drawn, for the stream
+
+While bare_app streams the screen (rtsp://...:8554/live) it asks the
+game for its own picture (game_ipc.h: full_want), and the stream takes
+that instead of the screen: the window as VCMI drew it, not taken down
+to the handheld's screen. The default view draws at twice the frame and
+halves it: its whole screen at 1:1 (960x640 for the 480x320 frame of the
+ODROID-GO Advance), the magnifier's too. The native view's is its whole
+screen as well. The fit view (BARE_APP_VCMI_FIT) draws at twice its
+window and takes it down to the frame: the window is that screen taken
+down 2:1 by a second Downscaler, in linear light and only the rows that
+changed, like the frame (854x600 on the GO Ultra). Nothing when it is no
+bigger than the frame. The cursor is drawn over it at its own size, the
+colour scheme applied too. It is published before each frame, a frame
+all the same too, so the stream keeps its size over a still picture.
+Nothing of it while nobody watches: the second Downscaler and its copy
+of the screen go.
+
+--- a/client/renderSDL/BareAppLink.h	2026-11-13 07:56:16.182937495 +0100
++++ b/client/renderSDL/BareAppLink.h	2026-11-13 08:25:10.709874455 +0100
+@@ -134,7 +134,10 @@
+ 	void cursorIntoView();
+ 	void compose(const uint32_t * src, int srcW, int srcH, int srcPitch, uint32_t * dst);
+ 	void drawCursor(uint32_t * dst, const Point & screenSize);
+-	void applyColorScheme(ColorScheme scheme, uint32_t * frame);
++	void drawCursorAt(const SDL_Surface * image, uint32_t * dst, const Point & size, int dstPitch, const Point & origin, int step);
++	void applyColorScheme(ColorScheme scheme, uint32_t * frame, const Point & size, int pitch);
++	Point fullSize(const Point & screenSize) const;
++	void composeFull(const uint32_t * src, const Point & screenSize, int srcPitch);
+ 
+ 	game_shm * shm;
+ 	unsigned back = 0;	///< buffer being drawn
+@@ -142,6 +145,11 @@
+ 	bool native = false;	///< BARE_APP_VCMI_NATIVE: 1:1, the view follows the cursor
+ 	bool fit = false;	///< BARE_APP_VCMI_FIT: the whole screen, taken down in linear light
+ 	std::unique_ptr<Downscaler> downscaler;	///< for the fit view
++	/// The window as VCMI drew it, for bare_app's stream (game_ipc.h): the
++	/// fit view's screen taken down 2:1, the others' whole screen
++	std::unique_ptr<Downscaler> fullScaler;
++	unsigned fullBack = 0;	///< its buffer being drawn
++	Point fullCaptured;	///< its size when taken, (0, 0): none
+ 	std::pair<double, double> fitRatio{1, 1};
+ 	Point viewport;		///< top left of the magnified part, in window pixels
+ 	bool detached = false;	///< the D-pad has moved the magnifier off the cursor
+--- a/client/renderSDL/BareAppLink.cpp	2026-11-13 07:56:16.182868558 +0100
++++ b/client/renderSDL/BareAppLink.cpp	2026-11-13 08:25:10.709766700 +0100
+@@ -519,6 +519,47 @@
+ 	}
+ }
+ 
++/// The size of the window as VCMI drew it, for the stream: the fit view
++/// draws at twice it, the others at 1:1 (the default view's screen is
++/// twice the frame, the native view's at least 800x600); (0, 0) when it
++/// is no bigger than the frame: nothing to gain
++Point BareAppLink::fullSize(const Point & screenSize) const
++{
++	const Point size = fit ? screenSize / ENGINE->screenHandler().getScalingFactor() : screenSize;
++	if(size.x <= static_cast<int>(shm->width) && size.y <= static_cast<int>(shm->height))
++		return Point(0, 0);
++	return size;
++}
++
++/// While bare_app streams the screen it wants the window as drawn: the
++/// fit view's screen taken down in linear light like the frame (only the
++/// rows that changed), the others' copied
++void BareAppLink::composeFull(const uint32_t * src, const Point & screenSize, int srcPitch)
++{
++	fullCaptured = Point(0, 0);
++	const Point size = fullSize(screenSize);
++	if(!shm->full_width || !shm->full_want.load() || size.x <= 0 || size.y <= 0 ||
++		size.x > static_cast<int>(shm->full_width) || size.y > static_cast<int>(shm->full_height))
++	{
++		fullScaler.reset();	// its copy of the screen is memory
++		return;
++	}
++	auto * dst = static_cast<uint32_t *>(game_shm_full(shm, fullBack));
++	const int dstPitch = static_cast<int>(shm->full_width);
++	if(size == screenSize)
++	{
++		for(int y = 0; y < size.y; y++)
++			std::memcpy(dst + static_cast<size_t>(y) * dstPitch, src + static_cast<size_t>(y) * srcPitch, static_cast<size_t>(size.x) * 4);
++	}
++	else
++	{
++		if(!fullScaler)
++			fullScaler = std::make_unique<Downscaler>();
++		fullScaler->run(src, screenSize, srcPitch, dst, size, dstPitch);
++	}
++	fullCaptured = size;
++}
++
+ /// The magnifier's view (in VCMI's pixels) over an area of `area`: around
+ /// the cursor when it opens, pushed by the cursor at its edges unless the
+ /// D-pad has taken it away
+@@ -563,12 +604,24 @@
+ 
+ 	const int w = shm->width;
+ 	const int h = shm->height;
+-	const int dstPitch = shm->stride / 4;
+ 	const int step = fit ? ENGINE->screenHandler().getScalingFactor() : 1;
+ 	const Point origin = magnifier || native
+ 		? cursorPosition / step - cursorHotSpot - viewport
+ 		: Point(cursorPosition.x * w / screenSize.x, cursorPosition.y * h / screenSize.y) - cursorHotSpot;
+ 
++	// the window as drawn as well: its pixels are VCMI's own, so is the cursor
++	if(fullCaptured != Point(0, 0))
++		drawCursorAt(image, static_cast<uint32_t *>(game_shm_full(shm, fullBack)), fullCaptured, shm->full_width,
++			cursorPosition / step - cursorHotSpot, step);
++	drawCursorAt(image, dst, Point(w, h), shm->stride / 4, origin, step);
++}
++
++/// The cursor image, every step-th pixel of it, with its top left at origin
++void BareAppLink::drawCursorAt(const SDL_Surface * image, uint32_t * dst, const Point & size, int dstPitch, const Point & origin, int step)
++{
++	const int w = size.x;
++	const int h = size.y;
++
+ 	for(int y = std::max(0, -origin.y); y < image->h / step && origin.y + y < h; y++)
+ 	{
+ 		const auto * in = reinterpret_cast<const uint32_t *>(static_cast<const uint8_t *>(image->pixels) + y * step * image->pitch);
+@@ -585,14 +638,14 @@
+ }
+ 
+ /// Grayscale and the like, as VCMI's screen texture gets them
+-void BareAppLink::applyColorScheme(ColorScheme scheme, uint32_t * frame)
++void BareAppLink::applyColorScheme(ColorScheme scheme, uint32_t * frame, const Point & size, int pitch)
+ {
+ 	if(scheme != ColorScheme::GRAYSCALE && scheme != ColorScheme::H2_SCHEME)
+ 		return;
+-	SDL_Surface * surface = SDL_CreateRGBSurfaceWithFormatFrom(frame, shm->width, shm->height, 32, shm->stride, SDL_PIXELFORMAT_RGB888);
++	SDL_Surface * surface = SDL_CreateRGBSurfaceWithFormatFrom(frame, size.x, size.y, 32, pitch, SDL_PIXELFORMAT_RGB888);
+ 	if(!surface)
+ 		return;
+-	const Rect all(0, 0, shm->width, shm->height);
++	const Rect all(0, 0, size.x, size.y);
+ 	if(scheme == ColorScheme::GRAYSCALE)
+ 		CSDL_Ext::convertToGrayscale(surface, all);
+ 	else
+@@ -616,8 +669,11 @@
+ 	auto * frame = static_cast<uint32_t *>(game_shm_frame(shm, back));
+ 	SDL_LockSurface(screen);
+ 	compose(static_cast<const uint32_t *>(screen->pixels), screen->w, screen->h, screen->pitch / 4, frame);
++	composeFull(static_cast<const uint32_t *>(screen->pixels), Point(screen->w, screen->h), screen->pitch / 4);
+ 	SDL_UnlockSurface(screen);
+-	applyColorScheme(scheme, frame);
++	applyColorScheme(scheme, frame, Point(shm->width, shm->height), shm->stride);
++	if(fullCaptured != Point(0, 0))
++		applyColorScheme(scheme, static_cast<uint32_t *>(game_shm_full(shm, fullBack)), fullCaptured, shm->full_width * 4);
+ 	captured = Point(screen->w, screen->h);
+ 	composeTime += SDL_GetPerformanceCounter() - start;
+ }
+@@ -645,6 +701,15 @@
+ 		composeTime = 0;
+ 	}
+ 
++	// The window as drawn, before the frame: bare_app's stream takes it at
++	// its own rate, a still picture too
++	if(fullCaptured != Point(0, 0))
++	{
++		shm->full_size[fullBack].store(static_cast<uint32_t>(fullCaptured.x) | static_cast<uint32_t>(fullCaptured.y) << 16);
++		fullBack = shm->full_middle.exchange(fullBack | GAME_SHM_FRESH) & ~GAME_SHM_FRESH;
++		fullCaptured = Point(0, 0);
++	}
++
+ 	// VCMI redraws at its frame rate whether anything changed or not
+ 	const size_t rowBytes = static_cast<size_t>(shm->width) * 4;
+ 	bool same = true;

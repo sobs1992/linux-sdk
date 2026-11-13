@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# The mdev daemon and the coldplug of the modules of the devices already
+# there, as Buildroot's S10mdev (which board/oga/buildroot/post-build.sh
+# removes), but early and in the background: S10mdev took 4 s of the boot,
+# most of it the Wi-Fi chip's driver (esp8089) waiting for its firmware.
+# What bare_app needs at once (sound card, power key, battery) is built
+# into the kernel; the GPU, the video codecs and Wi-Fi come meanwhile
+# (S41wifi waits for wlan0). /run/coldplug.done marks the end.
+#
+
+DAEMON="mdev"
+PIDFILE="/var/run/$DAEMON.pid"
+DONE=/run/coldplug.done
+
+start() {
+	echo -n "Starting $DAEMON... "
+	rm -f $DONE
+	start-stop-daemon -S -b -m -p $PIDFILE -x /sbin/mdev -- -df
+	[ $? -eq 0 ] && echo "OK" || echo "ERROR"
+
+	# coldplug modules: every modalias is under /sys/devices (all of
+	# /sys/ takes three times as long to walk)
+	(
+		find /sys/devices -name modalias -print0 |
+			xargs -0 sort -u |
+			tr '\n' '\0' |
+			xargs -0 modprobe -abq
+		touch $DONE
+	) </dev/null >/dev/null 2>&1 &
+}
+
+stop() {
+	echo -n "Stopping $DAEMON... "
+	start-stop-daemon -K -p $PIDFILE
+	[ $? -eq 0 ] && echo "OK" || echo "ERROR"
+}
+
+case "$1" in
+  start|stop)
+	"$1"
+	;;
+  restart)
+	stop
+	start
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac

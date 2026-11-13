@@ -47,7 +47,7 @@ LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
                    rockchip/rk3326-odroid-go3.dtb
 # External modules (directories with a Kbuild), built and installed with the kernel
 LINUX_EXT_MODULES := $(BOARD_DIR)/linux/esp8089
-LINUX_CMDLINE   :=rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0
+LINUX_CMDLINE   :=rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet
 
 # --- Root filesystem (Buildroot) ---
 BUILDROOT_SRC       := src/buildroot
@@ -64,8 +64,10 @@ APPS_AUTOSTART := bare-app
 # (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad;
 # HOMM3 adds the Heroes III engine VCMI (game data goes to /data/vcmi);
 # HALFLIFE adds Xash3D FWGS + hlsdk-portable + Mesa panfrost (data: /games/halflife)
+# STREAM: the screen over RTSP (rtsp://<address>:8554/live), H.264 by
+# OpenH264 (the PX30's VPU encodes JPEG only)
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y \
-                  bare-app.HOMM3=y bare-app.HALFLIFE=y
+                  bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.STREAM=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
