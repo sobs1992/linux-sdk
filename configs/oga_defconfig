@@ -46,7 +46,8 @@ LINUX_DTBS      := rockchip/rk3326-odroid-go2.dtb \
                    rockchip/rk3326-odroid-go2-v11.dtb \
                    rockchip/rk3326-odroid-go3.dtb
 # External modules (directories with a Kbuild), built and installed with the kernel
-LINUX_EXT_MODULES := $(BOARD_DIR)/linux/esp8089
+LINUX_EXT_MODULES := $(BOARD_DIR)/linux/esp8089 \
+                     $(BOARD_DIR)/linux/rk-vepu-h264
 LINUX_CMDLINE   :=rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet
 
 # --- Root filesystem (Buildroot) ---

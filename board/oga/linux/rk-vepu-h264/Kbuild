@@ -1,0 +1,1 @@
+obj-m += rk-vepu-h264.o
