@@ -48,6 +48,7 @@
 #define NUM_REGS	184		/* 0x000..0x2dc */
 #define ACLK_RATE	(300 * 1000 * 1000)
 #define TIMEOUT_MS	500
+#define MAX_TRIES	3		/* encodings of a picture too big for the link */
 
 /* the hardware writes the slice header: the SPS and PPS must agree */
 #define LOG2_MAX_FRAME_NUM	16	/* frame_num is 16 bits */
@@ -179,6 +180,7 @@ struct vepu_ctx {
 	/* the picture being encoded */
 	bool idr;
 	int cur_qp;
+	int tries;			/* encodings of it so far */
 	u32 hdr_len;			/* SPS and PPS in front of the slice */
 	ktime_t t0;
 };
@@ -514,10 +516,16 @@ static int rc_step(s64 bytes, s64 aim)
  * IDR after a still screen (P pictures of a few bytes at the lowest QP)
  * would be huge at the QP of those.
  */
-static void vepu_rc(struct vepu_ctx *ctx, bool idr, u32 bytes)
+static s64 vepu_target(struct vepu_ctx *ctx)
 {
 	u32 fps = ctx->tpf.numerator ? ctx->tpf.denominator / ctx->tpf.numerator : 30;
-	s64 target = max_t(s64, ctx->bitrate / 8 / max(fps, 1u), 64);
+
+	return max_t(s64, ctx->bitrate / 8 / max(fps, 1u), 64);
+}
+
+static void vepu_rc(struct vepu_ctx *ctx, bool idr, u32 bytes)
+{
+	s64 target = vepu_target(ctx);
 	s64 lim = (s64)ctx->bitrate / 8;
 	int step;
 
@@ -534,8 +542,9 @@ static void vepu_rc(struct vepu_ctx *ctx, bool idr, u32 bytes)
 			step = -1;
 		ctx->qp = clamp_t(int, ctx->qp + step, ctx->qp_min, ctx->qp_max);
 	}
-	ctx->qp_idr = clamp_t(int, ctx->qp_idr, max_t(int, ctx->qp - 6, ctx->qp_min),
-			      min_t(int, ctx->qp + 4, ctx->qp_max));
+	/* not much finer than the P pictures; coarser as it needs: a still
+	 * screen keeps P pictures at the lowest QP, not IDRs */
+	ctx->qp_idr = clamp_t(int, ctx->qp_idr, max_t(int, ctx->qp - 6, ctx->qp_min), ctx->qp_max);
 }
 
 /* m2m */
@@ -551,6 +560,7 @@ static void vepu_device_run(void *priv)
 	int ret;
 
 	ctx->t0 = ktime_get();
+	ctx->tries = 1;
 	ctx->idr = ctx->since_idr == 0 || ctx->since_idr >= ctx->gop || ctx->force_key;
 	if (ctx->rc)
 		ctx->cur_qp = ctx->idr ? ctx->qp_idr : ctx->qp;
@@ -593,6 +603,45 @@ fail:
 	v4l2_m2m_buf_done_and_job_finish(d->m2m, ctx->fh.m2m_ctx, VB2_BUF_STATE_ERROR);
 }
 
+/*
+ * A picture far over its share of the bit rate (a new screen coded as P,
+ * mostly intra blocks) goes out as a burst the Wi-Fi link drops packets
+ * of; one that does not fit the buffer is lost. Either is encoded again
+ * (the reference is only read, the reconstruction written again), QP up by
+ * 5 for each halving it needs: 6 would halve the bits, 5 errs on quality
+ * and leaves the third try for what still does not fit. Called with the
+ * clocks on; true: started.
+ */
+static bool vepu_retry(struct vepu_dev *d, struct vepu_ctx *ctx, u32 status, u32 bytes)
+{
+	struct vb2_v4l2_buffer *src, *dst;
+	s64 limit, left = bytes;
+	int step = 0;
+
+	if (!ctx || ctx->tries >= MAX_TRIES || ctx->cur_qp >= (int)ctx->qp_max)
+		return false;
+	limit = vepu_target(ctx) * (ctx->idr ? 8 : 4);
+	if (status & VEPU_REG_INTERRUPT_BUFFER_FULL)
+		step = 8;
+	else if (!(status & VEPU_REG_INTERRUPT_FRAME_READY) || !ctx->rc || bytes <= limit)
+		return false;
+	for (; left > limit; left /= 2)
+		step += 5;
+	if (debug)
+		dev_info(d->dev, "%s qp %d: %u bytes, again at qp %d\n", ctx->idr ? "IDR" : "P",
+			 ctx->cur_qp, bytes, min_t(int, ctx->cur_qp + step, ctx->qp_max));
+	ctx->cur_qp = min_t(int, ctx->cur_qp + step, ctx->qp_max);
+	ctx->tries++;
+	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	vepu_set_regs(ctx, vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0),
+		      vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0), vb2_plane_vaddr(&dst->vb2_buf, 0),
+		      vb2_plane_size(&dst->vb2_buf, 0));
+	schedule_delayed_work(&d->watchdog, msecs_to_jiffies(TIMEOUT_MS));
+	vepu_start(d);
+	return true;
+}
+
 /* the end of a picture: from the interrupt or the watchdog */
 static void vepu_done(struct vepu_dev *d, u32 status)
 {
@@ -601,8 +650,10 @@ static void vepu_done(struct vepu_dev *d, u32 status)
 	bool ok = status & VEPU_REG_INTERRUPT_FRAME_READY;
 	u32 bytes = 0;
 
-	if (ok)
+	if (ok && ctx)
 		bytes = (ctx->hdr_len & ~7u) + vepu_read(d, VEPU_REG_STR_BUF_LIMIT) / 8;
+	if (vepu_retry(d, ctx, status, bytes))
+		return;
 	clk_bulk_disable(ARRAY_SIZE(d->clks), d->clks);
 	pm_runtime_put_autosuspend(d->dev);
 	if (!ctx)
@@ -619,13 +670,28 @@ static void vepu_done(struct vepu_dev *d, u32 status)
 		}
 		ctx->since_idr++;
 		ctx->frame_num = (ctx->frame_num + 1) & ((1u << LOG2_MAX_FRAME_NUM) - 1);
+		if (ctx->tries > 1) {
+			/* the QP that fitted is where the next ones start from */
+			if (ctx->idr)
+				ctx->qp_idr = ctx->cur_qp;
+			else
+				ctx->qp = ctx->cur_qp;
+		}
 		vepu_rc(ctx, ctx->idr, bytes - ctx->hdr_len);
+		/*
+		 * After a still screen P pictures are at the lowest QP: the one
+		 * after an IDR at a higher QP would code the whole picture over
+		 * again, finer, as big as the IDR. From near its QP, then down.
+		 */
+		if (ctx->idr && ctx->rc)
+			ctx->qp = clamp_t(int, ctx->qp, ctx->cur_qp - 3, ctx->qp_max);
 		vb2_set_plane_payload(&dst->vb2_buf, 0, bytes);
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME);
 		dst->flags |= ctx->idr ? V4L2_BUF_FLAG_KEYFRAME : V4L2_BUF_FLAG_PFRAME;
 		if (debug)
-			dev_info(d->dev, "%s qp %d: %u bytes, %lld us\n", ctx->idr ? "IDR" : "P",
-				 ctx->cur_qp, bytes, ktime_us_delta(ktime_get(), ctx->t0));
+			dev_info(d->dev, "%s qp %d: %u bytes, %lld us%s\n", ctx->idr ? "IDR" : "P",
+				 ctx->cur_qp, bytes, ktime_us_delta(ktime_get(), ctx->t0),
+				 ctx->tries > 1 ? ", encoded again" : "");
 	} else {
 		dev_warn(d->dev, "%s picture failed: status %#x\n", ctx->idr ? "IDR" : "P", status);
 		/* the reference may be broken: start again from an IDR */
