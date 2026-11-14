@@ -10,22 +10,48 @@
 # fails (a device that refuses), it sleeps with pm-suspend.
 
 SWAP=/data/hibernate.swap
+SWAPOFF_PID=/run/hibernate.swapoff
 
 [ -e /run/hibernate.ready ] || exec /usr/sbin/pm-suspend
 
-# The kernel copies the image into free RAM before it writes it, outside
-# the CMA area: what cannot be dropped (programs, GPU buffers) must fit in
-# less than half of the rest. DOOM 3 BFG holds ~1.4 GB (its textures are
-# pinned GPU memory): trying took 16 s and failed. Sleep at once then.
-awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } /^CmaTotal:/ { c = $2 }
-     END { exit !(t - a < (t - c) * 0.45) }' /proc/meminfo || exec /usr/sbin/pm-suspend
+# The swap file of the last resume may still be being emptied
+if [ -f $SWAPOFF_PID ]; then
+	while kill -0 "$(cat $SWAPOFF_PID)" 2>/dev/null; do sleep 1; done
+	rm -f $SWAPOFF_PID
+fi
+
+# The kernel copies the image into free RAM before it writes it: the image
+# can be at most ~45% of the memory outside the CMA area. What is in use
+# beyond that goes to the swap file first (programs' memory, and since
+# kernel patch 0028 the GPU's buffers too: DOOM 3 BFG holds ~1.5 GB), the
+# compressed image after it. If that cannot fit, sleep at once.
+size=$(ls -ln "$SWAP" 2>/dev/null | awk '{ print $5 }')
+[ -n "$size" ] || exec /usr/sbin/pm-suspend
+awk -v swap=$((size / 1024)) '
+	/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } /^CmaTotal:/ { c = $2 }
+	END {
+		used = t - a; image = (t - c) * 0.45
+		out = used > image ? used - image : 0
+		if (image > used) image = used
+		exit !(out + image * 0.6 + 65536 < swap)	# LZO: ~0.5 of the image
+	}' /proc/meminfo || exec /usr/sbin/pm-suspend
 
 # swap only for the image: not used while the device runs
 grep -q "^$SWAP " /proc/swaps || swapon "$SWAP" 2>/dev/null || exec /usr/sbin/pm-suspend
 sync
+echo 4000000000 > /sys/power/image_size	# as big as it can be: less to swap
 echo shutdown > /sys/power/disk
 echo disk > /sys/power/state
 rc=$?
-swapoff "$SWAP"
-[ $rc -eq 0 ] || exec /usr/sbin/pm-suspend
+# the restored kernel keeps the time it had: the RTC knows how long it was off
+[ $rc -eq 0 ] && /usr/sbin/rtc-clock load 2>/dev/null
+# what went to swap comes back when used; the rest in the background, so
+# that the device is there at once after resuming
+nice -n 19 swapoff "$SWAP" </dev/null >/dev/null 2>&1 &
+echo $! > $SWAPOFF_PID
+if [ $rc -ne 0 ]; then
+	wait
+	rm -f $SWAPOFF_PID
+	exec /usr/sbin/pm-suspend
+fi
 exit 0

@@ -1,0 +1,570 @@
+From: OdroidLinux SDK
+Subject: [PATCH] drm/panfrost: GPU memory to swap for hibernation
+
+A BO's pages stay pinned while it is mapped on the GPU, and pinned pages
+cannot be reclaimed. The hibernation image is a copy of all memory in
+use, made in the memory that is free: with DOOM 3 BFG (~750 MB of
+textures in BOs plus ~500 MB of its own) it does not fit ("Image
+allocation is N pages short").
+
+At the device prepare step of a hibernation (user space frozen, nothing
+taken for the image yet) panfrost waits for the GPU to finish with each
+BO, unmaps it from the GPU and gives its pages back to its shmem file,
+marked dirty (new drm_gem_shmem_evict_locked()): reclaim then writes them
+to swap like other memory and the image is small. After the hibernation
+(resumed, or failed) the PM notifier maps them again, or the next job
+submit if it comes first; CPU mmaps were zapped and fault the pages back
+(the shmem helper now keeps "use count but no pages" as evicted and reads
+them back in drm_gem_shmem_get_pages_locked() and in its fault handler).
+
+Kept resident: imported, exported, pinned and vmapped BOs, heaps, BOs
+marked purgeable (the shrinker frees those) and BOs a job still holds.
+
+--- a/drivers/gpu/drm/drm_gem_shmem_helper.c
++++ b/drivers/gpu/drm/drm_gem_shmem_helper.c
+@@ -229,15 +229,41 @@
+ }
+ EXPORT_SYMBOL_GPL(drm_gem_shmem_free);
+ 
++/*
++ * An evicted object (drm_gem_shmem_evict_locked()) still has users of its
++ * pages (mmaps) but no pages: they are read back from its shmem file, from
++ * swap if they went there, when they are needed again.
++ */
++static int drm_gem_shmem_populate_locked(struct drm_gem_shmem_object *shmem)
++{
++	struct page **pages;
++
++	if (shmem->pages)
++		return 0;
++
++	pages = drm_gem_get_pages(&shmem->base);
++	if (IS_ERR(pages))
++		return PTR_ERR(pages);
++
++	shmem->pages = pages;
++
++	return 0;
++}
++
+ static int drm_gem_shmem_get_pages_locked(struct drm_gem_shmem_object *shmem)
+ {
+ 	struct drm_gem_object *obj = &shmem->base;
+ 	struct page **pages;
++	int ret;
+ 
+ 	dma_resv_assert_held(shmem->base.resv);
+ 
+-	if (refcount_inc_not_zero(&shmem->pages_use_count))
+-		return 0;
++	if (refcount_inc_not_zero(&shmem->pages_use_count)) {
++		ret = drm_gem_shmem_populate_locked(shmem);
++		if (ret)
++			refcount_dec(&shmem->pages_use_count);
++		return ret;
++	}
+ 
+ 	pages = drm_gem_get_pages(obj);
+ 	if (IS_ERR(pages)) {
+@@ -276,6 +302,8 @@
+ 	dma_resv_assert_held(shmem->base.resv);
+ 
+ 	if (refcount_dec_and_test(&shmem->pages_use_count)) {
++		if (!shmem->pages)	/* evicted */
++			return;
+ #ifdef CONFIG_X86
+ 		if (shmem->map_wc)
+ 			set_pages_array_wb(shmem->pages, obj->size >> PAGE_SHIFT);
+@@ -512,6 +540,60 @@
+ }
+ EXPORT_SYMBOL_GPL(drm_gem_shmem_madvise_locked);
+ 
++/**
++ * drm_gem_shmem_evict_locked - Give the backing pages of a shmem GEM object
++ *                              back to the shmem file
++ * @shmem: shmem GEM object
++ *
++ * Unlike purging, the contents are kept: the pages are unpinned and marked
++ * dirty, so that memory reclaim can write them to swap, and come back when
++ * they are used again (a CPU fault on an mmap, drm_gem_shmem_get_pages_sgt(),
++ * a vmap). The caller must have stopped every device use of the object and
++ * torn down its device mappings first. Objects that are pinned, vmapped,
++ * imported, exported or purged are left alone.
++ *
++ * Returns:
++ * True if the pages were given back.
++ */
++bool drm_gem_shmem_evict_locked(struct drm_gem_shmem_object *shmem)
++{
++	struct drm_gem_object *obj = &shmem->base;
++	struct drm_device *dev = obj->dev;
++
++	dma_resv_assert_held(shmem->base.resv);
++
++	if (!shmem->pages || shmem->madv < 0 || drm_gem_is_imported(obj) ||
++	    obj->dma_buf || refcount_read(&shmem->pages_pin_count) ||
++	    refcount_read(&shmem->vmap_use_count))
++		return false;
++
++	/* CPU mappings fault the pages back in */
++	drm_vma_node_unmap(&obj->vma_node, dev->anon_inode->i_mapping);
++
++	/* written by the device: must go to swap, not be dropped as clean */
++	shmem->pages_mark_dirty_on_put = true;
++
++	if (shmem->sgt) {
++		dma_unmap_sgtable(dev->dev, shmem->sgt, DMA_BIDIRECTIONAL, 0);
++		sg_free_table(shmem->sgt);
++		kfree(shmem->sgt);
++		shmem->sgt = NULL;
++		drm_gem_shmem_put_pages_locked(shmem);
++	}
++
++	/* what is left are the mmaps' uses: keep the count, drop the pages */
++	if (shmem->pages) {
++		drm_gem_put_pages(obj, shmem->pages, true,
++				  shmem->pages_mark_accessed_on_put);
++		shmem->pages = NULL;
++		shmem->pages_mark_accessed_on_put = false;
++	}
++	shmem->pages_mark_dirty_on_put = false;
++
++	return true;
++}
++EXPORT_SYMBOL_GPL(drm_gem_shmem_evict_locked);
++
+ void drm_gem_shmem_purge_locked(struct drm_gem_shmem_object *shmem)
+ {
+ 	struct drm_gem_object *obj = &shmem->base;
+@@ -647,8 +729,17 @@
+ 
+ 	dma_resv_lock(obj->resv, NULL);
+ 
+-	if (page_offset >= num_pages || drm_WARN_ON_ONCE(dev, !shmem->pages) ||
+-	    shmem->madv < 0)
++	if (page_offset >= num_pages || shmem->madv < 0)
++		goto out;
++
++	/* evicted: the mmap still uses the pages, bring them back */
++	if (!shmem->pages && refcount_read(&shmem->pages_use_count) &&
++	    drm_gem_shmem_populate_locked(shmem)) {
++		ret = VM_FAULT_OOM;
++		goto out;
++	}
++	pages = shmem->pages;
++	if (drm_WARN_ON_ONCE(dev, !pages))
+ 		goto out;
+ 
+ 	page = pages[page_offset];
+--- a/drivers/gpu/drm/panfrost/Makefile
++++ b/drivers/gpu/drm/panfrost/Makefile
+@@ -10,6 +10,7 @@
+ 	panfrost_job.o \
+ 	panfrost_mmu.o \
+ 	panfrost_perfcnt.o \
+-	panfrost_dump.o
++	panfrost_dump.o \
++	panfrost_evict.o
+ 
+ obj-$(CONFIG_DRM_PANFROST) += panfrost.o
+--- a/drivers/gpu/drm/panfrost/panfrost_device.c
++++ b/drivers/gpu/drm/panfrost/panfrost_device.c
+@@ -18,6 +18,7 @@
+ #include "panfrost_job.h"
+ #include "panfrost_mmu.h"
+ #include "panfrost_perfcnt.h"
++#include "panfrost_evict.h"
+ 
+ static int panfrost_reset_init(struct panfrost_device *pfdev)
+ {
+@@ -560,7 +561,14 @@
+ 	return 0;
+ }
+ 
++/* Before a hibernation's image memory is taken: the BOs to swap */
++static int panfrost_device_prepare(struct device *dev)
++{
++	return panfrost_evict_prepare(dev_get_drvdata(dev));
++}
++
+ EXPORT_GPL_DEV_PM_OPS(panfrost_pm_ops) = {
++	.prepare = pm_sleep_ptr(panfrost_device_prepare),
+ 	RUNTIME_PM_OPS(panfrost_device_runtime_suspend, panfrost_device_runtime_resume, NULL)
+ 	SYSTEM_SLEEP_PM_OPS(panfrost_device_suspend, panfrost_device_resume)
+ };
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h
+@@ -173,6 +173,15 @@
+ 	struct list_head shrinker_list;
+ 	struct shrinker *shrinker;
+ 
++	/* Hibernation: the GPU's memory to swap (panfrost_evict.c) */
++	struct {
++		struct mutex lock;
++		struct list_head bos;
++		bool hibernating;	/* between the PM notifier's prepare and post */
++		bool evicted;		/* some BOs are evicted */
++		struct notifier_block pm_nb;
++	} evict;
++
+ 	struct panfrost_devfreq pfdevfreq;
+ 
+ 	struct {
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
+@@ -21,6 +21,7 @@
+ #include <drm/drm_utils.h>
+ 
+ #include "panfrost_device.h"
++#include "panfrost_evict.h"
+ #include "panfrost_gem.h"
+ #include "panfrost_mmu.h"
+ #include "panfrost_job.h"
+@@ -298,6 +299,11 @@
+ 	if (args->pad)
+ 		return -EINVAL;
+ 
++	/* after a hibernation, before the PM notifier brought them back */
++	ret = panfrost_evict_restore(pfdev);
++	if (ret)
++		return ret;
++
+ 	if (!args->jc)
+ 		return -EINVAL;
+ 
+@@ -980,6 +986,7 @@
+ 
+ 	mutex_init(&pfdev->shrinker_lock);
+ 	INIT_LIST_HEAD(&pfdev->shrinker_list);
++	panfrost_evict_init(pfdev);
+ 
+ 	err = panfrost_device_init(pfdev);
+ 	if (err) {
+@@ -1015,6 +1022,7 @@
+ 	panfrost_device_fini(pfdev);
+ 	pm_runtime_set_suspended(pfdev->base.dev);
+ err_out0:
++	panfrost_evict_fini(pfdev);
+ 	return err;
+ }
+ 
+@@ -1024,6 +1032,7 @@
+ 
+ 	drm_dev_unregister(&pfdev->base);
+ 	panfrost_gem_shrinker_cleanup(&pfdev->base);
++	panfrost_evict_fini(pfdev);
+ 
+ 	pm_runtime_get_sync(pfdev->base.dev);
+ 	pm_runtime_disable(pfdev->base.dev);
+--- a/drivers/gpu/drm/panfrost/panfrost_evict.c
++++ b/drivers/gpu/drm/panfrost/panfrost_evict.c
+@@ -0,0 +1,219 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Hibernation with the GPU's memory in swap.
++ *
++ * Every BO's pages are pinned while it is mapped on the GPU, and pinned
++ * pages cannot be reclaimed: a game holding a lot of textures (DOOM 3 BFG,
++ * ~750 MB) leaves too little memory for the hibernation image, which is a
++ * copy of everything that is left. So when the system hibernates, at
++ * device prepare time (user space frozen, the image memory not taken
++ * yet), the BOs are unmapped from the GPU and their pages given back to
++ * their shmem files, marked dirty: reclaim writes them to swap like any
++ * other memory. After the hibernation (resumed from the image, or failed)
++ * they come back: at the PM notifier's post call, or before that if a job
++ * is submitted first; CPU mmaps fault their pages back by themselves.
++ *
++ * Left resident: imported, exported, pinned and vmapped BOs, heaps (the
++ * pages are mapped on GPU faults), purgeable ones (the shrinker frees
++ * them anyway) and BOs a job still holds.
++ */
++
++#include <linux/delay.h>
++#include <linux/dma-resv.h>
++#include <linux/suspend.h>
++
++#include <drm/drm_print.h>
++
++#include "panfrost_device.h"
++#include "panfrost_evict.h"
++#include "panfrost_gem.h"
++#include "panfrost_mmu.h"
++
++#define EVICT_IDLE_WAIT_MS	2000
++
++void panfrost_evict_add(struct panfrost_device *pfdev, struct panfrost_gem_object *bo)
++{
++	mutex_lock(&pfdev->evict.lock);
++	list_add_tail(&bo->evict_node, &pfdev->evict.bos);
++	mutex_unlock(&pfdev->evict.lock);
++}
++
++void panfrost_evict_del(struct panfrost_gem_object *bo)
++{
++	struct panfrost_device *pfdev = to_panfrost_device(bo->base.base.dev);
++
++	mutex_lock(&pfdev->evict.lock);
++	list_del_init(&bo->evict_node);
++	mutex_unlock(&pfdev->evict.lock);
++}
++
++static bool panfrost_evict_bo(struct panfrost_gem_object *bo)
++{
++	struct drm_gem_shmem_object *shmem = &bo->base;
++	struct panfrost_gem_mapping *mapping;
++	bool done = false;
++	int i;
++
++	if (bo->is_heap || drm_gem_is_imported(&shmem->base) || !shmem->pages ||
++	    shmem->madv != PANFROST_MADV_WILLNEED)
++		return false;
++
++	/* the last jobs' cleanup may still be on its way */
++	dma_resv_wait_timeout(shmem->base.resv, DMA_RESV_USAGE_BOOKKEEP, false,
++			      msecs_to_jiffies(EVICT_IDLE_WAIT_MS));
++	for (i = 0; atomic_read(&bo->gpu_usecount) && i < 100; i++)
++		usleep_range(1000, 2000);
++	if (atomic_read(&bo->gpu_usecount))
++		return false;
++
++	mutex_lock(&bo->mappings.lock);
++	dma_resv_lock(shmem->base.resv, NULL);
++
++	if (shmem->base.dma_buf || refcount_read(&shmem->pages_pin_count) ||
++	    refcount_read(&shmem->vmap_use_count))
++		goto out;
++
++	list_for_each_entry(mapping, &bo->mappings.list, node) {
++		if (mapping->active) {
++			panfrost_mmu_unmap(mapping);
++			mapping->evicted = true;
++		}
++	}
++
++	done = drm_gem_shmem_evict_locked(shmem);
++	if (!done) {
++		/* cannot happen after the checks above: map them again */
++		dma_resv_unlock(shmem->base.resv);
++		list_for_each_entry(mapping, &bo->mappings.list, node) {
++			if (mapping->evicted && !panfrost_mmu_map(mapping))
++				mapping->evicted = false;
++		}
++		mutex_unlock(&bo->mappings.lock);
++		return false;
++	}
++	bo->evicted = true;
++
++out:
++	dma_resv_unlock(shmem->base.resv);
++	mutex_unlock(&bo->mappings.lock);
++	return done;
++}
++
++static void panfrost_evict_all(struct panfrost_device *pfdev)
++{
++	struct panfrost_gem_object *bo;
++	size_t bytes = 0, kept = 0;
++	unsigned int n = 0;
++
++	mutex_lock(&pfdev->evict.lock);
++	list_for_each_entry(bo, &pfdev->evict.bos, evict_node) {
++		if (bo->evicted)
++			continue;
++		if (panfrost_evict_bo(bo)) {
++			bytes += bo->base.base.size;
++			n++;
++			pfdev->evict.evicted = true;
++		} else if (bo->base.pages) {
++			kept += bo->base.base.size;
++		}
++	}
++	mutex_unlock(&pfdev->evict.lock);
++
++	if (n)
++		drm_info(&pfdev->base, "hibernation: %zu MiB of %u BOs to swap, %zu MiB kept\n",
++			 bytes >> 20, n, kept >> 20);
++}
++
++/* Map one evicted BO again; its pages come back from shmem/swap */
++static int panfrost_restore_bo(struct panfrost_gem_object *bo)
++{
++	struct panfrost_gem_mapping *mapping;
++	int ret = 0, err;
++
++	mutex_lock(&bo->mappings.lock);
++	list_for_each_entry(mapping, &bo->mappings.list, node) {
++		if (!mapping->evicted)
++			continue;
++		err = panfrost_mmu_map(mapping);
++		if (err) {
++			ret = err;
++			continue;
++		}
++		mapping->evicted = false;
++	}
++	if (!ret)
++		bo->evicted = false;
++	mutex_unlock(&bo->mappings.lock);
++	return ret;
++}
++
++int panfrost_evict_restore(struct panfrost_device *pfdev)
++{
++	struct panfrost_gem_object *bo;
++	unsigned int n = 0, failed = 0;
++	ktime_t start;
++	int ret = 0;
++
++	if (!READ_ONCE(pfdev->evict.evicted))
++		return 0;
++
++	start = ktime_get();
++	mutex_lock(&pfdev->evict.lock);
++	list_for_each_entry(bo, &pfdev->evict.bos, evict_node) {
++		if (!bo->evicted)
++			continue;
++		if (panfrost_restore_bo(bo)) {
++			failed++;
++			ret = -ENOMEM;
++		} else {
++			n++;
++		}
++	}
++	if (!failed)
++		WRITE_ONCE(pfdev->evict.evicted, false);
++	mutex_unlock(&pfdev->evict.lock);
++
++	if (n || failed)
++		drm_info(&pfdev->base, "hibernation: %u BOs back in %lld ms%s\n", n,
++			 ktime_ms_delta(ktime_get(), start), failed ? ", some failed" : "");
++	return ret;
++}
++
++/* dev_pm_ops.prepare: user space frozen, nothing allocated for the image yet */
++int panfrost_evict_prepare(struct panfrost_device *pfdev)
++{
++	if (READ_ONCE(pfdev->evict.hibernating))
++		panfrost_evict_all(pfdev);
++	return 0;
++}
++
++static int panfrost_evict_pm_notifier(struct notifier_block *nb, unsigned long action,
++				      void *data)
++{
++	struct panfrost_device *pfdev = container_of(nb, struct panfrost_device, evict.pm_nb);
++
++	switch (action) {
++	case PM_HIBERNATION_PREPARE:
++		WRITE_ONCE(pfdev->evict.hibernating, true);
++		break;
++	case PM_POST_HIBERNATION:
++		WRITE_ONCE(pfdev->evict.hibernating, false);
++		panfrost_evict_restore(pfdev);
++		break;
++	}
++	return NOTIFY_DONE;
++}
++
++void panfrost_evict_init(struct panfrost_device *pfdev)
++{
++	mutex_init(&pfdev->evict.lock);
++	INIT_LIST_HEAD(&pfdev->evict.bos);
++	pfdev->evict.pm_nb.notifier_call = panfrost_evict_pm_notifier;
++	register_pm_notifier(&pfdev->evict.pm_nb);
++}
++
++void panfrost_evict_fini(struct panfrost_device *pfdev)
++{
++	unregister_pm_notifier(&pfdev->evict.pm_nb);
++	panfrost_evict_restore(pfdev);
++}
+--- a/drivers/gpu/drm/panfrost/panfrost_evict.h
++++ b/drivers/gpu/drm/panfrost/panfrost_evict.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __PANFROST_EVICT_H__
++#define __PANFROST_EVICT_H__
++
++struct panfrost_device;
++struct panfrost_gem_object;
++
++void panfrost_evict_init(struct panfrost_device *pfdev);
++void panfrost_evict_fini(struct panfrost_device *pfdev);
++void panfrost_evict_add(struct panfrost_device *pfdev, struct panfrost_gem_object *bo);
++void panfrost_evict_del(struct panfrost_gem_object *bo);
++int panfrost_evict_prepare(struct panfrost_device *pfdev);
++int panfrost_evict_restore(struct panfrost_device *pfdev);
++
++#endif
+--- a/drivers/gpu/drm/panfrost/panfrost_gem.c
++++ b/drivers/gpu/drm/panfrost/panfrost_gem.c
+@@ -12,6 +12,7 @@
+ #include <drm/drm_print.h>
+ #include "panfrost_device.h"
+ #include "panfrost_drv.h"
++#include "panfrost_evict.h"
+ #include "panfrost_gem.h"
+ #include "panfrost_mmu.h"
+ 
+@@ -79,6 +80,8 @@
+ 	list_del_init(&bo->base.madv_list);
+ 	mutex_unlock(&pfdev->shrinker_lock);
+ 
++	panfrost_evict_del(bo);
++
+ 	/*
+ 	 * If we still have mappings attached to the BO, there's a problem in
+ 	 * our refcounting.
+@@ -435,6 +438,7 @@
+ 
+ 	INIT_LIST_HEAD(&obj->mappings.list);
+ 	mutex_init(&obj->mappings.lock);
++	INIT_LIST_HEAD(&obj->evict_node);
+ 	obj->base.base.funcs = &panfrost_gem_funcs;
+ 	obj->base.map_wc = !pfdev->coherent;
+ 	mutex_init(&obj->label.lock);
+@@ -494,6 +498,9 @@
+ 	bo->wb_mmap = !!(flags & PANFROST_BO_WB_MMAP);
+ 	bo->base.map_wc = should_map_wc(bo);
+ 
++	/* not imported ones: their pages are not ours to give back */
++	panfrost_evict_add(to_panfrost_device(dev), bo);
++
+ 	return bo;
+ }
+ 
+--- a/drivers/gpu/drm/panfrost/panfrost_gem.h
++++ b/drivers/gpu/drm/panfrost/panfrost_gem.h
+@@ -103,6 +103,14 @@
+ 	 */
+ 	bool wb_mmap		:1;
+ 
++	/*
++	 * Hibernation (panfrost_evict.c): every BO is on the device's list;
++	 * an evicted one gave its pages back, its mappings are unmapped.
++	 * Both under the device's evict.lock.
++	 */
++	struct list_head evict_node;
++	bool evicted;
++
+ #ifdef CONFIG_DEBUG_FS
+ 	struct panfrost_gem_debugfs debugfs;
+ #endif
+@@ -115,6 +123,7 @@
+ 	struct drm_mm_node mmnode;
+ 	struct panfrost_mmu *mmu;
+ 	bool active		:1;
++	bool evicted		:1;	/* unmapped for hibernation */
+ };
+ 
+ static inline
+--- a/include/drm/drm_gem_shmem_helper.h
++++ b/include/drm/drm_gem_shmem_helper.h
+@@ -135,6 +135,7 @@
+ }
+ 
+ void drm_gem_shmem_purge_locked(struct drm_gem_shmem_object *shmem);
++bool drm_gem_shmem_evict_locked(struct drm_gem_shmem_object *shmem);
+ 
+ struct sg_table *drm_gem_shmem_get_sg_table(struct drm_gem_shmem_object *shmem);
+ struct sg_table *drm_gem_shmem_get_pages_sgt(struct drm_gem_shmem_object *shmem);

@@ -14,11 +14,15 @@
 # resuming it later, after the file systems changed, would break them.
 # /run/hibernate.ready tells pm-hibernate that the next boot resumes.
 #
-# The file is made once, in the background (1 GiB written: some seconds);
-# until then pm-hibernate sleeps as before (suspend to idle).
+# The file is made once, in the background (1.5 GiB written: some
+# seconds); until then pm-hibernate sleeps as before (suspend to idle). A
+# smaller one from an older system is made longer the same way, in place:
+# its first block, which the kernel command line names, stays.
+# 1.5 GiB: with the GPU's buffers swappable (kernel patch 0028) a game as
+# big as DOOM 3 BFG puts ~0.8 GB of memory and a ~0.4 GB image there.
 
 SWAP=/data/hibernate.swap
-SIZE_MB=1024
+SIZE_MB=1536
 READY=/run/hibernate.ready
 EXTLINUX=/boot/extlinux/extlinux.conf
 
@@ -27,6 +31,10 @@ log() { echo "hibernate: $*"; logger -t hibernate "$*" 2>/dev/null; }
 disk_of() {
 	p=$(readlink -f "/sys/class/block/${1#/dev/}") || return 1
 	basename "$(dirname "$p")"
+}
+
+size_mb() {
+	ls -ln "$SWAP" | awk '{ print int($5 / 1048576) }'
 }
 
 # the hibernation signature at the end of the file's first page
@@ -65,6 +73,12 @@ setup() {
 			chmod 600 "$SWAP.new" && mkswap "$SWAP.new" > /dev/null &&
 			mv "$SWAP.new" "$SWAP" ||
 			{ log "cannot make $SWAP"; rm -f "$SWAP.new"; return 1; }
+	elif [ "$(size_mb)" -lt $SIZE_MB ]; then
+		have=$(size_mb)
+		log "making $SWAP longer: $have -> $SIZE_MB MiB"
+		dd if=/dev/zero of="$SWAP" bs=1M seek=$have count=$((SIZE_MB - have)) \
+			conv=notrunc,fsync 2>/dev/null && mkswap "$SWAP" > /dev/null ||
+			{ log "cannot make $SWAP longer"; return 1; }
 	elif has_image; then
 		log "an image the kernel did not resume: cleared"
 		mkswap "$SWAP" > /dev/null || return 1
@@ -84,7 +98,7 @@ case "$1" in
 start)
 	printf "Setting up hibernation: "
 	rm -f $READY
-	if [ -f "$SWAP" ]; then
+	if [ -f "$SWAP" ] && [ "$(size_mb)" -ge $SIZE_MB ]; then
 		setup && echo "OK" || echo "FAIL"
 	else
 		( setup ) </dev/null >/dev/null 2>&1 &

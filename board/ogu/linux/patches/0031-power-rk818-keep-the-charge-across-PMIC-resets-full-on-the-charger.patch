@@ -1,0 +1,142 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: supply: rk818: keep the charge across PMIC resets, full on the charger
+
+Two things made the battery level wrong on the ODROID-GO Ultra:
+
+- Every reboot (DEV_OFF_RST, patch 0017) and every hibernation (the
+  boot kernel probes this built-in driver before the image is loaded)
+  powers the RK818 up again with BAT_CON set, which the driver took as
+  a newly connected battery and re-anchored from the OCV the PMIC
+  samples then: taken under load right after charging, 3939 mV = 86%
+  with the cell at 4.2 V. The state saved every monitor cycle is still
+  in the data registers, which only a battery disconnect clears: keep it
+  when it is valid and the device was off for less than 30 minutes.
+
+- With the charger plugged in, after the charge finishes the RK818 runs
+  the system from the battery (about -0.8 A) until the recharge
+  threshold, tops it up (CC/CV, ~0.6 A) and finishes again, every few
+  minutes; meanwhile the relaxed-voltage re-anchor took the polarised
+  4.07 V for 9x%. The level jumped 100, 99, 100 and the status between
+  "full" and "charging". Once the charge finished on the charger, keep
+  100% and "full" (no relax re-anchor) until the charger is unplugged or
+  the counter falls 5% below full (a load bigger than the charger gives).
+
+--- a/drivers/power/supply/rk818_battery.c
++++ b/drivers/power/supply/rk818_battery.c
+@@ -288,6 +288,9 @@
+ 	/* Startup flags */
+ 	bool	is_first_power_on;
+ 	bool	is_initialized;
++	/* the charge finished with the charger plugged in and has not been
++	 * lost since: 100% and "full" until it is unplugged */
++	bool	full_latched;
+ 	u32	pwroff_min;
+ 
+ 	u32		monitor_ms;
+@@ -939,6 +942,13 @@
+  *
+  * Decision priority:
+  *  1. First ever power-on: use OCV-derived SoC (battery was just connected).
++ *     BAT_CON is also set after the PMIC was reset with the battery in
++ *     place (DEV_OFF_RST before a reboot, the power-off of a hibernation):
++ *     then the state saved every monitor cycle is still in the data
++ *     registers, which only a battery disconnect clears, and it is kept.
++ *     The OCV the PMIC samples at such a power-on is taken under load
++ *     right after charging or playing (3939 mV, "86%", with the cell at
++ *     4.2 V), so it must not override the saved state.
+  *  2. Warm reboot (FG_INIT flag set): the coulomb counter is still live;
+  *     trust it and the saved dsoc directly.
+  *  3. Cold boot after >= 30 min off: OCV has settled; re-anchor from OCV.
+@@ -964,7 +974,12 @@
+ 	ocv_soc = vol_to_soc(di, ocv_vol);
+ 	ocv_cap = vol_to_cap(di, ocv_vol);
+ 
+-	if (di->is_first_power_on) {
++	saved_dsoc = rk818_read(di, RK818_SOC_REG);
++	saved_cap  = rk818_read_saved_cap(di);
++
++	if (di->is_first_power_on &&
++	    (saved_cap <= 0 || saved_cap > di->fcc_mah || saved_dsoc > 100 ||
++	     di->pwroff_min >= 30)) {
+ 		di->dsoc           = ocv_soc;
+ 		di->remain_cap_mah = ocv_cap;
+ 		rk818_save_fcc(di, (u32)di->fcc_mah);
+@@ -974,8 +989,14 @@
+ 		goto done;
+ 	}
+ 
+-	saved_dsoc = rk818_read(di, RK818_SOC_REG);
+-	saved_cap  = rk818_read_saved_cap(di);
++	if (di->is_first_power_on) {
++		di->dsoc           = saved_dsoc;
++		di->remain_cap_mah = saved_cap;
++		dev_info(di->dev,
++			 "PMIC reset, saved state kept: dsoc=%d cap=%d mAh (ocv=%d mV: %d%%)\n",
++			 di->dsoc, di->remain_cap_mah, ocv_vol, ocv_soc);
++		goto done;
++	}
+ 
+ 	if (di->is_initialized) {
+ 		di->dsoc           = saved_dsoc;
+@@ -1028,6 +1049,7 @@
+  * ------------------------------------------------------------------------- */
+ 
+ #define CALIB_INTERVAL_MIN	8
++#define FULL_KEEP_PCT		5	/* lost on the charger: not full any more */
+ 
+ static void rk818_periodic_calib(struct rk818_battery *di)
+ {
+@@ -1079,7 +1101,11 @@
+ 	}
+ 
+ 	di->voltage_relax_mv = rk818_get_relax_voltage(di);
+-	if (di->voltage_relax_mv > 0) {
++	/* after the charge finished the cell is polarised for a long time:
++	 * its "relaxed" voltage reads low (4.07 V, 9x%) */
++	if (di->voltage_relax_mv > 0 && di->full_latched) {
++		rk818_restart_relax(di);
++	} else if (di->voltage_relax_mv > 0) {
+ 		int ocv_cap = vol_to_cap(di, di->voltage_relax_mv);
+ 		int ocv_soc = vol_to_soc(di, di->voltage_relax_mv);
+ 
+@@ -1095,6 +1121,29 @@
+ 	di->rsoc = clamp(di->remain_cap_mah * 100 / DIV(di->fcc_mah), 0, 100);
+ 
+ 	/*
++	 * With the charger plugged in, once the charge finished the RK818 lets
++	 * the system run from the battery until it falls to the recharge
++	 * threshold, tops it up and finishes again, every few minutes: 100,
++	 * 99, 100... and "full", "charging", "full". It stays 100% and full
++	 * through that, until the charger goes or the battery really loses
++	 * charge (a load bigger than the charger gives).
++	 */
++	if (!di->charger_online) {
++		di->full_latched = false;
++	} else if (di->chrg_status == RK818_CHG_STS_TERMINATED) {
++		di->full_latched = true;
++	} else if (di->full_latched &&
++		   di->remain_cap_mah < di->fcc_mah - di->fcc_mah * FULL_KEEP_PCT / 100) {
++		dev_info(di->dev, "losing charge on the charger: %d mAh, not full any more\n",
++			 di->remain_cap_mah);
++		di->full_latched = false;
++	}
++	if (di->full_latched) {
++		di->dsoc = 100;
++		return;
++	}
++
++	/*
+ 	 * Report an empty battery only when the IR compensated OCV estimate
+ 	 * stays below the design minimum for several monitor cycles.  Bare
+ 	 * terminal voltage dips below the threshold under high load with
+@@ -1441,7 +1490,9 @@
+ 		case RK818_CHG_STS_WAKEUP_CUR:
+ 		case RK818_CHG_STS_TRICKLE_CUR:
+ 		case RK818_CHG_STS_CC_OR_CV:
+-			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++			/* a top-up after the charge finished (rk818_update_soc()) */
++			val->intval = di->full_latched ? POWER_SUPPLY_STATUS_FULL :
++				      POWER_SUPPLY_STATUS_CHARGING;
+ 			break;
+ 		case RK818_CHG_STS_TERMINATED:
+ 			val->intval = rk818_charger_online(di) ?

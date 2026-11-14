@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# The date and time of the ODROID-GO Ultra, kept by the RTC of the RK818
+# PMIC, which runs on the battery while the device is off. The kernel takes
+# the time at boot from rtc0, the SoC's meson-vrtc, which loses it without
+# power: the system started in 1970. The RK817 has an RTC too, but it runs
+# 14% slow on this board (103 s in 120 s: no 32 kHz crystal), the RK818's is
+# right (181 s in 180 s).
+#
+#   rtc-clock load                     system time from the RTC (boot, after
+#                                      a hibernation)
+#   rtc-clock set "YYYY-MM-DD hh:mm"   system time and the RTC (bare_app's
+#                                      date and time setting)
+#
+# There is no time zone: the time set is the time shown, kept as UTC.
+
+# the RTC of the PMIC named rk818 (rtcN numbers follow probe order)
+rtc_dev() {
+	for r in /sys/class/rtc/rtc*; do
+		[ "$(cat "$r/device/../name" 2>/dev/null)" = rk818 ] || continue
+		echo "/dev/${r##*/}"
+		return 0
+	done
+	return 1
+}
+
+dev=$(rtc_dev) || { echo "rtc-clock: no RK818 RTC" >&2; exit 1; }
+
+case "$1" in
+load)
+	hwclock -s -u -f "$dev"
+	;;
+set)
+	[ -n "$2" ] || { echo "Usage: $0 set \"YYYY-MM-DD hh:mm\"" >&2; exit 1; }
+	date -u -s "$2" > /dev/null && hwclock -w -u -f "$dev"
+	;;
+*)
+	echo "Usage: $0 load | set \"YYYY-MM-DD hh:mm\"" >&2
+	exit 1
+	;;
+esac

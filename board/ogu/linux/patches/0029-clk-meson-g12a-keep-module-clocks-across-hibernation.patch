@@ -1,0 +1,125 @@
+From: OdroidLinux SDK
+Subject: [PATCH] clk: meson: g12a: keep the clocks of module drivers across hibernation
+
+After resuming from hibernation the SoC has been powered off. The boot
+kernel that loads the image sets up only the clocks of its built-in
+drivers; those of drivers built as modules (panfrost for the Mali GPU,
+the video decoder and the HCODEC encoder) stay as reset left them,
+gated, while the restored kernel's clock framework counts them as
+running and never writes them again. The first GPU job after the resume
+runtime-resumes panfrost, whose soft reset touches the GPU registers
+with no clock: "Kernel panic - not syncing: Asynchronous SError
+Interrupt" in panfrost_gpu_soft_reset.
+
+Save the HHI clock gate registers and the Mali and VDEC clock control
+registers in a syscore suspend, which runs right before the image is
+made so the values are part of it, and write back in the syscore resume
+(patch 0022) those the hardware now holds differently, before any device
+resumes. After a suspend to RAM they are unchanged and nothing is
+written.
+
+The final Mali mux is a glitch-free switch that only moves while both
+branches run: when the image had mali_1 selected, one write from the
+reset state left it on the gated mali_0 (the same SError). It is
+restored in steps: both branches running, the mux, then the saved
+gates.
+
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -15,6 +15,7 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/clk.h>
++#include <linux/delay.h>
+ #include <linux/module.h>
+ #include <linux/syscore_ops.h>
+ 
+@@ -5465,16 +5466,86 @@
+ };
+ 
+ /*
++ * Clock registers whose state only the kernel knows, kept across a system
++ * sleep. After resuming from hibernation the SoC has been off: the boot
++ * kernel that loaded the image only set up the clocks of its built-in
++ * drivers, so those of drivers that are modules (panfrost: Mali, the
++ * video decoder/encoder) are still as reset left them, gated, while the
++ * clock framework of the restored kernel counts them as running and never
++ * writes them again. The GPU then takes an SError on its first register
++ * access. Each register is saved before the image is made (so the value
++ * is in the image) and written back when the hardware has another value.
++ * After a suspend to RAM they are unchanged and nothing is written.
++ */
++static const unsigned int g12a_clkc_kept_regs[] = {
++	HHI_GCLK_MPEG0, HHI_GCLK_MPEG1, HHI_GCLK_MPEG2,
++	HHI_GCLK_OTHER, HHI_GCLK_OTHER2,
++	HHI_MALI_CLK_CNTL,
++	HHI_VDEC_CLK_CNTL, HHI_VDEC2_CLK_CNTL, HHI_VDEC3_CLK_CNTL,
++	HHI_VDEC4_CLK_CNTL,
++};
++static u32 g12a_clkc_kept[ARRAY_SIZE(g12a_clkc_kept_regs)];
++
++/*
++ * The final Mali mux (bit 31) is a glitch-free switch: it only moves
++ * while both mali_0 and mali_1 run. Restoring it from the reset state
++ * (both gated, mux on mali_0) in one write leaves it on the gated mali_0
++ * when the image had mali_1: run both branches (their selectors and
++ * dividers as saved) to move it, then the saved gates.
++ */
++static void g12a_mali_clk_restore(struct regmap *map, u32 now, u32 saved)
++{
++	const u32 both = BIT(8) | BIT(24), mux = BIT(31);
++
++	if ((now ^ saved) & mux) {
++		regmap_write(map, HHI_MALI_CLK_CNTL, (saved & ~mux) | (now & mux) | both);
++		udelay(5);
++		regmap_write(map, HHI_MALI_CLK_CNTL, saved | both);
++		udelay(5);
++	}
++	regmap_write(map, HHI_MALI_CLK_CNTL, saved);
++}
++
++static int g12a_clkc_syscore_suspend(void *data)
++{
++	struct regmap *map = g12a_mali.map;
++	unsigned int i, v;
++
++	for (i = 0; map && i < ARRAY_SIZE(g12a_clkc_kept_regs); i++) {
++		if (!regmap_read(map, g12a_clkc_kept_regs[i], &v))
++			g12a_clkc_kept[i] = v;
++	}
++	return 0;
++}
++
++/*
+  * Runs on the boot CPU right after the firmware hands the SoC back, before
+- * any device (the display among them) resumes: turn back on the PLLs the
+- * firmware left off (see meson_clk_pll_restore_context()).
++ * any device (the display among them) resumes: the kept registers back,
++ * and turn back on the PLLs the firmware left off (see
++ * meson_clk_pll_restore_context()).
+  */
+ static void g12a_clkc_syscore_resume(void *data)
+ {
++	struct regmap *map = g12a_mali.map;
++	unsigned int i, v;
++
++	for (i = 0; map && i < ARRAY_SIZE(g12a_clkc_kept_regs); i++) {
++		if (regmap_read(map, g12a_clkc_kept_regs[i], &v) ||
++		    v == g12a_clkc_kept[i])
++			continue;
++		pr_info("g12a-clkc: HHI 0x%03x was 0x%08x, restored 0x%08x\n",
++			g12a_clkc_kept_regs[i], v, g12a_clkc_kept[i]);
++		if (g12a_clkc_kept_regs[i] == HHI_MALI_CLK_CNTL)
++			g12a_mali_clk_restore(map, v, g12a_clkc_kept[i]);
++		else
++			regmap_write(map, g12a_clkc_kept_regs[i], g12a_clkc_kept[i]);
++	}
++
+ 	clk_restore_context();
+ }
+ 
+ static const struct syscore_ops g12a_clkc_syscore_ops = {
++	.suspend = g12a_clkc_syscore_suspend,
+ 	.resume = g12a_clkc_syscore_resume,
+ };
+ 

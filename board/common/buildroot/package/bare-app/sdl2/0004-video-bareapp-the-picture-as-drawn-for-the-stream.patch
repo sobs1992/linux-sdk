@@ -1,0 +1,103 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] video: bareapp: the picture as drawn, for the stream
+
+While bare_app streams the screen it asks the game for its own picture
+(bare_app's game_ipc.h: full_want). A window bigger than bare_app's frame
+now goes to the stream as it is, before it is taken down to the frame:
+a game drawing 1280x720 on the GO Ultra's 854x480 streams at 1280x720.
+Surfaces, the software renderer and OpenGL read back at each swap are
+copied; with SDL_BAREAPP_GL_ASYNC the GPU's copy is made at the window's
+own size while the stream wants it (BAREAPP_FitSize()), and taken down
+to the frame by the CPU as without it. Nothing changes while nobody
+watches, or for a window no bigger than the frame.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+--- a/src/video/bareapp/SDL_bareapp.h
++++ b/src/video/bareapp/SDL_bareapp.h
+@@ -71,12 +71,16 @@
+  * whole frame; integer: whole multiples), filtered as SDL_BAREAPP_FILTER
+  * says (linear, nearest; whole multiples always nearest), and publishes
+  * it. pitch may be negative (rows going up). Waits as needed for at most
+- * SDL_BAREAPP_FPS frames a second (default 60, 0: no limit).
++ * SDL_BAREAPP_FPS frames a second (default 60, 0: no limit). While
++ * bare_app streams the screen, a picture bigger than the frame goes to the
++ * stream as well, as it is (game_ipc.h: the game's own picture).
+  */
+ extern void BAREAPP_Present(const void *pixels, int w, int h, int pitch, BAREAPP_Format format);
+ 
+ /* The size a w x h picture gets in the frame and whether it is scaled with
+- * the nearest pixel (else linear): for a GPU that scales it itself */
++ * the nearest pixel (else linear): for a GPU that scales it itself. Its
++ * own size while the stream wants it as it is (BAREAPP_Present() takes it
++ * down then) */
+ extern void BAREAPP_FitSize(int w, int h, int *fit_w, int *fit_h, SDL_bool *nearest);
+ 
+ /* bare_app's gamepad names (up, a, l2, f1...): enum gp_button, -1 if none */
+--- a/src/video/bareapp/SDL_bareapplink.c
++++ b/src/video/bareapp/SDL_bareapplink.c
+@@ -217,11 +217,23 @@
+     r->y = (fh - r->h) / 2;
+ }
+ 
++/* bare_app's stream wants the picture as drawn (game_ipc.h): one bigger
++ * than the frame goes to it as it is, not taken down */
++static SDL_bool FullWanted(int w, int h)
++{
++    const struct game_shm *shm = ba.app.shm;
++
++    return ba.open && !ba.gone && (w > (int)shm->width || h > (int)shm->height) &&
++           game_link_full_wanted(&ba.app, w, h) ? SDL_TRUE : SDL_FALSE;
++}
++
+ void BAREAPP_FitSize(int w, int h, int *fit_w, int *fit_h, SDL_bool *nearest)
+ {
+     SDL_Rect r;
+ 
+-    if (!ba.open || ba.gone || w <= 0 || h <= 0) {
++    /* the stream's picture is the whole one: copied as it is, taken down
++     * to the frame by BAREAPP_Present() */
++    if (!ba.open || ba.gone || w <= 0 || h <= 0 || FullWanted(w, h)) {
+         *fit_w = w;
+         *fit_h = h;
+         *nearest = SDL_TRUE;
+@@ -360,6 +372,28 @@
+     }
+ }
+ 
++/* The picture as it is into the stream's (game_ipc.h), before the frame */
++static void PresentFull(const void *pixels, int w, int h, int pitch, BAREAPP_Format format)
++{
++    Uint32 *full = game_link_full(&ba.app);
++    size_t row = ba.app.shm->full_width;
++    int x, y;
++
++    for (y = 0; y < h; y++) {
++        const Uint32 *in = (const Uint32 *)((const Uint8 *)pixels + (Sint64)y * pitch);
++        Uint32 *out = full + (size_t)y * row;
++
++        if (format == BAREAPP_XRGB) {
++            SDL_memcpy(out, in, (size_t)w * 4);
++        } else {
++            for (x = 0; x < w; x++) {
++                out[x] = Pixel(in, x, format);
++            }
++        }
++    }
++    game_link_full_publish(&ba.app, w, h);
++}
++
+ void BAREAPP_Present(const void *pixels, int w, int h, int pitch, BAREAPP_Format format)
+ {
+     struct game_shm *shm = ba.app.shm;
+@@ -380,6 +414,9 @@
+     Fill(frame, stride, 0, r.y, r.x, r.h);
+     Fill(frame, stride, r.x + r.w, r.y, fw - r.x - r.w, r.h);
+     Draw(pixels, w, h, pitch, format, frame, stride, &r);
++    if (FullWanted(w, h)) {
++        PresentFull(pixels, w, h, pitch, format);
++    }
+ 
+     Pace();
+     if (game_link_publish(&ba.app) < 0) {

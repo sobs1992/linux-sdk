@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# The date and time from the RTC of the RK818 (/usr/sbin/rtc-clock): its
+# driver is a module, so after the coldplug of S03mdev, which S30audio has
+# waited for.
+
+case "$1" in
+start)
+	i=0
+	while [ ! -e /run/coldplug.done ] && [ $i -lt 100 ]; do
+		sleep 0.05
+		i=$((i + 1))
+	done
+	printf "Setting the clock: "
+	/usr/sbin/rtc-clock load && date || echo "FAIL"
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac
