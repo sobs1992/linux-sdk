@@ -53,7 +53,9 @@ LINUX_DTBS      := amlogic/meson-g12b-odroid-go-ultra.dtb
 LINUX_EXT_MODULES := $(BOARD_DIR)/linux/meson-venc
 # The CPU clusters stay within the factory limits (A73 1908 MHz, A53 1800
 # MHz): the dts patch turns off the A53 points above that.
-LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet
+# panic=10: after a kernel panic the board restarts by itself in 10 s
+# instead of hanging until the power key is held.
+LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet panic=10
 
 # --- Root filesystem (Buildroot) ---
 BUILDROOT_SRC       := src/buildroot
