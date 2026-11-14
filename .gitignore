@@ -7,3 +7,5 @@
 /board/common/buildroot/authorized_keys
 # Built example apps
 /apps/oga-pad/oga-pad
+# Python bytecode caches of the scripts
+__pycache__/
