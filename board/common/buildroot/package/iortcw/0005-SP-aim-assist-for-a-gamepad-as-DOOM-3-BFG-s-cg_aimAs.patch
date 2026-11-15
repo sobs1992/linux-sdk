@@ -1,0 +1,494 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 19:35:17 +0100
+Subject: [PATCH] SP: aim assist for a gamepad, as DOOM 3 BFG's (cg_aimAssist)
+
+DOOM 3 BFG Edition helps a gamepad aim; this is the same, by its rules
+and numbers (AimAssist.cpp), for the single player:
+
+- The target: the best enemy in front within 3000 units that can be seen
+  (0.8 for looking at it, 0.2 for being near), its chest or else its head.
+  An enemy is a living character of another team than the player's that
+  is not neutral: civilians and allies never pull the aim.
+- Friction: while the line of aim passes near it (96 units, 192 at 768),
+  turning with the gamepad's stick slows down, to 0.4 on the target.
+- Adhesion: while the player moves, the view turns towards a target near
+  the line of aim (96 units): a quarter of what is left and 0.6 degrees
+  at most a 60 Hz frame, compounded for other frame times.
+
+The cgame (cg_aimassist.c) works it out each frame and hands it to the
+client by a new trap, CG_SETAIMASSIST (after iortcw's CG_ALLOC); the
+client slows the stick's turning (not the mouse's) and adds the turn to
+the next command. cg_aimAssist 0 (the default) turns it off.
+---
+ SP/Makefile                  |   1 +
+ SP/code/cgame/cg_aimassist.c | 254 +++++++++++++++++++++++++++++++++++
+ SP/code/cgame/cg_local.h     |  10 ++
+ SP/code/cgame/cg_main.c      |   2 +
+ SP/code/cgame/cg_public.h    |   3 +-
+ SP/code/cgame/cg_syscalls.c  |   4 +
+ SP/code/cgame/cg_view.c      |   1 +
+ SP/code/client/cl_cgame.c    |  24 ++++
+ SP/code/client/cl_input.c    |  12 ++
+ SP/code/client/client.h      |   7 +
+ 10 files changed, 317 insertions(+), 1 deletion(-)
+ create mode 100644 SP/code/cgame/cg_aimassist.c
+
+diff --git a/SP/Makefile b/SP/Makefile
+index 74a126d2..b5819cd7 100644
+--- a/SP/Makefile
++++ b/SP/Makefile
+@@ -2505,6 +2505,7 @@ $(B)/$(SERVERBIN)$(FULLBINEXT): $(Q3DOBJ)
+ 
+ Q3CGOBJ_ = \
+   $(B)/$(BASEGAME)/cgame/cg_main.o \
++  $(B)/$(BASEGAME)/cgame/cg_aimassist.o \
+   $(B)/$(BASEGAME)/cgame/bg_animation.o \
+   $(B)/$(BASEGAME)/cgame/bg_misc.o \
+   $(B)/$(BASEGAME)/cgame/bg_pmove.o \
+diff --git a/SP/code/cgame/cg_aimassist.c b/SP/code/cgame/cg_aimassist.c
+new file mode 100644
+index 00000000..5611dc0e
+--- /dev/null
++++ b/SP/code/cgame/cg_aimassist.c
+@@ -0,0 +1,254 @@
++/*
++===========================================================================
++
++Aim assist for a gamepad, single player: DOOM 3 BFG Edition's (its
++AimAssist.cpp, the same rules and numbers), for iortcw.
++
++The target is the best enemy in front of the player within MAX_DIST that
++can be seen (score: 0.8 for looking at it, 0.2 for being near). An enemy
++is a living character of another team than the player's that is not
++neutral: civilians and allies (killing them fails missions) never pull the
++aim. Its point is its chest, or its head when only that can be seen.
++
++- Friction: while the line of aim passes near the target (FRICTION_RADIUS,
++  growing to FRICTION_OPTIMAL_RADIUS at FRICTION_OPTIMAL_DIST), turning with
++  the gamepad's stick slows down, to FRICTION_MAX of its speed on the
++  target.
++- Adhesion: while the player moves, the view turns towards a target near
++  the line of aim (ADHESION_RADIUS): ADHESION_PCT_MAX at most of what is
++  left, ADHESION_SPEED_MAX at most, a frame of 60 Hz (BFG's tic); other
++  frame times compound the same amounts.
++
++The client applies both (CL_JoystickMove: the stick's turning only, not the
++mouse; CL_CreateCmd: the turn) from trap_SetAimAssist each frame.
++cg_aimAssist 0 (the default; a gamepad installation's config sets 1) turns
++it off. This file is GPLv3 as the rest of the code.
++
++===========================================================================
++*/
++
++#include "cg_local.h"
++
++#define MAX_DIST                    3000.0f
++#define AIM_WEIGHT                  0.8f
++
++#define FRICTION_MAX_DIST           1024.0f
++#define FRICTION_OPTIMAL_DIST       768.0f
++#define FRICTION_RADIUS             96.0f
++#define FRICTION_OPTIMAL_RADIUS     192.0f
++#define FRICTION_MIN                1.0f    // the stick's speed at the radius
++#define FRICTION_MAX                0.4f    // and on the target
++
++#define ADHESION_RADIUS             96.0f
++#define ADHESION_SPEED_MAX          0.6f    // degrees a 60 Hz frame
++#define ADHESION_PCT_MAX            0.25f   // of what is left, a 60 Hz frame
++#define ADHESION_PLAYER_SPEED       10.0f   // units a second the player moves at least
++
++#define TIC_MSEC                    ( 1000.0f / 60.0f )
++
++// game/ai_cast.h: AITEAM_NEUTRAL (civilians); the player is AITEAM_ALLIES
++#define AA_TEAM_NEUTRAL             7
++
++/*
++==============
++AimAssist_FrictionRadius
++
++BFG's: the radius grows from FRICTION_RADIUS near the player to
++FRICTION_OPTIMAL_RADIUS at FRICTION_OPTIMAL_DIST and back to
++FRICTION_RADIUS at FRICTION_MAX_DIST, which it keeps beyond
++==============
++*/
++static float AimAssist_FrictionRadius( float dist ) {
++	float s;
++
++	if ( dist <= 0.0f || dist > FRICTION_MAX_DIST ) {
++		return FRICTION_RADIUS;
++	}
++	if ( dist > FRICTION_OPTIMAL_DIST ) {
++		s = 1.0f - ( dist - FRICTION_OPTIMAL_DIST ) / ( FRICTION_MAX_DIST - FRICTION_OPTIMAL_DIST );
++	} else {
++		s = dist / FRICTION_OPTIMAL_DIST;
++	}
++	return FRICTION_RADIUS + ( FRICTION_OPTIMAL_RADIUS - FRICTION_RADIUS ) * s;
++}
++
++/*
++==============
++CG_AimAssistCompute
++
++For a target at targetPos seen from viewOrg looking along viewAngles: the
++stick's turning speed (1: as it is) and the turn to add this frame
++(degrees, PITCH and YAW) for a frame of frameMsec while the player moves at
++playerSpeed
++==============
++*/
++void CG_AimAssistCompute( const vec3_t viewOrg, const vec3_t viewAngles, const vec3_t targetPos,
++						  float playerSpeed, int frameMsec, float *friction, vec3_t turn ) {
++	vec3_t forward, dir, aim;
++	float dist, along, delta, radius, contribution, tics, keep, maxStep;
++	int i;
++
++	*friction = 1.0f;
++	VectorClear( turn );
++
++	VectorSubtract( targetPos, viewOrg, dir );
++	dist = VectorLength( dir );
++	if ( dist <= 0.0f ) {
++		return;
++	}
++	AngleVectors( viewAngles, forward, NULL, NULL );
++
++	// the distance of the target from the line of aim
++	along = DotProduct( forward, dir ) / dist;
++	if ( along < 0.0f ) {
++		along = 0.0f;
++	} else if ( along > 1.0f ) {
++		along = 1.0f;
++	}
++	along *= dist;
++	delta = dist * dist - along * along;
++	delta = delta > 0.0f ? sqrt( delta ) : 0.0f;
++
++	radius = AimAssist_FrictionRadius( dist );
++	if ( delta < radius ) {
++		*friction = FRICTION_MIN + ( FRICTION_MAX - FRICTION_MIN ) * ( 1.0f - delta / radius );
++	}
++
++	if ( playerSpeed <= ADHESION_PLAYER_SPEED || frameMsec <= 0 ) {
++		return;
++	}
++	contribution = 1.0f - delta / ADHESION_RADIUS;
++	if ( contribution <= 0.0f ) {
++		return;
++	}
++	if ( contribution > ADHESION_PCT_MAX ) {
++		contribution = ADHESION_PCT_MAX;
++	}
++
++	// a frame of tics 60 Hz frames: what is left after them, the step at most
++	tics = frameMsec / TIC_MSEC;
++	keep = pow( 1.0f - contribution, tics );
++	maxStep = ADHESION_SPEED_MAX * tics;
++	vectoangles( dir, aim );
++	for ( i = PITCH; i <= YAW; i++ ) {
++		// exactly: AngleNormalize180 rounds to 1/65536 of a turn
++		float d = fmod( aim[i] - viewAngles[i], 360.0f );
++
++		if ( d > 180.0f ) {
++			d -= 360.0f;
++		} else if ( d < -180.0f ) {
++			d += 360.0f;
++		}
++
++		if ( d > maxStep ) {
++			d = maxStep;
++		} else if ( d < -maxStep ) {
++			d = -maxStep;
++		}
++		turn[i] = d * ( 1.0f - keep );
++	}
++}
++
++/*
++==============
++AimAssist_Point
++
++The point of a character to aim at: its chest (part = 0) or its head
++(part = 1), from its bounding box
++==============
++*/
++static void AimAssist_Point( const centity_t *cent, int part, vec3_t point ) {
++	int solid = cent->currentState.solid;
++	float down = 24.0f, up = 48.0f;
++
++	if ( solid && solid != SOLID_BMODEL ) {
++		down = ( solid >> 8 ) & 255;
++		up = ( ( solid >> 16 ) & 255 ) - 32;
++	}
++	VectorCopy( cent->lerpOrigin, point );
++	if ( part == 0 ) {
++		point[2] += ( up - down ) * 0.5f + ( up + down ) / 6.0f;
++	} else {
++		point[2] += up - 8.0f;
++	}
++}
++
++/*
++==============
++AimAssist_Visible
++==============
++*/
++static qboolean AimAssist_Visible( const vec3_t from, const vec3_t to, int entityNum ) {
++	trace_t tr;
++
++	CG_Trace( &tr, from, NULL, NULL, to, cg.snap->ps.clientNum, MASK_SHOT );
++	return tr.fraction >= 1.0f || tr.entityNum == entityNum;
++}
++
++/*
++==============
++CG_AimAssist
++
++Each frame: the target and what it does, to the client
++==============
++*/
++void CG_AimAssist( void ) {
++	const vec_t *viewOrg = cg.refdef.vieworg;
++	const vec_t *viewAngles = cg.refdefViewAngles;
++	float friction = 1.0f, best = 0.0f;
++	qboolean found = qfalse;
++	vec3_t forward, turn, targetPos;
++	int i;
++
++	VectorClear( turn );
++	if ( !cg_aimAssist.integer || cgs.gametype != GT_SINGLE_PLAYER || !cg.snap ||
++		 cg.snap->ps.pm_type == PM_DEAD || cg.snap->ps.stats[STAT_HEALTH] <= 0 ||
++		 cg.cameraMode || cg.renderingThirdPerson ) {
++		trap_SetAimAssist( friction, turn[PITCH], turn[YAW] );
++		return;
++	}
++
++	AngleVectors( viewAngles, forward, NULL, NULL );
++	for ( i = 0; i < MAX_CLIENTS; i++ ) {
++		centity_t *cent = &cg_entities[i];
++		const entityState_t *s = &cent->currentState;
++		vec3_t point, dir;
++		float dist, look, score;
++
++		if ( i == cg.snap->ps.clientNum || !cent->currentValid || s->eType != ET_PLAYER ||
++			 s->aiChar == AICHAR_NONE || ( s->eFlags & ( EF_DEAD | EF_NODRAW ) ) ||
++			 s->teamNum == cg.snap->ps.teamNum || s->teamNum == AA_TEAM_NEUTRAL ) {
++			continue;
++		}
++
++		AimAssist_Point( cent, 0, point );
++		VectorSubtract( point, viewOrg, dir );
++		dist = VectorNormalize( dir );
++		if ( dist > MAX_DIST ) {
++			continue;
++		}
++		look = DotProduct( forward, dir );
++		if ( look < 0.0f ) {
++			continue;
++		}
++		score = look * AIM_WEIGHT + ( 1.0f - dist / MAX_DIST ) * ( 1.0f - AIM_WEIGHT );
++		if ( found && score <= best ) {
++			continue;
++		}
++		if ( !AimAssist_Visible( viewOrg, point, s->number ) ) {
++			AimAssist_Point( cent, 1, point );
++			if ( !AimAssist_Visible( viewOrg, point, s->number ) ) {
++				continue;
++			}
++		}
++		found = qtrue;
++		best = score;
++		VectorCopy( point, targetPos );
++	}
++
++	if ( found ) {
++		CG_AimAssistCompute( viewOrg, viewAngles, targetPos, VectorLength( cg.snap->ps.velocity ),
++							 cg.frametime, &friction, turn );
++	}
++	trap_SetAimAssist( friction, turn[PITCH], turn[YAW] );
++}
+diff --git a/SP/code/cgame/cg_local.h b/SP/code/cgame/cg_local.h
+index b3e39970..22d755f6 100644
+--- a/SP/code/cgame/cg_local.h
++++ b/SP/code/cgame/cg_local.h
+@@ -1641,6 +1641,7 @@ extern vmCvar_t cg_crosshairY;
+ extern vmCvar_t cg_crosshairSize;
+ extern vmCvar_t cg_crosshairAlpha;          //----(SA)	added
+ extern vmCvar_t cg_crosshairHealth;
++extern vmCvar_t cg_aimAssist;
+ extern vmCvar_t cg_drawStatus;
+ extern vmCvar_t cg_draw2D;
+ extern vmCvar_t cg_drawFrags;
+@@ -1822,6 +1823,13 @@ void CG_ZoomUp_f( void );
+ 
+ void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demoPlayback );
+ 
++//
++// cg_aimassist.c
++//
++void CG_AimAssistCompute( const vec3_t viewOrg, const vec3_t viewAngles, const vec3_t targetPos,
++						  float playerSpeed, int frameMsec, float *friction, vec3_t turn );
++void CG_AimAssist( void );
++
+ void CG_Concussive( centity_t *cent );
+ 
+ //
+@@ -2406,6 +2414,8 @@ qboolean    trap_GetUserCmd( int cmdNumber, usercmd_t *ucmd );
+ 
+ // used for the weapon/holdable select and zoom
+ void        trap_SetUserCmdValue( int stateValue, int holdValue, float sensitivityScale, int cld );     // NERVE - SMF - added cld
++// aim assist: the stick's turning speed (1: as it is) and a turn to add, degrees
++void        trap_SetAimAssist( float friction, float pitch, float yaw );
+ 
+ // aids for VM testing
+ void        testPrintInt( char *string, int i );
+diff --git a/SP/code/cgame/cg_main.c b/SP/code/cgame/cg_main.c
+index 13362aff..1566e9e0 100644
+--- a/SP/code/cgame/cg_main.c
++++ b/SP/code/cgame/cg_main.c
+@@ -131,6 +131,7 @@ vmCvar_t cg_crosshairAlpha;     //----(SA)	added
+ vmCvar_t cg_crosshairX;
+ vmCvar_t cg_crosshairY;
+ vmCvar_t cg_crosshairHealth;
++vmCvar_t cg_aimAssist;
+ vmCvar_t cg_draw2D;
+ vmCvar_t cg_drawFrags;
+ vmCvar_t cg_teamChatsOnly;
+@@ -335,6 +336,7 @@ cvarTable_t cvarTable[] = {
+ 	{ &cg_crosshairSize, "cg_crosshairSize", "24", CVAR_ARCHIVE },
+ 	{ &cg_crosshairAlpha, "cg_crosshairAlpha", "0.5", CVAR_ARCHIVE }, //----(SA)	added
+ 	{ &cg_crosshairHealth, "cg_crosshairHealth", "1", CVAR_ARCHIVE },
++	{ &cg_aimAssist, "cg_aimAssist", "0", CVAR_ARCHIVE },
+ 	{ &cg_crosshairX, "cg_crosshairX", "0", CVAR_ARCHIVE },
+ 	{ &cg_crosshairY, "cg_crosshairY", "0", CVAR_ARCHIVE },
+ 	{ &cg_brassTime, "cg_brassTime", "1250", CVAR_ARCHIVE },
+diff --git a/SP/code/cgame/cg_public.h b/SP/code/cgame/cg_public.h
+index 02e18c0a..7b708e64 100644
+--- a/SP/code/cgame/cg_public.h
++++ b/SP/code/cgame/cg_public.h
+@@ -219,7 +219,8 @@ typedef enum {
+ 	CG_GETMODELINFO,
+ 
+ 	// New in IORTCW
+-	CG_ALLOC = 900
++	CG_ALLOC = 900,
++	CG_SETAIMASSIST
+ 
+ } cgameImport_t;
+ 
+diff --git a/SP/code/cgame/cg_syscalls.c b/SP/code/cgame/cg_syscalls.c
+index 40b7c39c..50e09999 100644
+--- a/SP/code/cgame/cg_syscalls.c
++++ b/SP/code/cgame/cg_syscalls.c
+@@ -394,6 +394,10 @@ void        trap_SetUserCmdValue( int stateValue, int holdableValue, float sensi
+ 	syscall( CG_SETUSERCMDVALUE, stateValue, holdableValue, PASSFLOAT( sensitivityScale ), cld );
+ }
+ 
++void        trap_SetAimAssist( float friction, float pitch, float yaw ) {
++	syscall( CG_SETAIMASSIST, PASSFLOAT( friction ), PASSFLOAT( pitch ), PASSFLOAT( yaw ) );
++}
++
+ void        testPrintInt( char *string, int i ) {
+ 	syscall( CG_TESTPRINTINT, string, i );
+ }
+diff --git a/SP/code/cgame/cg_view.c b/SP/code/cgame/cg_view.c
+index 02448b9b..02eb0488 100644
+--- a/SP/code/cgame/cg_view.c
++++ b/SP/code/cgame/cg_view.c
+@@ -1631,6 +1631,7 @@ void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demo
+ 
+ 	// let the client system know what our weapon, holdable item and zoom settings are
+ 	trap_SetUserCmdValue( cg.weaponSelect, cg.holdableSelect, cg.zoomSensitivity, cg.cld );
++	CG_AimAssist();
+ 
+ 	// actually issue the rendering calls
+ 	CG_DrawActive( stereoView );
+diff --git a/SP/code/client/cl_cgame.c b/SP/code/client/cl_cgame.c
+index 36dcfa58..1c913ca6 100644
+--- a/SP/code/client/cl_cgame.c
++++ b/SP/code/client/cl_cgame.c
+@@ -191,6 +191,26 @@ void CL_SetUserCmdValue( int userCmdValue, int holdableValue, float sensitivityS
+ 	cl.cgameCld                 = cld;
+ }
+ 
++/*
++==============
++CL_SetAimAssist
++
++From the cgame each frame: the gamepad stick's turning speed (1: as it is)
++and a turn to add (degrees), which waits for the next command
++==============
++*/
++static void CL_SetAimAssist( float friction, float pitch, float yaw ) {
++	if ( friction < 0.0f ) {
++		friction = 0.0f;
++	} else if ( friction > 1.0f ) {
++		friction = 1.0f;
++	}
++	cl.aimAssistSlow = 1.0f - friction;
++	cl.aimAssistTime = cls.realtime;
++	cl.aimAssistTurn[PITCH] += pitch;
++	cl.aimAssistTurn[YAW] += yaw;
++}
++
+ /*
+ ==============
+ CL_AddCgameCommand
+@@ -846,6 +866,10 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
+ 	case CG_ALLOC:
+ 		return VM_Alloc( args[1] );
+ 
++	case CG_SETAIMASSIST:
++		CL_SetAimAssist( VMF( 1 ), VMF( 2 ), VMF( 3 ) );
++		return 0;
++
+ 	default:
+ 		Com_Error( ERR_DROP, "Bad cgame system trap: %ld", (long int) args[0] );
+ 	}
+diff --git a/SP/code/client/cl_input.c b/SP/code/client/cl_input.c
+index 116e0deb..e46a31f6 100644
+--- a/SP/code/client/cl_input.c
++++ b/SP/code/client/cl_input.c
+@@ -455,6 +455,13 @@ void CL_JoystickMove( usercmd_t *cmd ) {
+ 		anglespeed = 0.001 * cls.frametime;
+ 	}
+ 
++	// aim assist's friction: the stick turns slower near a target (the
++	// cgame tells each frame; an old word, from before a pause, is not used)
++	if ( cls.realtime - cl.aimAssistTime < 200 ) {
++		yaw *= 1.0f - cl.aimAssistSlow;
++		pitch *= 1.0f - cl.aimAssistSlow;
++	}
++
+ 	if ( !kb[KB_STRAFE].active ) {
+ 		cl.viewangles[YAW] += anglespeed * yaw;
+ 		cmd->rightmove = ClampChar( cmd->rightmove + (int)right );
+@@ -656,6 +663,11 @@ usercmd_t CL_CreateCmd( void ) {
+ 	// get basic movement from joystick
+ 	CL_JoystickMove( &cmd );
+ 
++	// aim assist's adhesion: the turn the cgame asked for, once
++	cl.viewangles[PITCH] += cl.aimAssistTurn[PITCH];
++	cl.viewangles[YAW] += cl.aimAssistTurn[YAW];
++	VectorClear( cl.aimAssistTurn );
++
+ 	// check to make sure the angles haven't wrapped
+ 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
+ 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;
+diff --git a/SP/code/client/client.h b/SP/code/client/client.h
+index cf123528..c6e34e70 100644
+--- a/SP/code/client/client.h
++++ b/SP/code/client/client.h
+@@ -136,6 +136,13 @@ typedef struct {
+ 	float cgameSensitivity;
+ 	int cgameCld;                       // NERVE - SMF
+ 
++	// aim assist (cgame's cg_aimassist.c): how much it slows the
++	// stick's turning (0: not at all) as of aimAssistTime, and the turn
++	// it adds, until the next command takes it
++	float aimAssistSlow;
++	int aimAssistTime;
++	vec3_t aimAssistTurn;
++
+ 	// cmds[cmdNumber] is the predicted command, [cmdNumber-1] is the last
+ 	// properly generated command
+ 	usercmd_t cmds[CMD_BACKUP];     // each mesage will send several old cmds

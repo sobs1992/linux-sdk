@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 18:56:27 +0100
+Subject: [PATCH] SP: gamepad.cfg follows default.cfg
+
+default.cfg binds keyboard and mouse only. An installation for a gamepad
+puts its bindings in a gamepad.cfg (main/ of any search path): it is run
+right after default.cfg wherever that is, at the start and when the
+controls menu puts everything back to its defaults.
+---
+ SP/code/qcommon/cmd.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/SP/code/qcommon/cmd.c b/SP/code/qcommon/cmd.c
+index 5d06a625..db56aad5 100644
+--- a/SP/code/qcommon/cmd.c
++++ b/SP/code/qcommon/cmd.c
+@@ -294,6 +294,13 @@ void Cmd_Exec_f( void ) {
+ 	if (!quiet)
+ 		Com_Printf ("execing %s\n", filename);
+ 
++	// the game's default.cfg binds keyboard and mouse only: a gamepad.cfg
++	// next to it (an installation's own, made for its gamepad) follows it
++	// wherever it is run, at the start and when a menu puts the controls
++	// back to their defaults. Cbuf_InsertText puts text first: in reverse.
++	if ( !Q_stricmp( filename, "default.cfg" ) && FS_ReadFile( "gamepad.cfg", NULL ) > 0 )
++		Cbuf_InsertText( "exec gamepad.cfg" );
++
+ 	Cbuf_InsertText (f.c);
+ 
+ 	FS_FreeFile (f.v);

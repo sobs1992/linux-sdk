@@ -1,0 +1,502 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 18:56:27 +0100
+Subject: [PATCH] SP: a gamepad drives the menus, cut scenes and level
+ briefings
+
+The menus took a gamepad's buttons as keys of their own and did nothing
+with them, and the game ate them where it waits for Enter, Space, Escape
+or a click: a gamepad alone could not leave the main menu.
+
+- Menus: the D-pad and the left stick work as the arrow keys, A as Enter.
+  In a menu the left stick gives its four directions as keys (pushed past
+  half way, let go below a third) whatever it is bound to; that binding
+  sees it centred meanwhile. The right stick moves the mouse pointer: the
+  menus are made for a mouse. Not while a binding waits for its key (the
+  button itself is bound).
+- One thing is chosen, the item under the pointer: keys that choose
+  another item take the pointer onto it, and the pointer over an item of
+  another menu (the tabs above a panel of the options) gives that menu
+  the keys. Before, the pointer showed one item and Enter chose another,
+  and the tabs could not be reached without a mouse.
+- B goes back to the menu the focused one was opened from while that one
+  is up (from a panel to its tabs, from a page of the in-game menu to
+  it); otherwise it is Escape. Menus opened from one that Escape closes
+  close with it (their onClose runs: the controls are saved).
+  A page that a click outside closes (outOfBoundsClick: the pages of the
+  in-game menu) closes when the keys leave it, as the click would: the
+  next page opened over it before.
+- Bindings: while one waits for its key, the keys go to it only. Escape
+  (B) cancels it; it used to close every menu of the game in play and
+  leave the binding waiting, to take whatever key came next. The sticks
+  and Start are not bound from the menu.
+- A level's briefing (pregame), which only a click on a button shown
+  under the mouse ended: Enter and A start the level too.
+- Cut scenes and cinematics: A, B and Start skip them as Enter, Space and
+  Escape do.
+---
+ SP/code/client/cl_keys.c |  23 +++++-
+ SP/code/sdl/sdl_input.c  |  85 ++++++++++++++++++++-
+ SP/code/ui/ui_main.c     |  34 ++++++++-
+ SP/code/ui/ui_shared.c   | 161 +++++++++++++++++++++++++++++++++++++++
+ SP/code/ui/ui_shared.h   |   9 ++-
+ 5 files changed, 305 insertions(+), 7 deletions(-)
+
+diff --git a/SP/code/client/cl_keys.c b/SP/code/client/cl_keys.c
+index e6d458d4..5ca64276 100644
+--- a/SP/code/client/cl_keys.c
++++ b/SP/code/client/cl_keys.c
+@@ -2152,6 +2152,18 @@ static qboolean CL_BindUICommand( const char *cmd ) {
+ 	return qfalse;
+ }
+ 
++/*
++===================
++CL_GamepadPressKey
++
++A gamepad's A, B and Start do what Enter, Space and Escape do where the
++game takes any of those (skipping a cut scene or a cinematic)
++===================
++*/
++static qboolean CL_GamepadPressKey( int key ) {
++	return key == K_PAD0_A || key == K_PAD0_B || key == K_PAD0_START;
++}
++
+ /*
+ ===================
+ CL_ParseBinding
+@@ -2252,7 +2264,8 @@ void CL_KeyDownEvent( int key, unsigned time )
+ 			// in cutscenes we need to handle keys specially (pausing not allowed in camera mode)
+ 			if ( (  key == K_ESCAPE ||
+ 					key == K_SPACE ||
+-					key == K_ENTER ) && qtrue ) {
++					key == K_ENTER ||
++					CL_GamepadPressKey( key ) ) && qtrue ) {
+ 				if ( qtrue ) {
+ 					CL_AddReliableCommand( "cameraInterrupt", qfalse );
+ 				}
+@@ -2276,7 +2289,7 @@ void CL_KeyDownEvent( int key, unsigned time )
+ 	// most keys during demo playback will bring up the menu, but non-ascii
+ 
+ 	// keys can still be used for bound actions
+-	if ( ( key < 128 || key == K_MOUSE1 ) &&
++	if ( ( key < 128 || key == K_MOUSE1 || CL_GamepadPressKey( key ) ) &&
+ 		( clc.demoplaying || clc.state == CA_CINEMATIC ) && Key_GetCatcher( ) == 0 ) {
+ 
+ 		if (Cvar_VariableValue ("com_cameraMode") == 0) {
+@@ -2334,8 +2347,10 @@ void CL_KeyDownEvent( int key, unsigned time )
+ 			// any key gets out of clipboard
+ 			key = K_ESCAPE;
+ 		} else if ( activeMenu == UIMENU_PREGAME ) {
+-			if ( key != K_MOUSE1 ) {
+-				return; // eat all keys except mouse click
++			// eat all keys except mouse click, and Enter and the
++			// gamepad's A, which start the level as the click does
++			if ( key != K_MOUSE1 && key != K_ENTER && key != K_PAD0_A ) {
++				return;
+ 			}
+ 		} else {
+ 
+diff --git a/SP/code/sdl/sdl_input.c b/SP/code/sdl/sdl_input.c
+index 3bd4f230..cf335d0c 100644
+--- a/SP/code/sdl/sdl_input.c
++++ b/SP/code/sdl/sdl_input.c
+@@ -443,6 +443,7 @@ struct
+ 	unsigned int oldaxes;
+ 	int oldaaxes[MAX_JOYSTICK_AXIS];
+ 	unsigned int oldhats;
++	int menuKeys[2];	// the left stick's key held in a menu, by axis
+ } stick_state;
+ 
+ 
+@@ -652,6 +653,7 @@ static void IN_GamepadMove( void )
+ 	int i;
+ 	int translatedAxes[MAX_JOYSTICK_AXIS];
+ 	qboolean translatedAxesSet[MAX_JOYSTICK_AXIS];
++	const qboolean menu = ( Key_GetCatcher( ) & KEYCATCH_UI ) != 0;
+ 
+ 	SDL_GameControllerUpdate();
+ 
+@@ -687,7 +689,8 @@ static void IN_GamepadMove( void )
+ 	// check axes
+ 	for (i = 0; i < SDL_CONTROLLER_AXIS_MAX; i++)
+ 	{
+-		int axis = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX + i);
++		const int raw = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX + i);
++		int axis = raw;
+ 		int oldAxis = stick_state.oldaaxes[i];
+ 
+ 		// Smoothly ramp from dead zone to maximum value
+@@ -698,6 +701,37 @@ static void IN_GamepadMove( void )
+ 
+ 		axis = (int)(32767 * ((axis < 0) ? -f : f));
+ 
++		// In a menu the left stick is four keys, as the D-pad: pushed past
++		// half way, let go below a third (Menu_GamepadKey makes them the
++		// arrow keys). What it is bound to in the game sees it centred
++		// meanwhile: going in or out of a menu, what one of its two jobs
++		// holds is let go, and the other one starts from the centre.
++		if (i <= SDL_CONTROLLER_AXIS_LEFTY)
++		{
++			const int keys[2][2] = {
++				{ K_PAD0_LEFTSTICK_LEFT, K_PAD0_LEFTSTICK_RIGHT },
++				{ K_PAD0_LEFTSTICK_UP, K_PAD0_LEFTSTICK_DOWN } };
++			const float tilt = raw / 32767.0f;
++			int held = stick_state.menuKeys[i], want = 0;
++
++			if (menu)
++			{
++				if (tilt <= -0.5f || (held == keys[i][0] && tilt < -0.33f))
++					want = keys[i][0];
++				else if (tilt >= 0.5f || (held == keys[i][1] && tilt > 0.33f))
++					want = keys[i][1];
++				axis = 0;
++			}
++			if (want != held)
++			{
++				if (held)
++					Com_QueueEvent(in_eventTime, SE_KEY, held, qfalse, 0, NULL);
++				if (want)
++					Com_QueueEvent(in_eventTime, SE_KEY, want, qtrue, 0, NULL);
++				stick_state.menuKeys[i] = want;
++			}
++		}
++
+ 		if (axis != oldAxis)
+ 		{
+ 			const int negMap[SDL_CONTROLLER_AXIS_MAX] = { K_PAD0_LEFTSTICK_LEFT,  K_PAD0_LEFTSTICK_UP,   K_PAD0_RIGHTSTICK_LEFT,  K_PAD0_RIGHTSTICK_UP, 0, 0 };
+@@ -777,6 +811,54 @@ static void IN_GamepadMove( void )
+ 	}
+ }
+ 
++/*
++===============
++IN_GamepadPointer
++
++While a menu is up the right stick moves the mouse pointer: the menus are
++made for a mouse (a level's briefing has a button shown only under it).
++Full tilt crosses the menus' 640 units in about a second; the speed goes
++with the square of the tilt, for fine moves.
++===============
++*/
++#define GAMEPAD_POINTER_SPEED 640.0f
++
++static void IN_GamepadPointer( void )
++{
++	static int lastTime;
++	static float rest[2];
++	int now = Sys_Milliseconds( );
++	float dt = ( now - lastTime ) * 0.001f;
++	int i, move[2];
++
++	lastTime = now;
++	if( !gamepad || !( Key_GetCatcher( ) & KEYCATCH_UI ) || dt <= 0.0f )
++	{
++		rest[0] = rest[1] = 0.0f;
++		return;
++	}
++	if( dt > 0.05f )
++		dt = 0.05f;
++
++	for( i = 0; i < 2; i++ )
++	{
++		float f = SDL_GameControllerGetAxis( gamepad, SDL_CONTROLLER_AXIS_RIGHTX + i ) / 32767.0f;
++		float a = ( fabs( f ) - in_joystickThreshold->value ) / ( 1.0f - in_joystickThreshold->value );
++
++		if( a > 1.0f )
++			a = 1.0f;
++		if( a > 0.0f )
++			rest[i] += ( f < 0.0f ? -a * a : a * a ) * GAMEPAD_POINTER_SPEED * dt;
++		else
++			rest[i] = 0.0f;
++		move[i] = (int)rest[i];
++		rest[i] -= move[i];
++	}
++
++	if( move[0] || move[1] )
++		Com_QueueEvent( in_eventTime, SE_MOUSE, move[0], move[1], 0, NULL );
++}
++
+ 
+ /*
+ ===============
+@@ -793,6 +875,7 @@ static void IN_JoyMove( void )
+ 	if (gamepad)
+ 	{
+ 		IN_GamepadMove();
++		IN_GamepadPointer();
+ 		return;
+ 	}
+ 
+diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
+index 7a17ee4d..553e5be6 100644
+--- a/SP/code/ui/ui_main.c
++++ b/SP/code/ui/ui_main.c
+@@ -6936,14 +6936,43 @@ UI_KeyEvent
+ =================
+ */
+ void _UI_KeyEvent( int key, qboolean down ) {
++	const qboolean padBack = key == K_PAD0_B;
++
++	key = Menu_GamepadKey( key );
++	if ( !key ) {
++		return;
++	}
+ 
+ 	if ( Menu_Count() > 0 ) {
+ 		menuDef_t *menu = Menu_GetFocused();
+ 		if ( menu ) {
+-			if ( key == K_ESCAPE && down && !Menus_AnyFullScreenVisible() ) {
++			const int cursorItem = menu->cursorItem;
++
++			if ( g_waitingForKey ) {
++				// a binding waits for its key: Escape cancels it, any
++				// other key is bound (Escape used to close every menu of
++				// the game and leave the binding waiting for the next key)
++				Menu_HandleKey( menu, key, down );
++			} else if ( padBack && key == K_ESCAPE && down && Menu_FocusOpener() ) {
++				// the gamepad's B: back to the menu this one was opened
++				// from while that one is up (the tabs above a panel)
++			} else if ( key == K_ENTER && down && menu->window.name && !Q_stricmp( menu->window.name, "pregame" ) ) {
++				// a level's briefing: its button, shown when the mouse
++				// is over it, starts the level; Enter (A) does too
++				char *script = "playerstart";
++
++				UI_RunMenuScript( &script );
++			} else if ( key == K_ESCAPE && down && !Menus_AnyFullScreenVisible() ) {
+ 				Menus_CloseAll();
+ 			} else {
+ 				Menu_HandleKey( menu, key, down );
++				if ( key == K_ESCAPE && down ) {
++					// what was opened from a menu Escape closed goes with it
++					Menus_CloseOpenedFrom( menu );
++				} else if ( down && Menu_GetFocused() == menu && menu->cursorItem != cursorItem ) {
++					// the keys chose another item: the pointer goes onto it
++					Menu_PointerToCursorItem();
++				}
+ 			}
+ 		} else {
+ 			trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
+@@ -6982,6 +7011,9 @@ void _UI_MouseEvent( int dx, int dy ) {
+ 		//menuDef_t *menu = Menu_GetFocused();
+ 		//Menu_HandleMouseMove(menu, uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory);
+ 		Display_MouseMove( NULL, uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory );
++		// over an item of another menu (the tabs above a panel): that one
++		// takes the keys, what the pointer shows is what Enter chooses
++		Menus_FocusUnderPointer();
+ 	}
+ 
+ }
+diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
+index 7485f0f0..7f31ac0e 100644
+--- a/SP/code/ui/ui_shared.c
++++ b/SP/code/ui/ui_shared.c
+@@ -3064,6 +3064,164 @@ static rectDef_t *Item_CorrectedTextRect( itemDef_t *item ) {
+ 	return &rect;
+ }
+ 
++/*
++==================
++Menu_GamepadKey
++
++A gamepad drives the menus as the keyboard does: the D-pad and the left
++stick (four keys in a menu, sdl_input.c) go from item to item and change
++values as the arrow keys, A chooses as Enter, B goes back as Escape.
++While a binding waits for its key the button itself is bound, but B
++cancels it as Escape does (a binding entered by mistake must not take
++the next button), and neither the sticks, which move and look, nor Start
++are bound (0: the key is dropped; Start's own binding, togglemenu, gives
++the menus an Escape, which cancels).
++==================
++*/
++int Menu_GamepadKey( int key ) {
++	if ( g_waitingForKey ) {
++		switch ( key ) {
++		case K_PAD0_B:
++			return K_ESCAPE;
++		case K_PAD0_START:
++		case K_PAD0_LEFTSTICK_LEFT:
++		case K_PAD0_LEFTSTICK_RIGHT:
++		case K_PAD0_LEFTSTICK_UP:
++		case K_PAD0_LEFTSTICK_DOWN:
++		case K_PAD0_RIGHTSTICK_LEFT:
++		case K_PAD0_RIGHTSTICK_RIGHT:
++		case K_PAD0_RIGHTSTICK_UP:
++		case K_PAD0_RIGHTSTICK_DOWN:
++			return 0;
++		}
++		return key;
++	}
++	switch ( key ) {
++	case K_PAD0_DPAD_UP:
++	case K_PAD0_LEFTSTICK_UP:
++		return K_UPARROW;
++	case K_PAD0_DPAD_DOWN:
++	case K_PAD0_LEFTSTICK_DOWN:
++		return K_DOWNARROW;
++	case K_PAD0_DPAD_LEFT:
++	case K_PAD0_LEFTSTICK_LEFT:
++		return K_LEFTARROW;
++	case K_PAD0_DPAD_RIGHT:
++	case K_PAD0_LEFTSTICK_RIGHT:
++		return K_RIGHTARROW;
++	case K_PAD0_A:
++		return K_ENTER;
++	case K_PAD0_B:
++		return K_ESCAPE;
++	}
++	return key;
++}
++
++/*
++==================
++A gamepad's pointer is its selection
++
++A gamepad has one thing chosen: the item under the pointer. Keys that
++choose another item take the pointer onto it (Menu_PointerToCursorItem);
++the pointer (the right stick) over an item of another menu, the tabs above
++a panel, gives that menu the keys (Menus_FocusUnderPointer). B goes back
++to the menu this one was opened from while that one is up (Menu_FocusOpener),
++otherwise it is Escape, and the menus opened from one that Escape closed
++close with it (Menus_CloseOpenedFrom).
++==================
++*/
++static void Menu_TakeFocus( menuDef_t *menu ) {
++	menuDef_t *left = Menu_GetFocused();
++	int i;
++
++	// a page that a click outside closes (outOfBoundsClick: the pages of
++	// the in-game menu) closes when the keys leave it, unless for a menu
++	// opened from it: otherwise the next page would open over it
++	if ( left && left != menu && ( left->window.flags & WINDOW_OOB_CLICK ) && menu->opener != left ) {
++		Menu_RunCloseScript( left );
++		left->window.flags &= ~( WINDOW_VISIBLE | WINDOW_HASFOCUS );
++	}
++	// the menus left show nothing chosen (they keep their cursorItem)
++	for ( i = 0; i < menuCount; i++ ) {
++		if ( &Menus[i] != menu && ( Menus[i].window.flags & WINDOW_VISIBLE ) ) {
++			Menu_ClearFocus( &Menus[i] );
++		}
++		Menus[i].window.flags &= ~WINDOW_HASFOCUS;
++	}
++	menu->window.flags |= WINDOW_HASFOCUS;
++}
++
++void Menu_PointerToCursorItem( void ) {
++	menuDef_t *menu = Menu_GetFocused();
++	itemDef_t *item;
++	rectDef_t r;
++
++	if ( !menu || menu->cursorItem < 0 || menu->cursorItem >= menu->itemCount ) {
++		return;
++	}
++	item = menu->items[menu->cursorItem];
++	if ( !( item->window.flags & WINDOW_VISIBLE ) || ( item->window.flags & WINDOW_DECORATION ) ) {
++		return;
++	}
++	r = item->window.rect;
++	if ( item->type == ITEM_TYPE_TEXT && item->text ) {
++		r = *Item_CorrectedTextRect( item );    // text takes the focus there only
++	}
++	DC->cursorx = r.x + r.w / 2;
++	DC->cursory = r.y + r.h / 2;
++	Display_MouseMove( NULL, DC->cursorx, DC->cursory );
++}
++
++void Menus_FocusUnderPointer( void ) {
++	menuDef_t *focus = Menu_GetFocused();
++	int i;
++
++	if ( !focus || ( focus->window.flags & WINDOW_POPUP ) || g_waitingForKey || g_editingField || itemCapture ||
++		 Menu_OverActiveItem( focus, DC->cursorx, DC->cursory ) ) {
++		return;
++	}
++	for ( i = 0; i < menuCount; i++ ) {
++		if ( &Menus[i] != focus && Menu_OverActiveItem( &Menus[i], DC->cursorx, DC->cursory ) ) {
++			Menu_TakeFocus( &Menus[i] );
++			return;
++		}
++	}
++}
++
++qboolean Menu_FocusOpener( void ) {
++	menuDef_t *menu = Menu_GetFocused();
++	menuDef_t *opener = menu ? menu->opener : NULL;
++
++	if ( !menu || ( menu->window.flags & WINDOW_POPUP ) || !opener || opener == menu ||
++		 !( opener->window.flags & WINDOW_VISIBLE ) ) {
++		return qfalse;
++	}
++	Menu_TakeFocus( opener );
++	// nothing chosen there yet (opened by a script, never used): its first item
++	if ( opener->cursorItem < 0 || opener->cursorItem >= opener->itemCount ||
++		 !( opener->items[opener->cursorItem]->window.flags & WINDOW_VISIBLE ) ) {
++		opener->cursorItem = -1;
++		Menu_SetNextCursorItem( opener );
++	}
++	Menu_PointerToCursorItem();
++	return qtrue;
++}
++
++void Menus_CloseOpenedFrom( menuDef_t *menu ) {
++	int i;
++
++	if ( !menu || ( menu->window.flags & WINDOW_VISIBLE ) ) {
++		return;
++	}
++	for ( i = 0; i < menuCount; i++ ) {
++		if ( Menus[i].opener == menu && ( Menus[i].window.flags & WINDOW_VISIBLE ) ) {
++			Menu_RunCloseScript( &Menus[i] );
++			Menus[i].window.flags &= ~( WINDOW_VISIBLE | WINDOW_HASFOCUS );
++			Menus_CloseOpenedFrom( &Menus[i] );
++		}
++	}
++}
++
+ // menu item key horizontal action: -1 = previous value, 1 = next value, 0 = no change
+ int UI_SelectForKey(int key)
+ {
+@@ -4722,6 +4880,9 @@ menuDef_t *Menus_ActivateByName( const char *p ) {
+ 	for ( i = 0; i < menuCount; i++ ) {
+ 		if ( Q_stricmp( Menus[i].window.name, p ) == 0 ) {
+ 			m = &Menus[i];
++			if ( focus != m ) {
++				m->opener = focus;
++			}
+ 			Menus_Activate( m );
+ 			if ( openMenuCount < MAX_OPEN_MENUS && focus != NULL ) {
+ 				menuStack[openMenuCount++] = focus;
+diff --git a/SP/code/ui/ui_shared.h b/SP/code/ui/ui_shared.h
+index b93857bb..40231da5 100644
+--- a/SP/code/ui/ui_shared.h
++++ b/SP/code/ui/ui_shared.h
+@@ -278,7 +278,7 @@ typedef struct itemDef_s {
+ 	void *typeData;                 // type specific data ptr's
+ } itemDef_t;
+ 
+-typedef struct {
++typedef struct menuDef_s {
+ 	Window window;
+ 	const char  *font;              // font
+ 	qboolean fullScreen;            // covers entire screen
+@@ -298,6 +298,8 @@ typedef struct {
+ 	vec4_t focusColor;              // focus color for items
+ 	vec4_t disableColor;            // focus color for items
+ 	itemDef_t *items[MAX_MENUITEMS]; // items this menu contains
++
++	struct menuDef_s *opener;       // the menu that had the focus when this one opened
+ } menuDef_t;
+ 
+ typedef struct {
+@@ -476,6 +478,11 @@ qboolean Menus_AnyFullScreenVisible( void );
+ void  Menus_Activate( menuDef_t *menu );
+ 
+ int UI_SelectForKey(int key);
++int Menu_GamepadKey( int key );
++void Menu_PointerToCursorItem( void );
++void Menus_FocusUnderPointer( void );
++qboolean Menu_FocusOpener( void );
++void Menus_CloseOpenedFrom( menuDef_t *menu );
+ displayContextDef_t *Display_GetContext( void );
+ void        *Display_CaptureItem( int x, int y );
+ qboolean    Display_MouseMove( void *p, int x, int y );

@@ -159,4 +159,22 @@ config BR2_PACKAGE_BARE_APP_DOOM3
 	  to doom3/ of the games partition (GAMES, /games). In the
 	  SDK: APPS_CONFIG += bare-app.DOOM3=y
 
+config BR2_PACKAGE_BARE_APP_RTCW
+	bool "Return to Castle Wolfenstein (iortcw, an SDL2 game)"
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_aarch64 || BR2_x86_64 # iortcw
+	depends on BR2_INSTALL_LIBSTDCPP # iortcw
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # mesa-panfrost
+	depends on !BR2_PACKAGE_MESA3D # mesa-panfrost
+	select BR2_PACKAGE_MESA_PANFROST
+	select BR2_PACKAGE_IORTCW
+	help
+	  The iortcw engine (package iortcw, GPLv3) for Return to Castle
+	  Wolfenstein's single player, drawn by the GPU, with
+	  games/rtcw.ini as its entry of the main menu. The game files
+	  are not included: copy main/ of a bought copy (pak0.pk3,
+	  sp_pak1-4.pk3 of patch 1.41, a translation's pk3s) to rtcw/main/
+	  of the games partition (GAMES, /games). In the SDK:
+	  APPS_CONFIG += bare-app.RTCW=y
+
 endif

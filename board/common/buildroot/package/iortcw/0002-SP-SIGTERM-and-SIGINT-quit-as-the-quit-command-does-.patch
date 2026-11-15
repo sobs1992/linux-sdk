@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 18:51:33 +0100
+Subject: [PATCH] SP: SIGTERM and SIGINT quit as the quit command does, exit
+ status 0
+
+A launcher ends the game with SIGTERM (bare_app's quit hold). The signal
+handler shut the client down inside the handler and exited with status
+1, which the launcher reports as an error. Now the handler only notes the
+signal; the main loop runs "quit" between two frames (exit status 0). A
+second signal before that takes the old way out.
+---
+ SP/code/sys/sys_main.c | 29 +++++++++++++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/SP/code/sys/sys_main.c b/SP/code/sys/sys_main.c
+index 2c880f1b..a8453cfb 100644
+--- a/SP/code/sys/sys_main.c
++++ b/SP/code/sys/sys_main.c
+@@ -681,6 +681,25 @@ void Sys_SigHandler( int signal )
+ 		Sys_Exit( 2 );
+ }
+ 
++/*
++=================
++Sys_QuitSigHandler
++
++SIGTERM and SIGINT: a quit asked for from outside (a launcher ending the
++game). The main loop quits between two frames as the quit command does,
++exit status 0; a second one while that has not happened yet takes the
++old way out.
++=================
++*/
++static volatile sig_atomic_t sys_quitSignal = 0;
++
++static void Sys_QuitSigHandler( int signal )
++{
++	if( sys_quitSignal )
++		Sys_SigHandler( signal );
++	sys_quitSignal = signal;
++}
++
+ /*
+ =================
+ main
+@@ -756,12 +775,18 @@ int main( int argc, char **argv )
+ 	signal( SIGILL, Sys_SigHandler );
+ 	signal( SIGFPE, Sys_SigHandler );
+ 	signal( SIGSEGV, Sys_SigHandler );
+-	signal( SIGTERM, Sys_SigHandler );
+-	signal( SIGINT, Sys_SigHandler );
++	signal( SIGTERM, Sys_QuitSigHandler );
++	signal( SIGINT, Sys_QuitSigHandler );
+ 
+ 	while( 1 )
+ 	{
+ 		Com_Frame( );
++
++		if( sys_quitSignal )
++		{
++			Com_Printf( "Received signal %d, quitting\n", (int)sys_quitSignal );
++			Cbuf_ExecuteText( EXEC_NOW, "quit\n" );
++		}
+ 	}
+ 
+ 	return 0;
