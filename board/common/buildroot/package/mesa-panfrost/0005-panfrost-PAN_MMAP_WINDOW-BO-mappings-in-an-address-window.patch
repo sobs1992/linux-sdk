@@ -1,0 +1,153 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] panfrost: PAN_MMAP_WINDOW, the CPU mappings of BOs in an
+ address window
+
+PAN_MMAP_WINDOW=START-END (hexadecimal) puts the CPU mappings of BOs into
+that window of the address space while it has room (MAP_FIXED_NOREPLACE
+after the last one, else in the first gap /proc/self/maps shows), and
+anywhere, as before, once it has none. Unset: unchanged.
+
+For 32-bit Windows programs under Wine's WoW64, which reach only the low
+4 GiB. Wine's opengl32 gives them a GL buffer mapping above that as a
+copy of the whole range mapped, made by glMapBuffer*() (unless
+invalidated) and written back by glUnmapBuffer(), and one below as it
+is. Knights of the Temple maps the rest of a 2 MiB vertex buffer and of
+a 1 MiB index buffer before each of its ~47 draws a frame to write a few
+KiB: ~280 MB were copied a frame, 6 fps in its first scene, 58-60 now
+(the screen's rate), its menu 65 -> 210 fps.
+
+0x80000000-0x100000000 is above the 2 GiB Wine gives a program without
+/LARGEADDRESSAWARE, and nothing else maps there. Outside its own reserved
+areas Wine maps with MAP_FIXED_NOREPLACE too, so it never maps over a
+BO: an allocation of a large-address-aware program there goes elsewhere
+(one at a given address, a DLL's base, fails and the DLL is relocated).
+
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -345,14 +345,124 @@
+    pthread_mutex_unlock(&dev->bo_cache.lock);
+ }
+ 
++/*
++ * PAN_MMAP_WINDOW=START-END (hexadecimal addresses): the CPU mappings of BOs
++ * go into that window of the address space while it has room for them, and
++ * anywhere else, as before, once it has not.
++ *
++ * For 32-bit Windows programs under Wine's WoW64, which reach only the low
++ * 4 GiB: Wine's opengl32 gives them a mapping of a GL buffer above that as a
++ * copy of the whole range mapped, made by glMapBuffer*() and written back by
++ * glUnmapBuffer(), and one below 4 GiB as it is. Knights of the Temple maps
++ * the rest of a 2 MiB vertex buffer (1.5 MiB on average) and of a 1 MiB
++ * index buffer for each of its ~47 draws a frame to write a few KiB there:
++ * that was ~280 MB copied a frame. 0x80000000-0x100000000 is above what
++ * Wine gives a program without /LARGEADDRESSAWARE, and nothing else maps
++ * there.
++ */
++#ifndef MAP_FIXED_NOREPLACE
++#define MAP_FIXED_NOREPLACE 0x100000
++#endif
++
++static struct {
++   pthread_once_t once;
++   pthread_mutex_t lock;
++   uintptr_t start, end, next; /* next: where the last mapping ended */
++   bool warned;
++} pan_window = {PTHREAD_ONCE_INIT, PTHREAD_MUTEX_INITIALIZER};
++
++static void
++pan_window_init(void)
++{
++   const char *s = getenv("PAN_MMAP_WINDOW");
++   uintptr_t page = getpagesize();
++   unsigned long long start, end;
++
++   if (!s || sscanf(s, "%llx-%llx", &start, &end) != 2)
++      return;
++   start = (start + page - 1) & ~(unsigned long long)(page - 1);
++   end &= ~(unsigned long long)(page - 1);
++   if (start >= end)
++      return;
++   pan_window.start = pan_window.next = start;
++   pan_window.end = end;
++}
++
++/* The lowest address at or above FROM in the window with SIZE bytes free
++ * after it, by /proc/self/maps (in address order), or 0 */
++static uintptr_t
++pan_window_gap(size_t size, uintptr_t from)
++{
++   uintptr_t at = MAX2(from, pan_window.start);
++   unsigned long long start, end;
++   char line[4096];
++   FILE *f;
++
++   if (!(f = fopen("/proc/self/maps", "re")))
++      return 0;
++   while (at + size <= pan_window.end && fgets(line, sizeof(line), f)) {
++      if (sscanf(line, "%llx-%llx ", &start, &end) != 2 || end <= at)
++         continue;
++      if (start >= at + size)
++         break;
++      at = end;
++   }
++   fclose(f);
++   return at + size <= pan_window.end ? at : 0;
++}
++
++/* BO's CPU mapping in the window, or MAP_FAILED */
++static void *
++pan_window_mmap(struct panfrost_bo *bo, size_t size)
++{
++   struct pan_kmod_bo *kbo = bo->kmod_bo;
++   void *ptr = MAP_FAILED;
++   off_t offset;
++   int i;
++
++   pthread_once(&pan_window.once, pan_window_init);
++   if (!pan_window.end)
++      return MAP_FAILED;
++   if ((offset = kbo->dev->ops->bo_get_mmap_offset(kbo)) < 0)
++      return MAP_FAILED;
++
++   pthread_mutex_lock(&pan_window.lock);
++   /* after the last one, else the first gap after it, else the first gap */
++   for (i = 0; i < 3 && ptr == MAP_FAILED; i++) {
++      uintptr_t at = i == 0 ? pan_window.next
++                     : pan_window_gap(size, i == 1 ? pan_window.next : 0);
++
++      if (!at || at + size > pan_window.end)
++         continue;
++      ptr = mmap((void *)at, size, PROT_READ | PROT_WRITE,
++                 MAP_SHARED | MAP_FIXED_NOREPLACE, kbo->dev->fd, offset);
++      if (ptr != MAP_FAILED && ptr != (void *)at) {
++         /* a kernel that takes the address as a hint only */
++         munmap(ptr, size);
++         ptr = MAP_FAILED;
++      }
++      if (ptr != MAP_FAILED)
++         pan_window.next = at + size;
++   }
++   if (ptr == MAP_FAILED && !pan_window.warned) {
++      pan_window.warned = true;
++      mesa_logw("PAN_MMAP_WINDOW: no room for %zu bytes, BOs mapped elsewhere "
++                "from now on when it has none", size);
++   }
++   pthread_mutex_unlock(&pan_window.lock);
++   return ptr;
++}
++
+ int
+ panfrost_bo_mmap(struct panfrost_bo *bo)
+ {
+    if (bo->ptr.cpu)
+       return 0;
+ 
+-   bo->ptr.cpu = pan_kmod_bo_mmap(bo->kmod_bo, 0, panfrost_bo_size(bo),
+-                                  PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
++   bo->ptr.cpu = pan_window_mmap(bo, panfrost_bo_size(bo));
++   if (bo->ptr.cpu == MAP_FAILED)
++      bo->ptr.cpu = pan_kmod_bo_mmap(bo->kmod_bo, 0, panfrost_bo_size(bo),
++                                     PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+    if (bo->ptr.cpu == MAP_FAILED) {
+       bo->ptr.cpu = NULL;
+       return -1;
