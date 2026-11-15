@@ -142,3 +142,18 @@ exclude = base/maps/d3dm*
 exclude = base/maps/d3xpdm*
 cover = /media/D/Games/DOOM 3 BFG Edition/2.ico
 cover_crop = fit
+
+[neighbours]
+; Neighbours from Hell (2003), the Russian GOG release: game_info/data of
+; NeighborsFromHell_Linux.tar.gz (bin/, data/; its own Wine left out).
+; prepare.sh moves its 800x600 interface into the top 480 rows and makes
+; cover.png from the main menu's picture
+source = /media/D/Games/NeighborsFromHell
+overlay = games/neighbours/overlay
+run = games/neighbours/prepare.sh
+
+[neighbours2]
+; Neighbours from Hell 2: On Vacation (2004), the same way
+source = /media/D/Games/NeighborsFromHell2
+overlay = games/neighbours2/overlay
+run = games/neighbours2/prepare.sh
