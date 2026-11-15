@@ -1,0 +1,270 @@
+From 58fd60669ff85573b901be727f1016ea351b546e Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 07:13:24 +0100
+Subject: [PATCH] mshtml: progid: filters and AlphaImageLoader in IE 5.5-9
+ modes
+
+Pages made for IE 5.5-7 show their PNGs with alpha through
+progid:DXImageTransform.Microsoft.AlphaImageLoader(src=..., sizingMethod=...)
+and put a transparent GIF in the img itself; Wine reports MSIE 7 for
+pages without a doctype, so those pictures were invisible (the buttons
+of Telltale's game launchers, Tales of Monkey Island). The filter's
+picture is now the element's background (sizingMethod=scale: stretched
+to it), and progid:DXImageTransform.Microsoft.Alpha(opacity=N) is taken
+like alpha(opacity=N). Quoted parameter values are understood.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/mshtml/htmlstyle.c      | 172 +++++++++++++++++++++++++----------
+ dlls/mshtml/mshtml_private.h |   1 +
+ 2 files changed, 127 insertions(+), 46 deletions(-)
+
+diff --git a/dlls/mshtml/htmlstyle.c b/dlls/mshtml/htmlstyle.c
+index b54f092..a4e172b 100644
+--- a/dlls/mshtml/htmlstyle.c
++++ b/dlls/mshtml/htmlstyle.c
+@@ -2721,14 +2721,14 @@ static HRESULT WINAPI HTMLStyle_get_clip(IHTMLStyle *iface, BSTR *p)
+     return get_style_property(&This->css_style, STYLEID_CLIP, p);
+ }
+ 
+-static void set_opacity(HTMLStyle *This, const WCHAR *val)
++static void set_ns_property(HTMLStyle *This, const WCHAR *name, const WCHAR *val)
+ {
+     nsAString name_str, val_str, empty_str;
+     nsresult nsres;
+ 
+-    TRACE("%s\n", debugstr_w(val));
++    TRACE("%s %s\n", debugstr_w(name), debugstr_w(val));
+ 
+-    nsAString_InitDepend(&name_str, L"opacity");
++    nsAString_InitDepend(&name_str, name);
+     nsAString_InitDepend(&val_str, val);
+     nsAString_InitDepend(&empty_str, L"");
+ 
+@@ -2741,11 +2741,50 @@ static void set_opacity(HTMLStyle *This, const WCHAR *val)
+     nsAString_Finish(&empty_str);
+ }
+ 
++static void set_opacity(HTMLStyle *This, const WCHAR *val)
++{
++    set_ns_property(This, L"opacity", val);
++}
++
++/* The picture of an AlphaImageLoader filter shown as the element's background:
++   pages of IE 5.5-7 put their PNGs with alpha in it and a transparent GIF in
++   the img itself (Telltale's game launchers). */
++static void set_filter_image(HTMLStyle *This, const WCHAR *src, size_t src_len, const WCHAR *sizing, size_t sizing_len)
++{
++    WCHAR *url;
++
++    if(!src) {
++        if(!This->elem->filter_image)
++            return;
++        This->elem->filter_image = FALSE;
++        set_ns_property(This, L"background-image", L"");
++        set_ns_property(This, L"background-repeat", L"");
++        set_ns_property(This, L"background-size", L"");
++        return;
++    }
++
++    if(!(url = malloc((src_len + 8) * sizeof(WCHAR))))
++        return;
++    memcpy(url, L"url(\"", 5 * sizeof(WCHAR));
++    memcpy(url + 5, src, src_len * sizeof(WCHAR));
++    memcpy(url + 5 + src_len, L"\")", 3 * sizeof(WCHAR));
++
++    This->elem->filter_image = TRUE;
++    set_ns_property(This, L"background-image", url);
++    set_ns_property(This, L"background-repeat", L"no-repeat");
++    /* "image" (the default) and "crop": the picture at its own size */
++    set_ns_property(This, L"background-size",
++            sizing && sizing_len == 5 && !wcsnicmp(sizing, L"scale", 5) ? L"100% 100%" : L"");
++    free(url);
++}
++
+ static void update_filter(HTMLStyle *This)
+ {
+-    const WCHAR *ptr, *ptr2;
++    const WCHAR *ptr, *ptr2, *name;
++    const WCHAR *src = NULL, *sizing = NULL;
++    size_t name_len, src_len = 0, sizing_len = 0;
+ 
+-    static const WCHAR alphaW[] = {'a','l','p','h','a'};
++    static const WCHAR progidW[] = L"progid:DXImageTransform.Microsoft.";
+ 
+     if(dispex_compat_mode(&This->css_style.dispex) >= COMPAT_MODE_IE10)
+         return;
+@@ -2754,76 +2793,117 @@ static void update_filter(HTMLStyle *This)
+     TRACE("%s\n", debugstr_w(ptr));
+     if(!ptr) {
+         set_opacity(This, L"");
++        set_filter_image(This, NULL, 0, NULL, 0);
+         return;
+     }
+ 
+     while(1) {
++        BOOL alpha, loader;
++
+         while(iswspace(*ptr))
+             ptr++;
+         if(!*ptr)
+             break;
+ 
+         ptr2 = ptr;
+-        while(iswalnum(*ptr))
++        while(iswalnum(*ptr) || *ptr == ':' || *ptr == '.')
+             ptr++;
+         if(ptr == ptr2) {
+             WARN("unexpected char '%c'\n", *ptr);
+             break;
+         }
++        while(iswspace(*ptr))
++            ptr++;
+         if(*ptr != '(') {
+             WARN("expected '('\n");
+-            continue;
++            break;
+         }
+ 
+-        if(ptr2 + ARRAY_SIZE(alphaW) == ptr && !memcmp(ptr2, alphaW, sizeof(alphaW))) {
+-            static const WCHAR opacityW[] = {'o','p','a','c','i','t','y','='};
++        name = ptr2;
++        name_len = ptr - ptr2;
++        while(name_len && iswspace(name[name_len - 1]))
++            name_len--;
++        if(name_len > ARRAY_SIZE(progidW) - 1 && !wcsnicmp(name, progidW, ARRAY_SIZE(progidW) - 1)) {
++            name += ARRAY_SIZE(progidW) - 1;
++            name_len -= ARRAY_SIZE(progidW) - 1;
++        }
++        alpha = name_len == 5 && !wcsnicmp(name, L"alpha", 5);
++        loader = name_len == 16 && !wcsnicmp(name, L"AlphaImageLoader", 16);
++
++        /* the parameters: name=value, name='value' or name="value" */
++        ptr++;
++        while(1) {
++            const WCHAR *key, *val;
++            size_t key_len, val_len;
++
++            while(iswspace(*ptr) || *ptr == ',')
++                ptr++;
++            if(!*ptr || *ptr == ')')
++                break;
+ 
+-            ptr++;
+-            do {
++            key = ptr;
++            while(*ptr && *ptr != '=' && *ptr != ',' && *ptr != ')' && !iswspace(*ptr))
++                ptr++;
++            key_len = ptr - key;
++            while(iswspace(*ptr))
++                ptr++;
++            val = NULL;
++            val_len = 0;
++            if(*ptr == '=') {
++                ptr++;
+                 while(iswspace(*ptr))
+                     ptr++;
+-
+-                ptr2 = ptr;
+-                while(*ptr && *ptr != ',' && *ptr != ')')
+-                    ptr++;
+-                if(!*ptr) {
+-                    WARN("unexpected end of string\n");
+-                    break;
++                if(*ptr == '\'' || *ptr == '"') {
++                    WCHAR quote = *ptr++;
++                    val = ptr;
++                    while(*ptr && *ptr != quote)
++                        ptr++;
++                    val_len = ptr - val;
++                    if(*ptr)
++                        ptr++;
++                }else {
++                    val = ptr;
++                    while(*ptr && *ptr != ',' && *ptr != ')' && !iswspace(*ptr))
++                        ptr++;
++                    val_len = ptr - val;
+                 }
++            }
+ 
+-                if(ptr-ptr2 > ARRAY_SIZE(opacityW) && !memcmp(ptr2, opacityW, sizeof(opacityW))) {
+-                    float fval = 0.0f, e = 0.1f;
+-                    WCHAR buf[32];
+-
+-                    ptr2 += ARRAY_SIZE(opacityW);
+-
+-                    while(is_digit(*ptr2))
+-                        fval = fval*10.0f + (float)(*ptr2++ - '0');
+-
+-                    if(*ptr2 == '.') {
+-                        while(is_digit(*++ptr2)) {
+-                            fval += e * (float)(*ptr2++ - '0');
+-                            e *= 0.1f;
+-                        }
++            if(alpha && val && key_len == 7 && !wcsnicmp(key, L"opacity", 7)) {
++                float fval = 0.0f, e = 0.1f;
++                const WCHAR *p = val;
++                WCHAR buf[32];
++
++                while(p < val + val_len && is_digit(*p))
++                    fval = fval*10.0f + (float)(*p++ - '0');
++                if(p < val + val_len && *p == '.') {
++                    while(++p < val + val_len && is_digit(*p)) {
++                        fval += e * (float)(*p - '0');
++                        e *= 0.1f;
+                     }
+-
+-                    swprintf(buf, ARRAY_SIZE(buf), L"%f", fval * 0.01f);
+-                    set_opacity(This, buf);
+-                }else {
+-                    FIXME("unknown param %s\n", debugstr_wn(ptr2, ptr-ptr2));
+                 }
+ 
+-                if(*ptr == ',')
+-                    ptr++;
+-            }while(*ptr != ')');
+-        }else {
+-            FIXME("unknown filter %s\n", debugstr_wn(ptr2, ptr-ptr2));
+-            ptr = wcschr(ptr, ')');
+-            if(!ptr)
+-                break;
+-            ptr++;
++                swprintf(buf, ARRAY_SIZE(buf), L"%f", fval * 0.01f);
++                set_opacity(This, buf);
++            }else if(loader && val && key_len == 3 && !wcsnicmp(key, L"src", 3)) {
++                src = val;
++                src_len = val_len;
++            }else if(loader && val && key_len == 12 && !wcsnicmp(key, L"sizingMethod", 12)) {
++                sizing = val;
++                sizing_len = val_len;
++            }else if(alpha || loader) {
++                FIXME("unknown param %s\n", debugstr_wn(key, key_len));
++            }
+         }
++
++        if(!alpha && !loader)
++            FIXME("unknown filter %s\n", debugstr_wn(ptr2, name + name_len - ptr2));
++        if(!*ptr)
++            break;
++        ptr++;
+     }
++
++    set_filter_image(This, src, src_len, sizing, sizing_len);
+ }
+ 
+ static HRESULT WINAPI HTMLStyle_put_filter(IHTMLStyle *iface, BSTR v)
+diff --git a/dlls/mshtml/mshtml_private.h b/dlls/mshtml/mshtml_private.h
+index ce87224..0a16e6b 100644
+--- a/dlls/mshtml/mshtml_private.h
++++ b/dlls/mshtml/mshtml_private.h
+@@ -1095,6 +1095,7 @@ typedef struct {
+     HTMLStyle *runtime_style;
+     HTMLAttributeCollection *attrs;
+     WCHAR *filter;
++    BOOL filter_image;                /* the filter's AlphaImageLoader set the background */
+     unsigned unique_id;
+ } HTMLElement;
+ 
+-- 
+2.53.0
+
