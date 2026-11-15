@@ -1,0 +1,49 @@
+From 2fec2f00aa1a112ecd62a8167268fff9a16453cf Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 11:34:18 +0100
+Subject: [PATCH] wined3d: SysmemMaps: also the buffers without GPU access
+ (D3DPOOL_SYSTEMMEM).
+
+A buffer without GPU access lives in system memory only, never in a BO,
+so its memory holds still just as a pinned one's does. d3d9 maps a
+D3DPOOL_SYSTEMMEM index buffer for reading on every draw that uses it,
+to copy the indices into its streaming buffer; each map and unmap went
+through the CS thread and waited for it. Tales of Monkey Island draws
+~850 times a frame from such buffers: its main thread waited a third of
+the time, and the GO Ultra showed 9.6 fps in its first scene; with
+SysmemMaps=1 now 15.7 fps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/wined3d/cs.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/wined3d/cs.c b/dlls/wined3d/cs.c
+index 350f7d1..8b4811f 100644
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -2524,7 +2524,8 @@ static void wined3d_cs_exec_sysmem_dirty(struct wined3d_cs *cs, const void *data
+ }
+ 
+ /* SysmemMaps: maps of buffers pinned in system memory (D3DPOOL_MANAGED ones,
+- * or all buffers with software vertex processing) without a round trip to
++ * all buffers with software vertex processing, and D3DPOOL_SYSTEMMEM ones,
++ * which d3d9 reads for every draw from them) without a round trip to
+  * the CS thread for the map and another one for the unmap. Once the CS
+  * thread is done with the buffer (a map through it waits for that too), its
+  * system memory copy stays valid and in place: the client thread hands it
+@@ -2539,7 +2540,10 @@ static bool sysmem_map_buffer(struct wined3d_device_context *context, struct win
+     struct wined3d_client_resource *client = &resource->client;
+     struct wined3d_buffer *buffer;
+ 
+-    if (!wined3d_settings.sysmem_maps || resource->type != WINED3D_RTYPE_BUFFER || !resource->pin_sysmem
++    /* Buffers without GPU access (D3DPOOL_SYSTEMMEM) live in system memory
++     * only, never in a BO: their memory holds still too. */
++    if (!wined3d_settings.sysmem_maps || resource->type != WINED3D_RTYPE_BUFFER
++            || (!resource->pin_sysmem && (resource->access & WINED3D_RESOURCE_ACCESS_GPU))
+             || (flags & WINED3D_MAP_DISCARD) || context != &context->device->cs->c)
+         return false;
+ 
+-- 
+2.53.0
+
