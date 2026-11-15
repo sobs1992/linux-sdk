@@ -11,9 +11,10 @@ not carry it yet; once on the console:
        WINEPREFIX=/data/wine/prefix wine msiexec /i wine-gecko-2.47.4-x86.msi /q
 
 2. Start the game, press "Launch Game!", then in Settings > Graphics choose
-   640x480 (the game offers 640x480, 800x600, 1024x768; it starts at
-   1024x768, which shrinks to 640x480 anyway and runs at half the speed)
-   and the quality (1: ~29 fps in the first scene), and press
+   800x600 (the game offers 640x480, 800x600, 1024x768; wine.ini shows
+   800x600's 16:9 picture on the whole screen, its text sharp; 640x480 is
+   ~4 % faster but blurred, 1024x768 a third slower) and the quality (1:
+   ~27 fps in the first scene), and press
    Apply: the game keeps its settings on Apply or when left by its menu.
 
 The launcher's buttons are PNG pictures shown through IE's
