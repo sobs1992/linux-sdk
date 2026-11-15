@@ -1,0 +1,24 @@
+config BR2_PACKAGE_IORTCW
+	bool "iortcw"
+	depends on BR2_aarch64 || BR2_x86_64 # the game modules' names
+	depends on BR2_INSTALL_LIBSTDCPP # its camera splines are C++
+	depends on !BR2_STATIC_LIBS # sdl2, the game modules
+	depends on BR2_PACKAGE_MESA_PANFROST # OpenGL through EGL
+	# SDL2 with EGL and its bareapp video driver: the only window there is
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	select BR2_PACKAGE_SDL2
+	select BR2_PACKAGE_ZLIB
+	help
+	  iortcw (GPLv3 with id Software's additional terms), the engine
+	  of Return to Castle Wolfenstein, single player: an SDL2 game for
+	  bare_app, its OpenGL renderer drawn by the GPU (mesa-panfrost)
+	  through SDL's bareapp driver, the gamepad by the bindings of
+	  gamepad.cfg. The game files (main/ of a bought copy) are not
+	  included.
+
+	  https://github.com/iortcw/iortcw
+
+comment "iortcw needs mesa-panfrost, bare_app's SDL2 games and a toolchain w/ C++, dynamic library"
+	depends on BR2_aarch64 || BR2_x86_64
+	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_PACKAGE_BARE_APP_SDL || \
+		!BR2_INSTALL_LIBSTDCPP || BR2_STATIC_LIBS

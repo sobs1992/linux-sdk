@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 18:51:01 +0100
+Subject: [PATCH] SP: desktop OpenGL from an SDL that defaults to OpenGL ES
+
+An SDL built for EGL with OpenGL ES only (no desktop OpenGL of its own,
+as for Mesa without GLX: the ODROID-GO Ultra's panfrost) starts with an
+OpenGL ES 2 profile, and the fixed-function renderer got a context it
+cannot draw with. Ask for a desktop OpenGL compatibility context there;
+Mesa gives its highest compatibility version (3.1 on panfrost).
+---
+ SP/code/sdl/sdl_glimp.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/SP/code/sdl/sdl_glimp.c b/SP/code/sdl/sdl_glimp.c
+index 94d1d872..ef2533bb 100644
+--- a/SP/code/sdl/sdl_glimp.c
++++ b/SP/code/sdl/sdl_glimp.c
+@@ -652,6 +652,21 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
+ 
+ #ifdef USE_OPENGLES
+ 		SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 1 );
++#else
++		{
++			// An SDL built for EGL with OpenGL ES only (no desktop OpenGL
++			// of its own, as for Mesa without GLX) starts with an OpenGL ES 2
++			// profile: ask for desktop OpenGL, Mesa gives its highest
++			// compatibility version
++			int profileMask = 0;
++
++			SDL_GL_GetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, &profileMask );
++			if ( profileMask == SDL_GL_CONTEXT_PROFILE_ES ) {
++				SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY );
++				SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, 2 );
++				SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 1 );
++			}
++		}
+ #endif
+ 
+ 		SDL_GL_SetAttribute( SDL_GL_RED_SIZE, perChannelColorBits );

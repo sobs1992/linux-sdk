@@ -1,0 +1,50 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] video: bareapp: OpenGL functions looked up again after the
+ library is reloaded
+
+glReadPixels and the other functions the swap uses were looked up once
+for the life of the process, and the context that swapped last stayed
+known. A game that restarts its video (Return to Castle Wolfenstein's
+vid_restart, which its first start runs to apply its recommended
+settings) has SDL unload the EGL library and load it again, at another
+address: the next swap called into the unloaded one (SIGSEGV in
+SaveReadState). They now go with the library: GL_UnloadLibrary forgets
+them, the copies of SDL_BAREAPP_GL_ASYNC and the context, and the next
+swap looks everything up again.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+--- a/src/video/bareapp/SDL_bareappvideo.c
++++ b/src/video/bareapp/SDL_bareappvideo.c
+@@ -784,6 +784,21 @@ static void BAREAPP_GL_DeleteContext(_THIS, SDL_GLContext context)
+     }
+     SDL_EGL_DeleteContext(_this, context);
+ }
++
++/*
++ * Every GL function looked up and every context known belong to the
++ * library loaded: a game that restarts its video (Quake III's vid_restart)
++ * has SDL unload it and load it again, at another address. Forgotten
++ * here, they are looked up again at the next swap.
++ */
++static void BAREAPP_GL_UnloadLibrary(_THIS)
++{
++    ForgetCopies(SDL_FALSE);
++    vd.ReadPixels = NULL;
++    vd.gl_context = NULL;
++    vd.async_known = SDL_FALSE;
++    SDL_EGL_UnloadLibrary(_this);
++}
+ #endif /* SDL_VIDEO_OPENGL_EGL */
+ 
+ /* ---- device ------------------------------------------------------------- */
+@@ -819,7 +834,7 @@ static SDL_VideoDevice *BAREAPP_CreateDevice(void)
+ #ifdef SDL_VIDEO_OPENGL_EGL
+     device->GL_LoadLibrary = BAREAPP_GL_LoadLibrary;
+     device->GL_GetProcAddress = SDL_EGL_GetProcAddress;
+-    device->GL_UnloadLibrary = SDL_EGL_UnloadLibrary;
++    device->GL_UnloadLibrary = BAREAPP_GL_UnloadLibrary;
+     device->GL_CreateContext = BAREAPP_GL_CreateContext;
+     device->GL_MakeCurrent = BAREAPP_GL_MakeCurrent;
+     device->GL_SetSwapInterval = SDL_EGL_SetSwapInterval;

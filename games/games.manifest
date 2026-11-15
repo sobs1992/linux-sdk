@@ -181,3 +181,17 @@ source = /media/D/Games/Tales of Monkey Island/Launch of the Screaming Narwhal
 overlay = games/monkey1/overlay
 cover = MonkeyIsland101.exe:icon
 cover_crop = fit
+
+[rtcw]
+; Return to Castle Wolfenstein (the Russian edition, patched to 1.41),
+; iortcw (bare-app.RTCW=y): single player, main/ only with what it reads:
+; pak0, sp_pak1-4 (sp_pak4 of patch 1.41) and the translation's pk3s (text
+; and voices), about 0.95 GB. Not the multiplayer's mp_*.pk3, the Windows
+; programs, nor the unofficial 1.42d patch (its menus are for its own
+; WolfSP.exe).
+install = none
+file = /media/D/Games/Return to Castle Wolfenstein/Main/pak0.pk3 -> main/
+file = /media/D/Games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
+file = /media/D/Games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
+cover = /media/D/Games/Return to Castle Wolfenstein/2.ico
+cover_crop = fit
