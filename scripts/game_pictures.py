@@ -12,6 +12,8 @@ scripts/games-image.py ("cover = ARCHIVE:ENTRY" in games/games.manifest).
         in the PLAYPAL colours, stretched to Doom's 1.2-high pixels.
   .exe  A Windows program (or .dll): entry "icon", its biggest icon picture
         (PNG or 32-bit), with its transparency (RGBA).
+  .bik  A video (Bink, or another ffmpeg reads): entry SECONDS, its frame
+        at that time, made by ffmpeg (Knights of the Temple's intro).
 
 Only the directory and the one entry are read, and every size taken from
 a file is checked first: a damaged or encrypted archive is an error, never
@@ -184,9 +186,32 @@ def _icon(data, what):
     return im.copy()
 
 
+def _video_frame(path, seconds, what):
+    """the frame of video PATH at SECONDS, by ffmpeg"""
+    import io
+    import shutil
+    import subprocess
+    from PIL import Image
+
+    _check(shutil.which("ffmpeg"), "%s: needs ffmpeg (apt install ffmpeg)" % what)
+    try:
+        t = float(seconds)
+    except ValueError:
+        raise PictureError("%s: the entry is a time in seconds" % what)
+    _check(0 <= t < 86400, "%s: time out of range" % what)
+    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", "%g" % t, "-i", "file:" + path,
+                        "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+                       capture_output=True, timeout=120)
+    _check(r.returncode == 0 and r.stdout,
+           "%s: %s" % (what, r.stderr.decode(errors="replace").strip() or "no frame there"))
+    im = Image.open(io.BytesIO(r.stdout))
+    _check(im.width * im.height <= MAX_PIXELS, "%s: frame too big" % what)
+    return im.convert("RGB")
+
+
 def picture(archive, entry):
-    """the picture ENTRY of ARCHIVE (.lod, .wad, .exe) as a PIL image: RGB,
-    an icon RGBA"""
+    """the picture ENTRY of ARCHIVE (.lod, .wad, .exe, .bik) as a PIL image:
+    RGB, an icon RGBA"""
     try:
         import PIL  # noqa: F401
     except ImportError:
@@ -210,7 +235,9 @@ def picture(archive, entry):
                 pass	# 8-bit and smaller ones
         _check(icons, archive + ": no 32-bit icon")
         return max(icons, key=lambda im: im.width * im.height)
-    raise PictureError("%s: .lod, .wad or .exe only" % archive)
+    if ext == ".bik":
+        return _video_frame(archive, entry, what)
+    raise PictureError("%s: .lod, .wad, .exe or .bik only" % archive)
 
 
 def entries(archive):

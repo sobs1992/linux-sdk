@@ -42,7 +42,8 @@ games_free_mb = 1024
 ;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
 ;   cover      a picture for bare_app's home screen: a picture file, or
 ;              ARCHIVE:ENTRY, a picture inside the game's .lod (Heroes III)
-;              or .wad (Doom), or PROGRAM.exe:icon, its biggest icon, see
+;              or .wad (Doom), PROGRAM.exe:icon, its biggest icon, or
+;              VIDEO.bik:SECONDS, a frame of a video (ffmpeg), see
 ;              scripts/game_pictures.py; cropped square (cover_crop: center,
 ;              top, bottom, left, right, "X Y SIZE" in the picture's
 ;              pixels, or fit: all of it on a blurred copy), 240x240, saved
@@ -157,6 +158,20 @@ run = games/neighbours/prepare.sh
 source = /media/D/Games/NeighborsFromHell2
 overlay = games/neighbours2/overlay
 run = games/neighbours2/prepare.sh
+
+[templar]
+; Knights of the Temple: Infernal Crusade (2004), 1C's Russian edition
+; ("Тамплиеры: Крестовый поход"), as installed (games/templar/README.md).
+; The cover: the templar of its intro's last painting
+source = /media/D/Games/Tampliers
+exclude = Manual.pdf
+exclude = unins000.*
+exclude = *.URL
+exclude = KillSave.exe
+exclude = protect.dll
+overlay = games/templar/overlay
+cover = /media/D/Games/Tampliers/Sbz1/Videos/bd_05.bik:4
+cover_crop = 60 0 360
 
 [monkey1]
 ; Tales of Monkey Island, chapter 1 (2009), the Russian edition. Needs Wine

@@ -125,7 +125,7 @@ def sources(spec):
 def load_picture(spec, alpha=False):
     """a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py)"""
     from PIL import Image
-    m = re.match(r"^(.+\.(?:lod|wad|exe|dll)):([^/:]+)$", spec, re.I)
+    m = re.match(r"^(.+\.(?:lod|wad|exe|dll|bik)):([^/:]+)$", spec, re.I)
     try:
         if m:
             import game_pictures

@@ -51,7 +51,7 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
 | `overlay` | каталог SDK, который кладётся поверх игры (`wine.ini`, настройки) |
 | `run` | программа после копирования, с `GAME_DIR`, `SOURCE`, `SDK_DIR`, `DATA_DIR` |
 | `data` | `SRC -> DST`: файлы на `/data` (путь от `/data`), можно несколько |
-| `cover` | картинка для главного экрана bare_app: файл, `АРХИВ:ЗАПИСЬ` из `.lod`/`.wad` игры или `ПРОГРАММА.exe:icon` (её самый большой значок); обрезается в квадрат (`cover_crop`: `center`, `top`, `bottom`, `left`, `right`, `fit`), 240×240, `cover.png` в каталоге игры |
+| `cover` | картинка для главного экрана bare_app: файл, `АРХИВ:ЗАПИСЬ` из `.lod`/`.wad` игры, `ПРОГРАММА.exe:icon` (её самый большой значок) или `ВИДЕО.bik:СЕКУНДЫ` (кадр ролика, ffmpeg); обрезается в квадрат (`cover_crop`: `center`, `top`, `bottom`, `left`, `right`, `fit`), 240×240, `cover.png` в каталоге игры |
 | `cover_back` | картинка-фон для значка: размывается и затемняется, `cover` кладётся на неё целиком с тенью |
 
 Пути без `/` в начале — от корня SDK; в `file`, `data`, `cover` работают шаблоны.
@@ -77,6 +77,11 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
   (`daemonica_dialog.py`: правит `daemonica.wrs`, проверка движка — `wrscheck.py`,
   упаковка — `lzss_pack.py`, формат — `wrs.py`). OpenAL берётся из `SysWOW64`
   Windows, шрифты Arial и Palatino — из её `Fonts` в префикс Wine на `/data`.
+
+- **templar** — Knights of the Temple: Infernal Crusade, русское издание 1С (Wine):
+  `templar/overlay/wine.ini` — раскладка консольных версий (крестовина — оружие,
+  правый стик — камера), `gamma = 1.6` для тёмных подземелий; нужен Mesa-патч 0005
+  (`PAN_MMAP_WINDOW`, 6 → 60 fps). Обложка — кадр ролика `bd_05.bik` (через ffmpeg).
 
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт. Все три кампании — 6,4 ГБ; если образ не помещается, карты
