@@ -1,0 +1,95 @@
+From be0e63acde1091f821295fdaedd4b73fde0f7bab Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 17:44:00 +0100
+Subject: [PATCH] winebare.drv: gamma ramps, shown by bare_app_wine
+
+The display DCs get the driver (CreateDC/DeleteDC), for
+Get/SetDeviceGammaRamp: the brightness setting of many old games
+(Knights of the Temple sets brighter ramps for its menus and videos),
+and Direct3D's SetGammaRamp, which comes the same way. The ramp goes to
+bare_app_wine as three WB_GAMMA messages, a channel each in 8 bits; it
+puts the screen through it. Get returns the ramp set, the identity
+before.
+---
+ dlls/winebare.drv/main.c | 63 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+index e4b793b..4a1c132 100644
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -251,8 +251,71 @@ static void send_key(const struct wb_msg *msg)
+     NtUserSendHardwareInput(0, 0, &input, 0);
+ }
+ 
++/*
++ * The display DCs, for the gamma ramp: the brightness setting of many old
++ * games (SetDeviceGammaRamp(), Direct3D's SetGammaRamp()), shown by
++ * bare_app_wine, which puts the screen through it.
++ */
++static const struct user_driver_funcs baredrv_funcs;
++
++static pthread_mutex_t gamma_mutex = PTHREAD_MUTEX_INITIALIZER;
++static WORD gamma_ramp[3][256];
++static BOOL gamma_set;
++
++static BOOL BARE_CreateDC(PHYSDEV *pdev, LPCWSTR device, LPCWSTR output, const DEVMODEW *devmode)
++{
++    PHYSDEV dev = calloc(1, sizeof(*dev));
++
++    if (!dev) return FALSE;
++    push_dc_driver(pdev, dev, &baredrv_funcs.dc_funcs);
++    return TRUE;
++}
++
++static BOOL BARE_DeleteDC(PHYSDEV dev)
++{
++    free(dev);
++    return TRUE;
++}
++
++static BOOL BARE_GetDeviceGammaRamp(PHYSDEV dev, void *ptr)
++{
++    WORD (*ramp)[256] = ptr;
++    int c, i;
++
++    pthread_mutex_lock(&gamma_mutex);
++    if (gamma_set) memcpy(ramp, gamma_ramp, sizeof(gamma_ramp));
++    else for (c = 0; c < 3; c++) for (i = 0; i < 256; i++) ramp[c][i] = i * 257;
++    pthread_mutex_unlock(&gamma_mutex);
++    return TRUE;
++}
++
++static BOOL BARE_SetDeviceGammaRamp(PHYSDEV dev, void *ptr)
++{
++    struct wb_msg msg = { .type = WB_GAMMA };
++    int c, i;
++
++    pthread_mutex_lock(&gamma_mutex);
++    memcpy(gamma_ramp, ptr, sizeof(gamma_ramp));
++    gamma_set = TRUE;
++    for (c = 0; c < 3; c++)
++    {
++        msg.gamma.channel = c;
++        for (i = 0; i < 256; i++) msg.gamma.ramp[i] = gamma_ramp[c][i] >> 8;
++        bare_send(&msg, -1);
++    }
++    pthread_mutex_unlock(&gamma_mutex);
++    TRACE("red 64 -> %u, 128 -> %u, 192 -> %u\n", gamma_ramp[0][64] >> 8, gamma_ramp[0][128] >> 8,
++          gamma_ramp[0][192] >> 8);
++    return TRUE;
++}
++
+ static const struct user_driver_funcs baredrv_funcs =
+ {
++    .dc_funcs.pCreateDC = BARE_CreateDC,
++    .dc_funcs.pDeleteDC = BARE_DeleteDC,
++    .dc_funcs.pGetDeviceGammaRamp = BARE_GetDeviceGammaRamp,
++    .dc_funcs.pSetDeviceGammaRamp = BARE_SetDeviceGammaRamp,
++    .dc_funcs.priority = GDI_PRIORITY_GRAPHICS_DRV,
+     .pChangeDisplaySettings = BARE_ChangeDisplaySettings,
+     .pCreateWindowSurface = BARE_CreateWindowSurface,
+     .pDestroyWindow = BARE_DestroyWindow,
+-- 
+2.53.0
+
