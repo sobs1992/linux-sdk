@@ -1,0 +1,68 @@
+From 2cdf28efe8c1a3a78c090b8feb57fbaa4464f849 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 22:41:08 +0100
+Subject: [PATCH] wined3d: NoMultisample=1: multisampling reported as not
+ available.
+
+A program that asks for it first then draws without. Tales of Monkey
+Island (the GOG edition) takes a multisampled back buffer when one is
+offered; on the GO Ultra (Mali-G52, Panfrost) its first scene at quality
+7 ran at 19 fps with it and 39 fps without.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/wined3d/directx.c         | 10 ++++++++++
+ dlls/wined3d/wined3d_main.c    |  2 ++
+ dlls/wined3d/wined3d_private.h |  2 ++
+ 3 files changed, 14 insertions(+)
+
+diff --git a/dlls/wined3d/directx.c b/dlls/wined3d/directx.c
+index 2b67312..1215a59 100644
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -1920,6 +1920,16 @@ HRESULT CDECL wined3d_check_device_multisample_type(const struct wined3d_adapter
+         return WINED3DERR_NOTAVAILABLE;
+     }
+ 
++    /* NoMultisample: a program that asks first then draws without it.
++     * Tales of Monkey Island takes a multisampled back buffer when offered
++     * one: on the GO Ultra (Mali-G52) its first scene at quality 7 ran at
++     * 19 fps with it, 39 without. */
++    if (wined3d_settings.no_multisample && multisample_type != WINED3D_MULTISAMPLE_NONE)
++    {
++        TRACE("Multisampling disabled by NoMultisample.\n");
++        return WINED3DERR_NOTAVAILABLE;
++    }
++
+     format = wined3d_get_format(adapter, surface_format_id, 0);
+ 
+     if (multisample_type && !(format->multisample_types & 1u << (multisample_type - 1)))
+diff --git a/dlls/wined3d/wined3d_main.c b/dlls/wined3d/wined3d_main.c
+index 6466840..e976791 100644
+--- a/dlls/wined3d/wined3d_main.c
++++ b/dlls/wined3d/wined3d_main.c
+@@ -432,6 +432,8 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
+             ERR_(winediag)("Setting system memory maps to %u.\n", wined3d_settings.sysmem_maps);
+         if (!get_config_key_dword(hkey, appkey, env, "GLStateCache", &wined3d_settings.gl_state_cache))
+             ERR_(winediag)("Setting GL state cache to %u.\n", wined3d_settings.gl_state_cache);
++        if (!get_config_key_dword(hkey, appkey, env, "NoMultisample", &wined3d_settings.no_multisample))
++            ERR_(winediag)("Setting no multisampling to %u.\n", wined3d_settings.no_multisample);
+         if (!get_config_key_dword(hkey, appkey, env, "strict_shader_math", &wined3d_settings.strict_shader_math))
+             ERR_(winediag)("Setting strict shader math to %#x.\n", wined3d_settings.strict_shader_math);
+         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
+diff --git a/dlls/wined3d/wined3d_private.h b/dlls/wined3d/wined3d_private.h
+index 634e8fb..4515363 100644
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -494,6 +494,8 @@ struct wined3d_settings
+     unsigned int heap_maps;
+     unsigned int sysmem_maps;
+     unsigned int gl_state_cache;
++    /* NoMultisample: multisampling reported as not available */
++    unsigned int no_multisample;
+ };
+ 
+ extern struct wined3d_settings wined3d_settings;
+-- 
+2.53.0
+

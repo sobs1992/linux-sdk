@@ -34,12 +34,22 @@ without it the menus and subtitles are English.
 ## Settings
 
 Choose 800x600 in each chapter's Settings > Graphics (the game offers
-640x480, 800x600, 1024x768 and starts at 640x480): wine.ini shows
-800x600's 16:9 picture on the whole screen, its text sharp; at the other
-two the picture is shown whole, between black bars (640x480 is ~4 %
-faster but blurred, 1024x768 a third slower). It starts at quality 1
-(~27 fps in chapter 1's first scene). The game keeps its settings when it
-is left by its menu (Quit), not when killed. They are in
+640x480, 800x600, 1024x768; chapter 1 starts at 640x480, chapter 2 at
+1024x768): wine.ini shows 800x600's 16:9 picture on the whole screen; at
+the other two the picture is shown whole, between black bars. Press
+Apply, then leave by the game's menu (Quit): the game keeps its settings
+then, not when it is killed. They are in
 `/data/wine/prefix/drive_c/users/root/Documents/Telltale Games/monkeyN/prefs.prop`
 (the directory's name, as Wine has no `SaveGameFolderName` in the
 registry), with the saved games.
+
+A new chapter starts at quality 1. This edition shows a black world at
+quality 1-6 (it draws its scene into a texture and never puts it on the
+screen); wine.ini's `WINE_D3D9_SHOW_LOST_SCENE=1` (Wine patch 0022)
+shows that texture. 7 and above draw the scene themselves, with more
+detail. In the first scene at 800x600 both ran at ~40 fps, with
+`NoMultisample=1` (Wine patch 0021): the game takes a multisampled back
+buffer when offered one, and with it quality 7 ran at 19 fps.
+
+The text (Buka's font) is thin at 800x600: some strokes are lost, the
+same at every quality.
