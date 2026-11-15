@@ -1,0 +1,195 @@
+From c82f66c93a326e7d5401a18dc3b599344b939552 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 12:14:45 +0100
+Subject: [PATCH] d3d9: Draw from a copy of D3DPOOL_SYSTEMMEM index buffers,
+ updated on change.
+
+Every draw from a D3DPOOL_SYSTEMMEM index buffer mapped it, copied its
+indices into the streaming index buffer and bound that. An index buffer in
+system memory now has a copy that draws can use (as vertex buffers
+already do), bound in its place and owning the d3d9 object; a lock for
+writing marks the range written, and the next draw copies just that.
+
+Tales of Monkey Island draws ~850 times a frame from such buffers, which
+it fills once: on the GO Ultra under Box64 its first scene went from 26.5
+to 29.6 fps at the lowest quality.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/d3d9/buffer.c       | 52 ++++++++++++++++++++++++++++++++++++----
+ dlls/d3d9/d3d9_private.h |  4 ++++
+ dlls/d3d9/device.c       | 34 +++++++++++---------------
+ 3 files changed, 66 insertions(+), 24 deletions(-)
+
+diff --git a/dlls/d3d9/buffer.c b/dlls/d3d9/buffer.c
+index 73190cb..6810d2c 100644
+--- a/dlls/d3d9/buffer.c
++++ b/dlls/d3d9/buffer.c
+@@ -387,7 +387,10 @@ static ULONG WINAPI d3d9_indexbuffer_AddRef(IDirect3DIndexBuffer9 *iface)
+     if (refcount == 1)
+     {
+         IDirect3DDevice9Ex_AddRef(buffer->parent_device);
+-        wined3d_buffer_incref(buffer->wined3d_buffer);
++        if (buffer->draw_buffer)
++            wined3d_buffer_incref(buffer->draw_buffer);
++        else
++            wined3d_buffer_incref(buffer->wined3d_buffer);
+     }
+ 
+     return refcount;
+@@ -404,7 +407,10 @@ static ULONG WINAPI d3d9_indexbuffer_Release(IDirect3DIndexBuffer9 *iface)
+     {
+         IDirect3DDevice9Ex *device = buffer->parent_device;
+ 
+-        wined3d_buffer_decref(buffer->wined3d_buffer);
++        if (buffer->draw_buffer)
++            wined3d_buffer_decref(buffer->draw_buffer);
++        else
++            wined3d_buffer_decref(buffer->wined3d_buffer);
+ 
+         /* Release the device last, as it may cause the device to be destroyed. */
+         IDirect3DDevice9Ex_Release(device);
+@@ -524,6 +530,26 @@ static HRESULT WINAPI d3d9_indexbuffer_Lock(IDirect3DIndexBuffer9 *iface,
+             wined3dmapflags_from_d3dmapflags(flags, buffer->usage));
+     *data = wined3d_map_desc.data;
+ 
++    if (SUCCEEDED(hr) && buffer->draw_buffer && !(flags & D3DLOCK_READONLY))
++    {
++        /* Size 0 locks the whole buffer. */
++        unsigned int start = size ? min(offset, buffer->size) : 0;
++        unsigned int end = size ? min(offset + size, buffer->size) : buffer->size;
++
++        wined3d_mutex_lock();
++        if (buffer->dirty_end <= buffer->dirty_start)
++        {
++            buffer->dirty_start = start;
++            buffer->dirty_end = end;
++        }
++        else
++        {
++            buffer->dirty_start = min(buffer->dirty_start, start);
++            buffer->dirty_end = max(buffer->dirty_end, end);
++        }
++        wined3d_mutex_unlock();
++    }
++
+     return hr;
+ }
+ 
+@@ -585,6 +611,8 @@ static void STDMETHODCALLTYPE d3d9_indexbuffer_wined3d_object_destroyed(void *pa
+ {
+     struct d3d9_indexbuffer *buffer = parent;
+ 
++    if (buffer->draw_buffer)
++        wined3d_buffer_decref(buffer->wined3d_buffer);
+     d3d9_resource_cleanup(&buffer->resource);
+     free(buffer);
+ }
+@@ -635,9 +663,25 @@ HRESULT indexbuffer_init(struct d3d9_indexbuffer *buffer, struct d3d9_device *de
+     buffer->sysmem = !(desc.access & WINED3D_RESOURCE_ACCESS_GPU);
+     d3d9_resource_init(&buffer->resource);
+ 
++    buffer->size = size;
++    /* Draws from a D3DPOOL_SYSTEMMEM buffer use a copy that can be drawn
++     * from (and owns the d3d9 object, as for vertex buffers); what the
++     * program writes is copied into it on the next draw. Copying the indices
++     * into the streaming buffer on every draw instead cost ~4 % of the main
++     * thread of Tales of Monkey Island (~850 draws a frame) under Box64. */
+     wined3d_mutex_lock();
+-    hr = wined3d_buffer_create(device->wined3d_device, &desc, NULL, buffer,
+-            &d3d9_indexbuffer_wined3d_parent_ops, &buffer->wined3d_buffer);
++    hr = wined3d_buffer_create(device->wined3d_device, &desc, NULL, buffer, buffer->sysmem
++            ? &d3d9_null_wined3d_parent_ops : &d3d9_indexbuffer_wined3d_parent_ops, &buffer->wined3d_buffer);
++    if (SUCCEEDED(hr) && buffer->sysmem)
++    {
++        desc.bind_flags = WINED3D_BIND_INDEX_BUFFER;
++        desc.access = WINED3D_RESOURCE_ACCESS_GPU;
++        if (FAILED(hr = wined3d_buffer_create(device->wined3d_device, &desc, NULL, buffer,
++                &d3d9_indexbuffer_wined3d_parent_ops, &buffer->draw_buffer)))
++            wined3d_buffer_decref(buffer->wined3d_buffer);
++        buffer->dirty_start = 0;
++        buffer->dirty_end = size;
++    }
+     wined3d_mutex_unlock();
+     if (FAILED(hr))
+     {
+diff --git a/dlls/d3d9/d3d9_private.h b/dlls/d3d9/d3d9_private.h
+index b1e7690..66b8c6c 100644
+--- a/dlls/d3d9/d3d9_private.h
++++ b/dlls/d3d9/d3d9_private.h
+@@ -206,6 +206,10 @@ struct d3d9_indexbuffer
+     IDirect3DIndexBuffer9 IDirect3DIndexBuffer9_iface;
+     struct d3d9_resource resource;
+     struct wined3d_buffer *wined3d_buffer;
++    /* D3DPOOL_SYSTEMMEM: the copy draws use, as for vertex buffers; what the
++     * program wrote since the last draw is copied into it on the next one. */
++    struct wined3d_buffer *draw_buffer;
++    unsigned int size, dirty_start, dirty_end;
+     IDirect3DDevice9Ex *parent_device;
+     enum wined3d_format_id format;
+     DWORD usage;
+diff --git a/dlls/d3d9/device.c b/dlls/d3d9/device.c
+index 5f59d10..b3970b7 100644
+--- a/dlls/d3d9/device.c
++++ b/dlls/d3d9/device.c
+@@ -3170,36 +3170,28 @@ static HRESULT d3d9_device_upload_sysmem_index_buffer(struct d3d9_device *device
+         unsigned int *start_idx, unsigned int idx_count)
+ {
+     const struct wined3d_stateblock_state *state = device->stateblock_state;
+-    unsigned int src_offset, idx_size, buffer_size, pos;
+-    struct wined3d_resource_desc resource_desc;
+-    struct wined3d_resource *index_buffer;
+-    struct wined3d_map_desc map_desc;
++    struct d3d9_indexbuffer *ib;
+     struct wined3d_box box;
+     HRESULT hr;
+ 
+     if (!device->sysmem_ib)
+         return S_OK;
+ 
+-    index_buffer = wined3d_buffer_get_resource(state->index_buffer);
+-    wined3d_resource_get_desc(index_buffer, &resource_desc);
+-    idx_size = (state->index_format == WINED3DFMT_R16_UINT) ? 2 : 4;
+-
+-    src_offset = (*start_idx) * idx_size;
+-    buffer_size = min(idx_count * idx_size, resource_desc.size - src_offset);
++    /* The draw copy is what is bound: bring it up to date with what the
++     * program wrote since the last draw. */
++    ib = wined3d_buffer_get_parent(state->index_buffer);
++    if (ib->dirty_end <= ib->dirty_start)
++        return S_OK;
+ 
+-    wined3d_box_set(&box, src_offset, 0, buffer_size, 1, 0, 1);
+-    if (FAILED(hr = wined3d_resource_map(index_buffer, 0, &map_desc, &box, WINED3D_MAP_READ)))
++    wined3d_box_set(&box, ib->dirty_start, 0, ib->dirty_end, 1, 0, 1);
++    if (FAILED(hr = wined3d_device_context_copy_sub_resource_region(device->immediate_context,
++            wined3d_buffer_get_resource(ib->draw_buffer), 0, ib->dirty_start, 0, 0,
++            wined3d_buffer_get_resource(ib->wined3d_buffer), 0, &box, 0)))
+     {
+-        ERR("Failed to map index buffer, hr %#lx.\n", hr);
++        ERR("Failed to update index buffer, hr %#lx.\n", hr);
+         return hr;
+     }
+-    wined3d_streaming_buffer_upload(device->wined3d_device, &device->index_buffer,
+-            map_desc.data, buffer_size, idx_size, &pos);
+-    wined3d_resource_unmap(index_buffer, 0);
+-
+-    wined3d_device_context_set_index_buffer(device->immediate_context,
+-            device->index_buffer.buffer, state->index_format, pos);
+-    *start_idx = 0;
++    ib->dirty_start = ib->dirty_end = 0;
+     return S_OK;
+ }
+ 
+@@ -3971,6 +3963,8 @@ static HRESULT WINAPI d3d9_device_SetIndices(IDirect3DDevice9Ex *iface, IDirect3
+ 
+     if (!ib)
+         wined3d_buffer = NULL;
++    else if (ib->draw_buffer)
++        wined3d_buffer = ib->draw_buffer;
+     else
+         wined3d_buffer = ib->wined3d_buffer;
+ 
+-- 
+2.53.0
+

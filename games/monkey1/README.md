@@ -13,7 +13,7 @@ not carry it yet; once on the console:
 2. Start the game, press "Launch Game!", then in Settings > Graphics choose
    640x480 (the game offers 640x480, 800x600, 1024x768; it starts at
    1024x768, which shrinks to 640x480 anyway and runs at half the speed)
-   and the quality (1: ~26 fps in the first scene, 9: ~17 fps), and press
+   and the quality (1: ~29 fps in the first scene), and press
    Apply: the game keeps its settings on Apply or when left by its menu.
 
 The launcher's buttons are PNG pictures shown through IE's
