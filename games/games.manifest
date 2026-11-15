@@ -148,7 +148,8 @@ cover_crop = fit
 ; Neighbours from Hell (2003), the Russian GOG release: game_info/data of
 ; NeighborsFromHell_Linux.tar.gz (bin/, data/; its own Wine left out).
 ; prepare.sh moves its 800x600 interface into the top 480 rows and makes
-; cover.png from the main menu's picture
+; cover.png: Woody of the end screen's picture (NfH 2: the neighbour of
+; its outro), not the main menu's, two pictures meeting across its middle
 source = /media/D/Games/NeighborsFromHell
 overlay = games/neighbours/overlay
 run = games/neighbours/prepare.sh
@@ -174,12 +175,49 @@ cover = /media/D/Games/Tampliers/Sbz1/Videos/bd_05.bik:4
 cover_crop = 60 0 360
 
 [monkey1]
-; Tales of Monkey Island, chapter 1 (2009), the Russian edition. Needs Wine
-; Gecko in the prefix (games/monkey1/README.md)
+; Tales of Monkey Island (2009): the GOG edition with the Russian
+; translation and Buka's voices in it, five chapters, each its own game
+; (games/monkey1/README.md). Not its Launcher.exe (a page to pick a
+; chapter): each chapter starts its own program. The engine's D3DX 9.41
+; comes from Windows. Chapter 1's program has only Telltale's logo for an
+; icon: its cover is GOG's icon of the game, Flotsam Island.
 dir = monkey1
-source = /media/D/Games/Tales of Monkey Island/Launch of the Screaming Narwhal
+source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 1
 overlay = games/monkey1/overlay
-cover = MonkeyIsland101.exe:icon
+file = /media/C/Windows/SysWOW64/D3DX9_41.dll
+cover = /media/D/Games/Tales of Monkey Island/goggame-1207659066.ico
+cover_crop = fit
+
+[monkey2]
+dir = monkey2
+source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 2
+overlay = games/monkey2/overlay
+file = /media/C/Windows/SysWOW64/D3DX9_41.dll
+cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 2/MonkeyIsland102.exe:icon
+cover_crop = fit
+
+[monkey3]
+dir = monkey3
+source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 3
+overlay = games/monkey3/overlay
+file = /media/C/Windows/SysWOW64/D3DX9_41.dll
+cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 3/MonkeyIsland103.exe:icon
+cover_crop = fit
+
+[monkey4]
+dir = monkey4
+source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 4
+overlay = games/monkey4/overlay
+file = /media/C/Windows/SysWOW64/D3DX9_41.dll
+cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 4/MonkeyIsland104.exe:icon
+cover_crop = fit
+
+[monkey5]
+dir = monkey5
+source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 5
+overlay = games/monkey5/overlay
+file = /media/C/Windows/SysWOW64/D3DX9_41.dll
+cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 5/MonkeyIsland105.exe:icon
 cover_crop = fit
 
 [rtcw]

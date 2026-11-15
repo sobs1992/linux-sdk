@@ -78,6 +78,15 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   
   упаковка — `lzss_pack.py`, формат — `wrs.py`). OpenAL берётся из `SysWOW64`
   Windows, шрифты Arial и Palatino — из её `Fonts` в префикс Wine на `/data`.
 
+- **monkey1** … **monkey5** — пять глав Tales of Monkey Island (GOG, Wine), каждая
+  своей игрой, без общего `Launcher.exe` GOG: в издание уже положены русские
+  файлы «Буки» (озвучка, шрифт, надписи), русский текст есть в его архивах; язык
+  движок берёт из реестра — строки `reg` в `wine.ini` (`Language=russian`).
+  Сглаживание выключено (`NoMultisample=1`, патч Wine 0021: 19 → 39 fps), сцену
+  на качестве 1–6, которую эта версия не выводит на экран, показывает патч 0022
+  (`WINE_D3D9_SHOW_LOST_SCENE=1`). D3DX 9.41 берётся из `SysWOW64` Windows,
+  обложка главы 1 — значок GOG; подробности — `monkey1/README.md`.
+
 - **templar** — Knights of the Temple: Infernal Crusade, русское издание 1С (Wine):
   `templar/overlay/wine.ini` — раскладка консольных версий (крестовина — оружие,
   правый стик — камера), `gamma = 1.6` для тёмных подземелий; нужен Mesa-патч 0005

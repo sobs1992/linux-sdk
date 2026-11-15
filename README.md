@@ -721,7 +721,14 @@ carl9170), Ralink (rt2800usb) собраны модулями, прошивки 
 scripts/ogu-ctl.py shot:screen.png              # снимок всех слоёв (SIGUSR1)
 scripts/ogu-ctl.py a wait:2000 down a           # кнопки, NAME:MS — удержание
 scripts/ogu-ctl.py stick:1,0.5,800 shot:s.png   # левый стик X,Y на 800 мс, затем снимок
+scripts/ogu-ctl.py launch:monkey2 wait:30000 shot:m.png   # игра без меню (имя каталога)
+scripts/ogu-ctl.py wfmove:238,188 wclick         # курсор Windows-игры в пиксель снимка, клик
+scripts/ogu-ctl.py wkey:esc quit-game            # клавиша Windows-игре; закрыть игру
 ```
+
+`launch`, `quit-game` и шаги `w…` — строки в FIFO bare_app (`/tmp/bare_app.ctl`) и
+`bare_app_wine` (`/tmp/bare_app_wine.ctl`, пока идёт Windows-игра): курсор встаёт точно
+в нужную точку, без стика.
 
 Для стиков нужен `scripts/ogu-hold.c` на плате: скрипт сам собирает его тулчейном
 `ogu` и копирует в `/tmp`. Ключ хоста не проверяется и не запоминается: он меняется

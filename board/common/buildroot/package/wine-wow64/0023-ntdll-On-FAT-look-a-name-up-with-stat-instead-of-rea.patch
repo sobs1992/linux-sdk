@@ -1,0 +1,113 @@
+From 9e2df516e79a8b897db1ab4c97d8797ab15a41c3 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 23:25:08 +0100
+Subject: [PATCH] ntdll: On FAT, look a name up with stat() instead of reading
+ the directory.
+
+The kernel's lookups on FAT (vfat) ignore case and know the short names,
+so stat() alone tells whether a name is there. Wine read the whole
+directory instead: NtQueryDirectoryFile with a name without wildcards
+(FindFirstFile of one file) always went through VFAT_IOCTL_READDIR_BOTH
+first, and find_file_in_dir after a failed stat() read the directory for
+a case-insensitive or short-name match. On FAT each entry read costs the
+kernel an inode lookup (fat_iget).
+
+Tales of Monkey Island (the GOG edition) looks names up in Pack
+directories of ~2000 files: at each scene change its main thread spent
+37% of the time in fat_iget under fat_ioctl_readdir, 10% during play,
+and the game stalled. Now 2%.
+
+A name with a '~' may be Wine's own short name of a long one, which only
+the directory gives: such names are looked up as before. A name found
+through NtQueryDirectoryFile is returned in the case it was asked for;
+a missing one gives an empty listing, as the directory read did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/ntdll/unix/file.c | 56 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 42c8253..4c95f91 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -150,6 +150,24 @@ typedef struct
+ /* Define the ext2 ioctl for handling extra attributes */
+ #define EXT2_IOC_GETFLAGS _IOR('f', 1, long)
+ 
++/* FAT: its lookups ignore case and find the short names too, so stat()
++ * alone tells whether a name is there; reading the directory to find a
++ * name costs the kernel an inode lookup per entry */
++static BOOL is_fat_fd( int fd )
++{
++    struct statfs stfs;
++
++    return !fstatfs( fd, &stfs ) && stfs.f_type == 0x4d44 /* MSDOS_SUPER_MAGIC */;
++}
++
++static BOOL has_tilde( const WCHAR *name, int length )
++{
++    int i;
++
++    for (i = 0; i < length; i++) if (name[i] == '~') return TRUE;
++    return FALSE;
++}
++
+ /* Case-insensitivity attribute */
+ #define EXT4_CASEFOLD_FL 0x40000000
+ 
+@@ -2674,6 +2692,27 @@ static NTSTATUS read_directory_data( struct dir_data *data, int fd, const UNICOD
+     NTSTATUS status;
+ 
+ #ifdef VFAT_IOCTL_READDIR_BOTH
++    /* A name without wildcards on FAT: stat() finds it or not (the kernel's
++     * lookups there ignore case and know the short names), where reading
++     * the whole directory costs an inode lookup per entry. Tales of Monkey
++     * Island looks names up in Pack directories of ~2000 files, and its
++     * main thread spent most of each scene change in the kernel doing that.
++     * The name found is given as asked, in its case. A '~' may be Wine's
++     * own short name of a long one: the directory is read for it. */
++    if (!has_wildcard( mask ) && !has_tilde( mask->Buffer, mask->Length / sizeof(WCHAR) ) && is_fat_fd( fd ))
++    {
++        char unix_name[MAX_DIR_ENTRY_LEN * 3 + 1];
++        struct stat st;
++        int ret = ntdll_wcstoumbs( mask->Buffer, mask->Length / sizeof(WCHAR),
++                                   unix_name, sizeof(unix_name) - 1, TRUE );
++        if (ret > 0)
++        {
++            unix_name[ret] = 0;
++            /* not there: an empty listing, as the directory read would give */
++            if (fstatat( fd, unix_name, &st, 0 ) == -1) return STATUS_SUCCESS;
++            return append_entry( data, unix_name, NULL, NULL ) ? STATUS_SUCCESS : STATUS_NO_MEMORY;
++        }
++    }
+     if (!(status = read_directory_data_vfat( data, fd, mask ))) return status;
+ #endif
+ 
+@@ -2974,6 +3013,23 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+     if (pos > 1) unix_name[pos - 1] = 0;
+     else unix_name[1] = 0;  /* keep the initial slash */
+ 
++#ifdef VFAT_IOCTL_READDIR_BOTH
++    /* On FAT the lookup above already ignored case and knew the real short
++     * names: the name is not there. A '~' may be Wine's own short name of a
++     * long one, which only the directory gives. */
++    if (!has_tilde( name, length ))
++    {
++        BOOL fat;
++
++        if ((fd = openat( root_fd, unix_name, O_RDONLY | O_DIRECTORY )) != -1)
++        {
++            fat = is_fat_fd( fd );
++            close( fd );
++            if (fat) goto not_found;
++        }
++    }
++#endif
++
+     /* check if it fits in 8.3 so that we don't look for short names if we won't need them */
+ 
+     is_name_8_dot_3 = is_legal_8dot3_name( name, length );
+-- 
+2.53.0
+

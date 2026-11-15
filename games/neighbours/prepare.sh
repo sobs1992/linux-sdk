@@ -9,7 +9,9 @@
 #     the bottom panel up 120 (layout.py of the game, relayout.py)
 #   - bin/*.dll: the screen size their interface code asks for says 480
 #     high, the places it draws at the old bottom move up (dllpatch.py)
-#   - cover.png: from the main menu's picture
+#   - cover.png: NfH 1 Woody (the end screen's picture, 800x480 once its
+#     black bars are cut), NfH 2 the neighbour (its outro's last picture);
+#     not the main menu's: the rows cut from its middle leave a hard edge
 # game.exe stays as it is: its screen and buffers keep 600 rows, so what the
 # game still draws below row 480 lands in them, unseen.
 # Python 3 with Pillow needed. $NFH_GAME: 1 (default) or 2.
@@ -17,8 +19,8 @@ set -e
 : "${GAME_DIR:?}"
 tools=$(cd "$(dirname "$0")" && pwd)
 case "${NFH_GAME:-1}" in
-1) game=1; here=$tools ;;
-2) game=2; here=$(cd "$tools/../neighbours2" && pwd) ;;
+1) game=1; here=$tools; cover="gui/main/endscreen_default.tga 30 0 480" ;;
+2) game=2; here=$(cd "$tools/../neighbours2" && pwd); cover="gui/outro/neighbor_0001.tga 200 50 500" ;;
 *) echo "prepare.sh: which game?" >&2; exit 1 ;;
 esac
 tmp=$(mktemp -d)
@@ -28,4 +30,4 @@ python3 -I -B "$tools/dllpatch.py" "$game" "$GAME_DIR/bin" "$tmp/bin" 480
 python3 -I -B "$tools/check.py" "$tmp" 480 > "$tmp/check.txt"
 cp "$tmp"/data/*.bnd "$GAME_DIR/data/"
 cp "$tmp"/bin/*.dll "$GAME_DIR/bin/"
-python3 -I -B "$tools/cover.py" "$GAME_DIR/data/gfxdata.bnd" "$GAME_DIR/cover.png"
+python3 -I -B "$tools/cover.py" "$GAME_DIR/data/gfxdata.bnd" "$GAME_DIR/cover.png" $cover

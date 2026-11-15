@@ -1,0 +1,257 @@
+From 35147f289c96a21a38647ff429d23e72dff8a400 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 22:52:47 +0100
+Subject: [PATCH] d3d9: WINE_D3D9_SHOW_LOST_SCENE=1: a scene drawn into a
+ texture and never shown is shown.
+
+Tales of Monkey Island (the GOG edition) at quality 1-6 draws its scene
+into a texture render target (its colours there are right), then
+switches to the back buffer, clears it and draws only its rain and text:
+no draw samples the scene's texture, and the screen is black (seen in
+its d3d9 calls with readbacks; with a multisampled back buffer it copies
+the scene into a texture with StretchRect, likewise never sampled).
+
+With the variable set, each frame notes the texture render target with
+the most draws and whether a later draw sampled it. After a frame that
+left it unsampled (16 draws or more), the next frames copy it to the back
+buffer in place of the colour clear of the back buffer that follows it.
+A program that composites its scene itself samples the texture and is
+left alone (the game at quality 7 is unchanged). Off by default: a
+program keeping a texture for a later frame would see its back buffer
+change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/d3d9/d3d9_private.h |   8 +++
+ dlls/d3d9/device.c       | 125 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 133 insertions(+)
+
+diff --git a/dlls/d3d9/d3d9_private.h b/dlls/d3d9/d3d9_private.h
+index 66b8c6c..b559238 100644
+--- a/dlls/d3d9/d3d9_private.h
++++ b/dlls/d3d9/d3d9_private.h
+@@ -120,6 +120,14 @@ struct d3d9_device
+ 
+     struct wined3d_stateblock *recording, *state, *update_state;
+     const struct wined3d_stateblock_state *stateblock_state;
++
++    /* WINE_D3D9_SHOW_LOST_SCENE (device.c): this frame's texture render
++     * target with the most draws (a reference), the draws into the current
++     * render target, whether a draw sampled that texture, and whether the
++     * last frame left its texture unsampled */
++    struct wined3d_texture *scene_rt;
++    unsigned int scene_draws, rt_draws;
++    BOOL scene_sampled, scene_lost;
+ };
+ 
+ HRESULT device_init(struct d3d9_device *device, struct d3d9 *parent, struct wined3d *wined3d,
+diff --git a/dlls/d3d9/device.c b/dlls/d3d9/device.c
+index b3970b7..c0f5ad7 100644
+--- a/dlls/d3d9/device.c
++++ b/dlls/d3d9/device.c
+@@ -713,6 +713,110 @@ static ULONG WINAPI d3d9_device_AddRef(IDirect3DDevice9Ex *iface)
+     return refcount;
+ }
+ 
++
++/*
++ * WINE_D3D9_SHOW_LOST_SCENE=1: Tales of Monkey Island (the GOG edition) at
++ * quality 1-6 draws its scene into a texture render target, then clears
++ * the back buffer and draws only its rain and text on it: the scene's
++ * texture is never sampled and the screen shows black. Here each frame
++ * notes the texture render target with the most draws and whether any
++ * draw sampled it; after a frame that left it unsampled, the next frames
++ * copy it to the back buffer in place of the back buffer's colour clear
++ * that follows it. Off by default: a program that keeps a texture it drew
++ * for a later frame would see its back buffer change.
++ */
++static int show_lost_scene = -1;
++
++static BOOL d3d9_show_lost_scene(void)
++{
++    if (show_lost_scene < 0)
++    {
++        char buf[8];
++
++        show_lost_scene = GetEnvironmentVariableA("WINE_D3D9_SHOW_LOST_SCENE", buf, sizeof(buf))
++                && buf[0] == '1';
++    }
++    return show_lost_scene;
++}
++
++static void d3d9_lost_scene_release(struct d3d9_device *device)
++{
++    if (device->scene_rt)
++        wined3d_texture_decref(device->scene_rt);
++    device->scene_rt = NULL;
++    device->scene_draws = device->rt_draws = 0;
++    device->scene_sampled = FALSE;
++}
++
++/* Render target 0 is changed: the texture it drew into */
++static void d3d9_lost_scene_rt_done(struct d3d9_device *device)
++{
++    struct d3d9_surface *rt = device->render_targets[0];
++
++    if (rt && rt->texture && device->rt_draws > device->scene_draws)
++    {
++        if (device->scene_rt)
++            wined3d_texture_decref(device->scene_rt);
++        device->scene_rt = rt->wined3d_texture;
++        wined3d_texture_incref(device->scene_rt);
++        device->scene_draws = device->rt_draws;
++        device->scene_sampled = FALSE;
++    }
++    device->rt_draws = 0;
++}
++
++/* A draw (mutex held) */
++static void d3d9_lost_scene_draw(struct d3d9_device *device)
++{
++    const struct wined3d_stateblock_state *state = device->stateblock_state;
++    unsigned int i;
++
++    if (!d3d9_show_lost_scene())
++        return;
++    ++device->rt_draws;
++    if (!device->scene_rt || device->scene_sampled)
++        return;
++    for (i = 0; i < ARRAY_SIZE(state->textures); ++i)
++    {
++        if (state->textures[i] == device->scene_rt)
++        {
++            device->scene_sampled = TRUE;
++            break;
++        }
++    }
++}
++
++/* The frame is presented (mutex held) */
++static void d3d9_lost_scene_present(struct d3d9_device *device)
++{
++    if (!d3d9_show_lost_scene())
++        return;
++    d3d9_lost_scene_rt_done(device);
++    device->scene_lost = device->scene_rt && !device->scene_sampled && device->scene_draws >= 16;
++    d3d9_lost_scene_release(device);
++}
++
++/* A colour clear of the back buffer after the scene's texture was drawn:
++ * that texture copied there instead; FALSE to clear (mutex held) */
++static BOOL d3d9_lost_scene_show(struct d3d9_device *device, DWORD rect_count, DWORD flags)
++{
++    struct d3d9_surface *bb = device->render_targets[0];
++    struct wined3d_sub_resource_desc src_desc, dst_desc;
++    RECT r;
++
++    if (!d3d9_show_lost_scene() || !(flags & D3DCLEAR_TARGET) || rect_count || !device->scene_lost
++            || !device->scene_rt || !bb || !bb->swapchain || bb->wined3d_texture == device->scene_rt)
++        return FALSE;
++    wined3d_texture_get_sub_resource_desc(device->scene_rt, 0, &src_desc);
++    wined3d_texture_get_sub_resource_desc(bb->wined3d_texture, bb->sub_resource_idx, &dst_desc);
++    if (src_desc.width != dst_desc.width || src_desc.height != dst_desc.height
++            || src_desc.multisample_type || dst_desc.multisample_type)
++        return FALSE;
++    SetRect(&r, 0, 0, dst_desc.width, dst_desc.height);
++    return SUCCEEDED(wined3d_device_context_blt(device->immediate_context, bb->wined3d_texture,
++            bb->sub_resource_idx, &r, device->scene_rt, 0, &r, 0, NULL, WINED3D_TEXF_POINT));
++}
++
+ static ULONG WINAPI DECLSPEC_HOTPATCH d3d9_device_Release(IDirect3DDevice9Ex *iface)
+ {
+     struct d3d9_device *device = impl_from_IDirect3DDevice9Ex(iface);
+@@ -746,6 +850,7 @@ static ULONG WINAPI DECLSPEC_HOTPATCH d3d9_device_Release(IDirect3DDevice9Ex *if
+         }
+         free(device->implicit_swapchains);
+ 
++        d3d9_lost_scene_release(device);
+         if (device->recording)
+             wined3d_stateblock_decref(device->recording);
+         wined3d_stateblock_decref(device->state);
+@@ -1135,6 +1240,11 @@ static HRESULT d3d9_device_reset(struct d3d9_device *device,
+         return D3DERR_DEVICELOST;
+     }
+ 
++    wined3d_mutex_lock();
++    d3d9_lost_scene_release(device);
++    device->scene_lost = FALSE;
++    wined3d_mutex_unlock();
++
+     if (mode)
+     {
+         wined3d_mode.width = mode->Width;
+@@ -1340,6 +1450,7 @@ static HRESULT WINAPI DECLSPEC_HOTPATCH d3d9_device_Present(IDirect3DDevice9Ex *
+         FIXME("Ignoring dirty_region %p.\n", dirty_region);
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_present(device);
+     for (i = 0; i < device->implicit_swapchain_count; ++i)
+     {
+         swapchain = wined3d_swapchain_get_parent(device->implicit_swapchains[i]);
+@@ -2217,7 +2328,11 @@ static HRESULT WINAPI d3d9_device_SetRenderTarget(IDirect3DDevice9Ex *iface, DWO
+     if (SUCCEEDED(hr))
+     {
+         if (!idx)
++        {
++            if (d3d9_show_lost_scene() && device->render_targets[0] != surface_impl)
++                d3d9_lost_scene_rt_done(device);
+             device_reset_viewport_state(device);
++        }
+         device->render_targets[idx] = surface_impl;
+     }
+     wined3d_mutex_unlock();
+@@ -2373,6 +2488,11 @@ static HRESULT WINAPI d3d9_device_Clear(IDirect3DDevice9Ex *iface, DWORD rect_co
+ 
+     wined3d_color_from_d3dcolor(&c, color);
+     wined3d_mutex_lock();
++    if (d3d9_lost_scene_show(device, rect_count, flags) && !(flags &= ~D3DCLEAR_TARGET))
++    {
++        wined3d_mutex_unlock();
++        return D3D_OK;
++    }
+     wined3d_stateblock_apply_clear_state(device->state, device->wined3d_device);
+     hr = wined3d_device_clear(device->wined3d_device, rect_count, (const RECT *)rects, flags, &c, z, stencil);
+     if (SUCCEEDED(hr))
+@@ -3235,6 +3355,7 @@ static HRESULT WINAPI d3d9_device_DrawPrimitive(IDirect3DDevice9Ex *iface,
+             iface, primitive_type, start_vertex, primitive_count);
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_draw(device);
+     if (!device->stateblock_state->vertex_declaration)
+     {
+         wined3d_mutex_unlock();
+@@ -3272,6 +3393,7 @@ static HRESULT WINAPI d3d9_device_DrawIndexedPrimitive(IDirect3DDevice9Ex *iface
+             vertex_count, start_idx, primitive_count);
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_draw(device);
+     if (!device->stateblock_state->vertex_declaration)
+     {
+         wined3d_mutex_unlock();
+@@ -3326,6 +3448,7 @@ static HRESULT WINAPI d3d9_device_DrawPrimitiveUP(IDirect3DDevice9Ex *iface,
+     }
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_draw(device);
+ 
+     if (!device->stateblock_state->vertex_declaration)
+     {
+@@ -3389,6 +3512,7 @@ static HRESULT WINAPI d3d9_device_DrawIndexedPrimitiveUP(IDirect3DDevice9Ex *ifa
+     }
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_draw(device);
+ 
+     if (!device->stateblock_state->vertex_declaration)
+     {
+@@ -4257,6 +4381,7 @@ static HRESULT WINAPI DECLSPEC_HOTPATCH d3d9_device_PresentEx(IDirect3DDevice9Ex
+         FIXME("Ignoring dirty_region %p.\n", dirty_region);
+ 
+     wined3d_mutex_lock();
++    d3d9_lost_scene_present(device);
+     for (i = 0; i < device->implicit_swapchain_count; ++i)
+     {
+         swapchain = wined3d_swapchain_get_parent(device->implicit_swapchains[i]);
+-- 
+2.53.0
+
