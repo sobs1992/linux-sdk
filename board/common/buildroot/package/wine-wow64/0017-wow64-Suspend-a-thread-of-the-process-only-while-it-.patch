@@ -1,0 +1,195 @@
+From d391db87351c490028f0e11f5fc37fea00d7381a Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 15 Nov 2026 09:36:59 +0100
+Subject: [PATCH] wow64: Suspend a thread of the process only while it holds no
+ 64-bit lock.
+
+A Wow64 thread is suspended by a signal wherever it is, also inside the
+CPU emulator while that holds one of its locks (a critical section of the
+64-bit ntdll, as is the 64-bit heap's). The thread that suspended it runs
+guest code too and soon needs the same lock (Box64: mutex_prot, taken to
+translate code): both wait forever. Wine Gecko's hang monitor suspends the
+main thread to take its stack every few seconds; Telltale's launcher
+(mshtml) hung in 6 of 7 starts on the GO Ultra.
+
+The 64-bit ntdll now counts the critical sections a Wow64 thread holds
+(WOW64_TLS_HELD_LOCKS), and Wow64SuspendLocalThread, which
+wow64_NtSuspendThread calls, suspends a thread of this process, waits for
+it to stop (reading its context), and if it holds any lets it run again
+and retries: yields first, then 1 ms sleeps, up to 2000 tries before it
+leaves it suspended where it is, as before. A guest thread on Windows is
+suspended between two of its instructions too.
+
+The launcher with an unpatched Gecko: 10 of 10 starts; one start traced 5
+suspensions that needed to wait (1 to 32 tries).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/ntdll/sync.c     | 18 ++++++++++++
+ dlls/wow64/process.c  | 66 ++++++++++++++++++++++++++++++++++++++++++-
+ dlls/wow64/wow64.spec |  2 +-
+ include/winternl.h    |  1 +
+ 4 files changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 18e61e4..2507b62 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -346,6 +346,21 @@ NTSTATUS WINAPI RtlpUnWaitCriticalSection( RTL_CRITICAL_SECTION *crit )
+ }
+ 
+ 
++/* A Wow64 thread counts the 64-bit critical sections it holds (the CPU
++ * emulator's locks, the 64-bit heap's): Wow64SuspendLocalThread suspends it
++ * only while it holds none, as a thread suspended inside the emulator would
++ * keep its locks from every other thread running guest code. */
++static inline void count_held_locks( LONG_PTR diff )
++{
++#ifdef _WIN64
++    TEB *teb = NtCurrentTeb();
++
++    if (teb->WowTebOffset)
++        teb->TlsSlots[WOW64_TLS_HELD_LOCKS] = (void *)((LONG_PTR)teb->TlsSlots[WOW64_TLS_HELD_LOCKS] + diff);
++#endif
++}
++
++
+ /******************************************************************************
+  *      RtlEnterCriticalSection   (NTDLL.@)
+  */
+@@ -383,6 +398,7 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+ done:
+     crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+     crit->RecursionCount = 1;
++    count_held_locks( 1 );
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -397,6 +413,7 @@ BOOL WINAPI RtlTryEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+     {
+         crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+         crit->RecursionCount = 1;
++        count_held_locks( 1 );
+         ret = TRUE;
+     }
+     else if (crit->OwningThread == ULongToHandle(GetCurrentThreadId()))
+@@ -441,6 +458,7 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
+     else
+     {
+         crit->OwningThread = 0;
++        count_held_locks( -1 );
+         if (InterlockedDecrement( &crit->LockCount ) >= 0)
+         {
+             /* someone is waiting */
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 6172810..3992201 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -1108,6 +1108,70 @@ NTSTATUS WINAPI wow64_NtSuspendProcess( UINT *args )
+ }
+ 
+ 
++/**********************************************************************
++ *           Wow64SuspendLocalThread  (wow64.@)
++ *
++ * Suspend a thread of this process, but never while it holds one of the
++ * 64-bit critical sections (the CPU emulator's locks, the 64-bit heap):
++ * the thread suspending it runs guest code too, and would wait forever for
++ * a lock of the emulator. A thread holding one is let run until it holds
++ * none (ntdll counts them in WOW64_TLS_HELD_LOCKS), as a guest thread on
++ * Windows is only suspended between instructions.
++ */
++NTSTATUS WINAPI Wow64SuspendLocalThread( HANDLE handle, ULONG *count )
++{
++    THREAD_BASIC_INFORMATION info;
++    HANDLE thread = handle;
++    LARGE_INTEGER delay;
++    CONTEXT context;
++    ULONG prev = 0;
++    unsigned int tries;
++    NTSTATUS status;
++    TEB *teb;
++
++    status = NtQueryInformationThread( thread, ThreadBasicInformation, &info, sizeof(info), NULL );
++    if (status == STATUS_ACCESS_DENIED &&
++        !NtDuplicateObject( GetCurrentProcess(), handle, GetCurrentProcess(), &thread,
++                            THREAD_QUERY_LIMITED_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME,
++                            0, 0 ))
++        status = NtQueryInformationThread( thread, ThreadBasicInformation, &info, sizeof(info), NULL );
++    if (status || info.ClientId.UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess ||
++        info.ClientId.UniqueThread == NtCurrentTeb()->ClientId.UniqueThread ||
++        !(teb = info.TebBaseAddress) || !teb->WowTebOffset)
++    {
++        if (thread != handle) NtClose( thread );
++        return NtSuspendThread( handle, count );
++    }
++
++    for (tries = 0;; tries++)
++    {
++        if ((status = NtSuspendThread( handle, &prev ))) break;
++        if (prev) break;  /* suspended already, where it is */
++        /* the thread stops for real once its context is read */
++        context.ContextFlags = CONTEXT_CONTROL;
++        if (NtGetContextThread( thread, &context )) break;
++        if (!teb->TlsSlots[WOW64_TLS_HELD_LOCKS]) break;
++        if (tries == 2000)
++        {
++            ERR( "thread %04lx still holds %Id locks, suspended anyway\n",
++                 HandleToULong( info.ClientId.UniqueThread ), (LONG_PTR)teb->TlsSlots[WOW64_TLS_HELD_LOCKS] );
++            break;
++        }
++        NtResumeThread( handle, NULL );
++        if (tries < 16) NtYieldExecution();
++        else
++        {
++            delay.QuadPart = -10000;  /* 1 ms */
++            NtDelayExecution( FALSE, &delay );
++        }
++    }
++    if (tries) TRACE( "thread %04lx suspended after %u tries\n", HandleToULong( info.ClientId.UniqueThread ), tries );
++    if (thread != handle) NtClose( thread );
++    if (!status && count) *count = prev;
++    return status;
++}
++
++
+ /**********************************************************************
+  *           wow64_NtSuspendThread
+  */
+@@ -1116,7 +1180,7 @@ NTSTATUS WINAPI wow64_NtSuspendThread( UINT *args )
+     HANDLE handle = get_handle( &args );
+     ULONG *count = get_ptr( &args );
+ 
+-    return NtSuspendThread( handle, count );
++    return Wow64SuspendLocalThread( handle, count );
+ }
+ 
+ 
+diff --git a/dlls/wow64/wow64.spec b/dlls/wow64/wow64.spec
+index 5b4e565..8f95dfc 100644
+--- a/dlls/wow64/wow64.spec
++++ b/dlls/wow64/wow64.spec
+@@ -22,7 +22,7 @@
+ @ stub Wow64ShallowThunkAllocSecurityQualityOfService32TO64_FNC
+ @ stub Wow64ShallowThunkSIZE_T32TO64
+ @ stub Wow64ShallowThunkSIZE_T64TO32
+-@ stub Wow64SuspendLocalThread
++@ stdcall Wow64SuspendLocalThread(long ptr)
+ @ stdcall -norelay Wow64SystemServiceEx(long ptr)
+ @ stub Wow64ValidateUserCallTarget
+ @ stub Wow64ValidateUserCallTargetFilter
+diff --git a/include/winternl.h b/include/winternl.h
+index 80c295f..1371cac 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -1340,6 +1340,7 @@ C_ASSERT( sizeof(TEB) == sizeof(TEB32) );
+ #define WOW64_TLS_APCLIST          7
+ #define WOW64_TLS_FILESYSREDIR     8
+ #define WOW64_TLS_WOW64INFO        10
++#define WOW64_TLS_HELD_LOCKS       12  /* Wine: the 64-bit critical sections the thread holds */
+ #define WOW64_TLS_MAX_NUMBER       19
+ 
+ 
+-- 
+2.53.0
+

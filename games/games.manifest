@@ -160,7 +160,7 @@ run = games/neighbours2/prepare.sh
 
 [monkey1]
 ; Tales of Monkey Island, chapter 1 (2009), the Russian edition. Needs Wine
-; Gecko in the prefix with games/monkey1/gecko-hang-monitor.py (README.md)
+; Gecko in the prefix (games/monkey1/README.md)
 dir = monkey1
 source = /media/D/Games/Tales of Monkey Island/Launch of the Screaming Narwhal
 overlay = games/monkey1/overlay
