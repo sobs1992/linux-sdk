@@ -148,7 +148,8 @@ cover_crop = fit
 ; Neighbours from Hell (2003), the Russian GOG release: game_info/data of
 ; NeighborsFromHell_Linux.tar.gz (bin/, data/; its own Wine left out).
 ; prepare.sh moves its 800x600 interface into the top 480 rows and makes
-; cover.png from the main menu's picture
+; cover.png: Woody of the end screen's picture (NfH 2: the neighbour of
+; its outro), not the main menu's, two pictures meeting across its middle
 source = /media/D/Games/NeighborsFromHell
 overlay = games/neighbours/overlay
 run = games/neighbours/prepare.sh
