@@ -77,6 +77,7 @@ make rpi4_defconfig && make flash DEV=/dev/sdX  # переключиться н�
 ```
 
 Перед `make flash` проверяйте `make info`, чтобы не записать на карту образ другой платы.
+
 ## Структура
 
 ```

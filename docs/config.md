@@ -29,7 +29,7 @@
 | `IMAGE_BOOT_FILES` | файлы в корень BOOT: `путь[:имя] ...` |
 | `IMAGE_DTB_LAYOUT` | dtb в BOOT: `tree` (`vendor/x.dtb`, по умолчанию), `flat` (`x.dtb`) или `both` — как U-Boot строит `fdtfile` |
 | `IMAGE_BOOT_SIZE_MB`, `IMAGE_ROOTFS_FREE_MB`, `IMAGE_DISK_ID` | размеры (свободного места в rootfs по умолчанию 256), идентификатор MBR |
-| `IMAGE_DATA_START_MB` | начало раздела данных `/data` (необязательно, см. ниже) |
+| `IMAGE_DATA_START_MB` | начало раздела данных `/data` (необязательно, см. [sd-layout.md](sd-layout.md)) |
 | `IMAGE_DATA_SIZE_MB` | размер `/data`; если задан, после него раздел игр `/games` до конца карты |
 | `IMAGE_EMMC_DISK_ID`, `EMMC_UMS_USB_ID` | второй образ той же разметки для eMMC (`images/<имя>-emmc.img`) и USB-id, под которым U-Boot показывает eMMC компьютеру (`make flash-emmc`) |
 

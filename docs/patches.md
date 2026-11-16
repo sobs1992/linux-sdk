@@ -10,7 +10,7 @@
 |---|---|---|---|
 | ядро платы | `board/<board>/linux/patches/*.patch` (`LINUX_PATCHES`) | `make linux` копирует закоммиченный `src/linux` (`git archive`) в `output/<fw>/linux-src` и накладывает патчи по именам | копия дерева делается заново; пересобираются файлы, которых касаются старые и новые патчи (им ставится новое время), остальное — по зависимостям; ядро целиком около 1,8 ГБ на копию |
 | U-Boot платы | `board/<board>/u-boot/patches/*.patch` (`UBOOT_PATCHES`) | так же, в `output/<fw>/u-boot-src` | U-Boot целиком (он небольшой) |
-| пакет Buildroot | `board/common/buildroot/package/<pkg>/*.patch` | Buildroot применяет при распаковке пакета | пакет целиком: `make rootfs-make BR=<pkg>-dirclean && make rootfs` (Wine около 25 минут, VCMI дольше, см. `games/README.md`) |
+| пакет Buildroot | `board/common/buildroot/package/<pkg>/*.patch` | Buildroot применяет при распаковке пакета | пакет целиком: `make rootfs-make BR=<pkg>-dirclean && make rootfs` (Wine и VCMI — самые долгие) |
 | SDL2 для игр bare_app | `board/common/buildroot/package/bare-app/sdl2/*.patch` | хук `SDL2_POST_PATCH_HOOKS` пакета bare-app (`bare-app.SDL=y`) | `make rootfs-make BR=sdl2-dirclean` затем `make rootfs` |
 | SDL2_mixer для VCMI | `board/common/buildroot/package/vcmi/sdl2_mixer/*.patch` | хук пакета vcmi | `sdl2_mixer-dirclean` |
 | Mesa (panfrost) | `board/common/buildroot/package/mesa-panfrost/*.patch` | свой пакет Mesa | `mesa-panfrost-dirclean`, затем всё, что от неё зависит, пересобирать не нужно |

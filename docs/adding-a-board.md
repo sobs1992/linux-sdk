@@ -32,7 +32,8 @@
 5. **`board/<board>/boot/`** — файлы, которые лежат в корне BOOT (`config.txt`,
    `boot.ini`), перечисленные в `IMAGE_BOOT_FILES`.
 6. **Блобы.** Скачиваемые при сборке — через `BOOTFW_*` (копируются на BOOT) или
-   `AML_FIP_*` (пакуются в FIP), с файлом хешей `sha256sum` в каталоге платы.
+   `AML_FIP_*` (пакуются в FIP), с файлом хешей `sha256sum` в каталоге платы (общие для
+   нескольких плат блобы — в `board/common`, как `rpi-firmware.sha256`).
    Коммитить блобы можно только там, где лицензия позволяет (`board/oga/rkbin`).
 7. **Пакеты платы** (прошивка Wi-Fi, кодера) — `board/common/buildroot/package/<pkg>/`
    плюс строка `source` в `board/common/buildroot/Config.in` (`.mk` подхватывается сам,

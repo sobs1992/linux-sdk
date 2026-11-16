@@ -1,6 +1,6 @@
 # BeagleBone Black и Raspberry Pi
 
-# BeagleBone Black (`bbb`)
+## BeagleBone Black (`bbb`)
 
 ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного FAT-раздела, SPL — `u-boot.img`
 оттуда же. U-Boot читает модель из EEPROM платы (`am335x-boneblack.dtb` и др.).
@@ -9,7 +9,7 @@ ROM AM335x грузит `MLO` (U-Boot SPL) с первого активного 
 BBB грузится сначала с eMMC: чтобы загрузиться с SD, держите кнопку S2 (у слота SD)
 при включении питания, либо сотрите загрузчик на eMMC.
 
-# Raspberry Pi 1 (`rpi1`) и 4 / 400 (`rpi4`)
+## Raspberry Pi 1 (`rpi1`) и 4 / 400 (`rpi4`)
 
 Raspberry Pi не читает raw-сектора: закрытая прошивка GPU (`bootcode.bin`/`start.elf`
 у Pi 1, EEPROM + `start4.elf` у Pi 4/400) читает `config.txt` с раздела BOOT и
