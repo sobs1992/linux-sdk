@@ -138,10 +138,11 @@ def screenshot(con, path):
 
 
 def keys(con, names, delay):
+    known = {n: c for n, c in KEYS.items() if n not in ("l2", "r2")}	# the GO Ultra's
     try:
-        codes = [KEYS[n.lower()] for n in names]
+        codes = [known[n.lower()] for n in names]
     except KeyError as e:
-        sys.exit("oga-serial: unknown button %s, known: %s" % (e, " ".join(KEYS)))
+        sys.exit("oga-serial: unknown button %s, known: %s" % (e, " ".join(known)))
     data = b"".join(key_press(c) for c in codes)
     con.heredoc_cmd(data, "cat > /tmp/.oga-keys")
     st, out = con.sh(

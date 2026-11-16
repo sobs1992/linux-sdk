@@ -43,7 +43,7 @@ HOST = "root@" + os.environ.get("OGU_HOST", "192.168.7.2")
 SSH = ["ssh", "-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no",
        "-o", "LogLevel=ERROR", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", HOST]
 HOLD = "/tmp/ogu-hold"
-OUT = devlib.output("ogu")		# the firmware's build output (OUTPUT_DIR)
+OUT = devlib.output("ogu")      # the firmware's build output (OUTPUT_DIR)
 CC = devlib.toolchain_cc("ogu")
 
 # evdev device variable, (code, min, max) of X and Y: the dts ranges, up/left the minimum

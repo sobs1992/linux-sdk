@@ -8,8 +8,9 @@ import struct
 import zlib
 
 SDK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# The build outputs: the Makefile's OUTPUT_DIR (output/ unless set)
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(SDK, "output"))
+# The build outputs: the Makefile's OUTPUT_DIR (output/ unless set in the
+# environment; a relative one counts from the SDK, as make's does)
+OUTPUT_DIR = os.path.join(SDK, os.environ.get("OUTPUT_DIR", "output"))
 
 
 def output(fw, *path):
