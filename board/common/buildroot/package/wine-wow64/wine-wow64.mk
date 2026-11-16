@@ -11,7 +11,7 @@
 # and has no PE dlls. The same stable release as Buildroot's wine.
 WINE_WOW64_VERSION = 11.0
 WINE_WOW64_SOURCE = wine-$(WINE_WOW64_VERSION).tar.xz
-WINE_WOW64_SITE = https://dl.winehq.org/wine/source/11.0
+WINE_WOW64_SITE = https://dl.winehq.org/wine/source/$(WINE_WOW64_VERSION)
 WINE_WOW64_LICENSE = LGPL-2.1+
 WINE_WOW64_LICENSE_FILES = COPYING.LIB LICENSE
 WINE_WOW64_CPE_ID_VENDOR = winehq

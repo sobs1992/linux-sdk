@@ -68,10 +68,14 @@ define BARE_APP_INSTALL_STAGING_CMDS
 		$(BARE_APP_INCLUDE)/wine/winebare_proto.h
 endef
 
+# /etc/init.d/S<INIT_ORDER>bare-app: the board decides when bare_app
+# starts among the other init scripts (the OGA: 06, right after the data
+# partitions, before the network)
 ifeq ($(BR2_PACKAGE_BARE_APP_AUTOSTART),y)
+BARE_APP_INIT_ORDER = $(call qstrip,$(BR2_PACKAGE_BARE_APP_INIT_ORDER))
 define BARE_APP_INSTALL_INIT_SYSV
-	$(INSTALL) -D -m 0755 $(BARE_APP_PKGDIR)/S90bare-app \
-		$(TARGET_DIR)/etc/init.d/S90bare-app
+	$(INSTALL) -D -m 0755 $(BARE_APP_PKGDIR)/bare-app.init \
+		$(TARGET_DIR)/etc/init.d/S$(BARE_APP_INIT_ORDER)bare-app
 endef
 endif
 
@@ -102,10 +106,10 @@ endif
 $(SDL2_TARGET_CONFIGURE): | $(BARE_APP_SDL2_AFTER)
 endif
 
-# The game.ini of the SDL2 games we bring: bare_app's menu entries
+# The game.ini (bare_app's menu entry) of SDL2 games that are Buildroot's
+# own packages; a package of this tree installs its ini itself (rbdoom3-bfg,
+# iortcw)
 BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM) += chocolate-doom.ini
-BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_DOOM3) += doom3.ini
-BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_RTCW) += rtcw.ini
 ifneq ($(BARE_APP_GAME_INIS-y),)
 define BARE_APP_INSTALL_GAME_INIS
 	$(foreach f,$(BARE_APP_GAME_INIS-y),\

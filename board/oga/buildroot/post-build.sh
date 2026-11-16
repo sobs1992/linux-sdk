@@ -7,15 +7,9 @@
 # The mdev daemon and the module coldplug start early, in the background
 # (the overlay's /etc/init.d/S03mdev): Buildroot's S10mdev would do them a
 # second time.
-# bare_app starts right after the data partitions are mounted (S05data),
-# before the network, crond and dropbear: it attaches to wpa_supplicant
-# whenever that comes.
 set -e
 TARGET_DIR="$1"
 rm -f "$TARGET_DIR/etc/init.d/S10mdev"
-if [ -f "$TARGET_DIR/etc/init.d/S90bare-app" ]; then
-	mv "$TARGET_DIR/etc/init.d/S90bare-app" "$TARGET_DIR/etc/init.d/S06bare-app"
-fi
 WIFI_CONF="$(dirname "$0")/wifi.conf"
 
 if [ -f "$WIFI_CONF" ]; then

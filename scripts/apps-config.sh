@@ -15,6 +15,11 @@
 #       Remove the files a package installed from Buildroot's target/.
 #       Buildroot never does that itself, so a disabled application or a
 #       switched-off autostart would otherwise stay in the rootfs.
+#   apps-config.sh dropped ROOTFS_OUT OLD.config NEW.config
+#       Packages (any, not only applications) that were BR2_PACKAGE_X=y in
+#       the old .config, are not in the new one and have files in target/
+#       (Buildroot's packages-file-list.txt): what to purge after a
+#       reconfiguration. Nothing if there is no old .config.
 #
 # An application package is a package of EXTERNAL/package/ whose sources
 # come from apps/ (its *_SITE points there). APPS and APPS_AUTOSTART hold
@@ -72,6 +77,21 @@ if [ "$cmd" = purge ]; then
 		[ -f "$out/target/$f" ] || [ -L "$out/target/$f" ] || continue
 		rm -f "$out/target/$f"
 	done
+	exit 0
+fi
+if [ "$cmd" = dropped ]; then
+	out=$2 old=$3 new=$4 list=$2/build/packages-file-list.txt
+	[ -f "$old" ] && [ -f "$new" ] && [ -f "$list" ] || exit 0
+	tmp=$(mktemp -d)
+	# the package names of the file list by their symbols: the symbol of
+	# "sdl2_mixer" and of a would-be "sdl2-mixer" is the same
+	cut -d, -f1 "$list" | LC_ALL=C sort -u | while read -r pkg; do
+		echo "$(symbol "$pkg") $pkg"
+	done | LC_ALL=C sort > "$tmp/pkgs"
+	grep -E '^BR2_PACKAGE_[A-Z0-9_]+=y$' "$old" | sed 's/=y$//' | LC_ALL=C sort > "$tmp/was"
+	grep -E '^BR2_PACKAGE_[A-Z0-9_]+=y$' "$new" | sed 's/=y$//' | LC_ALL=C sort > "$tmp/is"
+	LC_ALL=C comm -23 "$tmp/was" "$tmp/is" | LC_ALL=C join - "$tmp/pkgs" | cut -d' ' -f2
+	rm -rf "$tmp"
 	exit 0
 fi
 ext=$2
@@ -140,6 +160,6 @@ list)
 	done
 	;;
 *)
-	die "usage: apps-config.sh fragment|strip|list|changed EXTERNAL ... | purge ROOTFS_OUT PACKAGE"
+	die "usage: apps-config.sh fragment|strip|list|changed EXTERNAL ... | purge ROOTFS_OUT PACKAGE | dropped ROOTFS_OUT OLD NEW"
 	;;
 esac

@@ -18,9 +18,9 @@ JOBS       ?= $(shell nproc)
 # Command-line variables of this Makefile must not leak into component builds
 MAKEOVERRIDES :=
 
-# The components run one after another, each with its own -j$(JOBS):
-# Buildroot does not take a parallel top level, and three builds at once
-# would need three times the memory
+# The components run one after another, each with its own -j$(JOBS): a
+# top-level -j would start U-Boot, the kernel and Buildroot at once, three
+# times the memory
 .NOTPARALLEL:
 
 .DEFAULT_GOAL := all
@@ -42,7 +42,7 @@ FW_DEFCONFIGS := $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig))
 # "make <fw>_defconfig" only selects: no config is loaded then (FW_CONFIG
 # stays empty), so it cannot share a command line with other targets
 ifneq ($(filter $(FW_DEFCONFIGS),$(MAKECMDGOALS)),)
-ifneq ($(filter-out $(FW_DEFCONFIGS),$(MAKECMDGOALS)),)
+ifneq ($(words $(MAKECMDGOALS)),1)
 $(error Run 'make <fw>_defconfig' on its own, then the other targets)
 endif
 else ifneq ($(FW),)
@@ -349,6 +349,7 @@ $(ROOTFS_OUT)/.config: $(ROOTFS_OUT)/.sdk-inputs $(filter /%,$(BUILDROOT_DEFCONF
 	{ cat $(ROOTFS_BOARD_DEFCONFIG); echo; \
 	  echo "# Applications: APPS, APPS_AUTOSTART, APPS_CONFIG of $(notdir $(FW_CONFIG))"; \
 	  cat $(ROOTFS_APPS).new; } > $(ROOTFS_DEFCONF)
+	@if [ -f $@ ]; then cp $@ $@.before; else rm -f $@.before; fi
 	$(ROOTFS_MAKE) defconfig BR2_DEFCONFIG=$(ROOTFS_DEFCONF)
 	$(SDK_DIR)/scripts/kconfig-check.sh $@ $(ROOTFS_APPS).new
 	@# Buildroot neither rebuilds a package whose options changed nor removes
@@ -357,6 +358,13 @@ $(ROOTFS_OUT)/.config: $(ROOTFS_OUT)/.sdk-inputs $(filter /%,$(BUILDROOT_DEFCONF
 		echo ">>> $$p: application settings changed, removing it from target/ for a fresh install"; \
 		$(APPS_TOOL) purge $(ROOTFS_OUT) $$p && $(ROOTFS_MAKE) $$p-dirclean || exit 1; \
 	done
+	@# and for every package that left the configuration (an application
+	@# option switched off its engine): its files would stay in the image
+	@for p in $$($(APPS_TOOL) dropped $(ROOTFS_OUT) $@.before $@); do \
+		echo ">>> $$p: no longer in the configuration, removing it from target/"; \
+		$(APPS_TOOL) purge $(ROOTFS_OUT) $$p && $(ROOTFS_MAKE) $$p-dirclean || exit 1; \
+	done
+	@rm -f $@.before
 	mv $(ROOTFS_APPS).new $(ROOTFS_APPS)
 
 .PHONY: rootfs rootfs-configure rootfs-menuconfig rootfs-savedefconfig rootfs-sdk rootfs-make rootfs-clean apps-list

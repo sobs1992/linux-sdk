@@ -65,14 +65,18 @@ APPS           := bare-app oga-pad
 # to the console, Quit in its menu turns the device off.
 APPS_AUTOSTART := bare-app
 # Package options, package.OPTION=value: bare_app's own Kconfig defconfig
-# (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad;
+# (Doom is GAME_DOOM there); INIT_ORDER=06: bare_app starts right after the
+# data partitions are mounted (S05data), before the network, crond and
+# dropbear (it attaches to wpa_supplicant whenever that comes);
+# DOOM_WAD installs the shareware doom1.wad;
 # HOMM3 adds the Heroes III engine VCMI (game data on /games/heroes3,
 # saves and settings on /data); HALFLIFE adds Xash3D FWGS + hlsdk-portable
 # + Mesa panfrost (data: /games/halflife); STREAM: the screen over RTSP
 # (rtsp://<address>:8554/live), H.264 by the PX30's encoder (the kernel
 # module rk-vepu-h264 of LINUX_EXT_MODULES), OpenH264 without it
-APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y \
-                  bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.STREAM=y
+APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.INIT_ORDER=06 \
+                  bare-app.DOOM_WAD=y bare-app.HOMM3=y bare-app.HALFLIFE=y \
+                  bare-app.STREAM=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]

@@ -21,11 +21,23 @@ config BR2_PACKAGE_BARE_APP_DEFCONFIG
 config BR2_PACKAGE_BARE_APP_AUTOSTART
 	bool "start at boot"
 	help
-	  Start bare_app from /etc/init.d/S90bare-app. It takes over the
-	  screen (the text console on tty1 comes back when it quits;
+	  Start bare_app from /etc/init.d/S<order>bare-app. It takes over
+	  the screen (the text console on tty1 comes back when it quits;
 	  Quit in its menu turns the device off where the platform has a
 	  poweroff command).
 	  Log: /var/log/bare_app.log. In the SDK: APPS_AUTOSTART.
+
+config BR2_PACKAGE_BARE_APP_INIT_ORDER
+	string "init script order"
+	default "90"
+	depends on BR2_PACKAGE_BARE_APP_AUTOSTART
+	help
+	  The two digits of /etc/init.d/S<order>bare-app: where bare_app
+	  starts among the init scripts. 90 is after the network and
+	  dropbear; 06 (the GO Advance) is right after the data
+	  partitions (S05data), before the network: bare_app attaches to
+	  wpa_supplicant whenever that comes. In the SDK:
+	  APPS_CONFIG += bare-app.INIT_ORDER=06
 
 config BR2_PACKAGE_BARE_APP_DOOM_WAD
 	bool "install the shareware Doom WAD"
@@ -134,7 +146,7 @@ config BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM
 	select BR2_PACKAGE_DOOM1_WAD
 	help
 	  Buildroot's chocolate-doom as it is, with the shareware
-	  doom1.wad: games/chocolate-doom.ini (installed in
+	  doom1.wad: games/chocolate-doom.ini of this package (installed in
 	  /usr/share/bare_app/games/) is all it takes to make it an
 	  entry of bare_app's menu, the example of an SDL2 game. In the
 	  SDK: APPS_CONFIG += bare-app.CHOCOLATE_DOOM=y
@@ -153,8 +165,8 @@ config BR2_PACKAGE_BARE_APP_DOOM3
 	select BR2_PACKAGE_RBDOOM3_BFG
 	help
 	  The RBDOOM-3-BFG engine (package rbdoom3-bfg, GPLv3) for
-	  DOOM 3 BFG Edition, drawn by the GPU, with games/doom3.ini
-	  as its entry of the main menu. The game files are not
+	  DOOM 3 BFG Edition, drawn by the GPU, with the package's
+	  doom3.ini as its entry of the main menu. The game files are not
 	  included: copy base/ of a bought BFG Edition (GOG or Steam)
 	  to doom3/ of the games partition (GAMES, /games). In the
 	  SDK: APPS_CONFIG += bare-app.DOOM3=y
@@ -170,8 +182,8 @@ config BR2_PACKAGE_BARE_APP_RTCW
 	select BR2_PACKAGE_IORTCW
 	help
 	  The iortcw engine (package iortcw, GPLv3) for Return to Castle
-	  Wolfenstein's single player, drawn by the GPU, with
-	  games/rtcw.ini as its entry of the main menu. The game files
+	  Wolfenstein's single player, drawn by the GPU, with the
+	  package's rtcw.ini as its entry of the main menu. The game files
 	  are not included: copy main/ of a bought copy (pak0.pk3,
 	  sp_pak1-4.pk3 of patch 1.41, a translation's pk3s) to rtcw/main/
 	  of the games partition (GAMES, /games). In the SDK:

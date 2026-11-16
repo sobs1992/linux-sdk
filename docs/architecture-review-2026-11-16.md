@@ -128,7 +128,7 @@
   процедуры упаковки (`--ddrfw1..8` по именам), а `AML_FIP_FILES` — что
   скачать; проверка в скрипте как раз сверяет одно с другим.
 
-### Шаг 2 — умолчания и конфиги
+### Шаг 2 — умолчания и конфиги (коммит `457595c`)
 
 - Makefile задаёт умолчания (`?=`): `BOARD_DIR=board/$(FW)` (до включения
   конфига — конфиги раскрывают его сразу), `TFA/UBOOT/LINUX/BUILDROOT_SRC`,
@@ -142,3 +142,28 @@
   `rootfs-configure` для oga и ogu — `.config` ядра идентичны, `.config`
   Buildroot отличаются только строкой `BR2_EXTERNAL_SDK_VERSION`
   (`git describe`) и комментарием Kconfig; предупреждение про RPMSG исчезло.
+
+Ревью шага 1: PASS; два мелких замечания исправлены в шаге 3 (комментарий к
+`.NOTPARALLEL`, запрет и двух `_defconfig` в одной команде).
+
+### Шаг 3 — пакеты
+
+- `doom3.ini` и `rtcw.ini` переехали в пакеты своих движков (`rbdoom3-bfg`,
+  `iortcw`), которые сами ставят их в `/usr/share/bare_app/games/`; в
+  `bare-app.mk` остался только `chocolate-doom.ini` (пакет Buildroot, не наш).
+  Файлы в `target/` те же (сравнение `cmp` после `-reinstall` на ogu).
+- Порядок init-скрипта bare_app — опция пакета `INIT_ORDER` (строка, по
+  умолчанию `90`); OGA задаёт `bare-app.INIT_ORDER=06` в `APPS_CONFIG`
+  вместо переименования в `post-build.sh`. Файл скрипта — `bare-app.init`.
+  Пересборка rootfs OGA: в `rootfs.tar` снова `etc/init.d/S06bare-app`.
+  Побочный выигрыш: purge при выключении автозапуска теперь находит файл.
+- `iortcw.mk` объявляет зависимость от `mesa-panfrost` (как его `Config.in`),
+  `WINE_WOW64_SITE` строится из версии.
+- Новая проверка после перенастройки Buildroot: пакеты, ушедшие из `.config`
+  (`BR2_PACKAGE_X=y` было, не стало) и имеющие файлы в `target/`, удаляются
+  из `target/` и получают `-dirclean` (`apps-config.sh dropped`), как уже
+  делалось для приложений. Раньше выключенный `bare-app.WINE=y` оставлял Wine
+  в образе инкрементальной сборки. Проверено на смоделированной паре
+  `.config` (iortcw, libopenh264, sdl2_mixer найдены; опция `BARE_APP_RTCW`,
+  не пакет, — нет) и реальной перенастройкой ogu (ничего не удалено,
+  `.config` идентичен).

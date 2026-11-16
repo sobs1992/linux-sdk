@@ -9,7 +9,7 @@ IORTCW_VERSION = 438e7d413b5f7277187c35b032eb0ef9093ae778
 IORTCW_SITE = $(call github,iortcw,iortcw,$(IORTCW_VERSION))
 IORTCW_LICENSE = GPL-3.0+ with additional terms
 IORTCW_LICENSE_FILES = SP/COPYING.txt
-IORTCW_DEPENDENCIES = sdl2 zlib
+IORTCW_DEPENDENCIES = sdl2 zlib mesa-panfrost
 
 # The game modules are named after the architecture the engine asks for
 # (q_platform.h's ARCH_STRING: arm64 on aarch64)
@@ -41,7 +41,8 @@ endef
 
 # The installation is fs_basepath: the engine, main/ with the game modules
 # and gamepad.cfg; /usr/bin/iowolfsp (iowolfsp.sh) starts it. The game's
-# own files are another search path (bare_app's rtcw.ini).
+# own files are another search path (rtcw.ini, the entry of bare_app's
+# menu, GAME_NATIVE).
 IORTCW_OUT = $(@D)/SP/build/release-linux-$(IORTCW_ARCH)
 define IORTCW_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(IORTCW_OUT)/iowolfsp.$(IORTCW_ARCH) \
@@ -53,6 +54,8 @@ define IORTCW_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/iortcw/main/gamepad.cfg
 	$(INSTALL) -D -m 0755 $(IORTCW_PKGDIR)/iowolfsp.sh \
 		$(TARGET_DIR)/usr/bin/iowolfsp
+	$(INSTALL) -D -m 0644 $(IORTCW_PKGDIR)/rtcw.ini \
+		$(TARGET_DIR)/usr/share/bare_app/games/rtcw.ini
 endef
 
 $(eval $(generic-package))

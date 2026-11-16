@@ -789,7 +789,7 @@ scripts/halflife-install.sh ~/.steam/steam/steamapps/common/Half-Life 192.168.7.
 
 `APPS_CONFIG += bare-app.RTCW=y` (включено в `ogu_defconfig`) собирает пакет `iortcw`:
 движок [iortcw](https://github.com/iortcw/iortcw), одиночная игра, как SDL2-игра
-bare_app (`games/rtcw.ini`). Рисует OpenGL 1 (контекст совместимости OpenGL 3.1 Mesa)
+bare_app (`rtcw.ini` пакета `iortcw`). Рисует OpenGL 1 (контекст совместимости OpenGL 3.1 Mesa)
 через GPU, 60 кадров/с; HUD и прицел без растяжения на широком экране (`cg_fixedAspect 2`
 в `/usr/bin/iowolfsp`). Файлы игры в образ не входят: в `rtcw/main/` раздела GAMES
 нужны `pak0.pk3`, `sp_pak1.pk3`–`sp_pak4.pk3` (`sp_pak4` — патч 1.41) и pk3 перевода,
