@@ -225,7 +225,7 @@ README (851 строка) стал картой (140 строк: компоне�
 `games/README.md` — rtcw, neighbours, neighbours2, doom; `GAMES.md` bare_app —
 ini ставит пакет движка. Ссылки проверены скриптом.
 
-### Шаг 7 — инструменты (коммит `ad369e5`)
+### Шаг 7 — инструменты (коммит `c3c9f7c`)
 
 `scripts/devlib.py`: пути `output/` (`OUTPUT_DIR` уважается, как в Makefile),
 таблица кодов кнопок обеих плат, события evdev, PNG. `oga-serial.py`,
