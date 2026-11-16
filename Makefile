@@ -18,6 +18,11 @@ JOBS       ?= $(shell nproc)
 # Command-line variables of this Makefile must not leak into component builds
 MAKEOVERRIDES :=
 
+# The components run one after another, each with its own -j$(JOBS):
+# Buildroot does not take a parallel top level, and three builds at once
+# would need three times the memory
+.NOTPARALLEL:
+
 .DEFAULT_GOAL := all
 
 # ----------------------------------------------------------------------------
@@ -30,17 +35,21 @@ OUT           := $(OUTPUT_DIR)/$(FW)
 IMAGES_DIR    := $(OUT)/images
 LINUX_INSTALL := $(OUT)/linux-install
 
-ifeq ($(filter $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig)),$(MAKECMDGOALS)),)
-ifneq ($(FW),)
+FW_DEFCONFIGS := $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig))
+
+# "make <fw>_defconfig" only selects: no config is loaded then (FW_CONFIG
+# stays empty), so it cannot share a command line with other targets
+ifneq ($(filter $(FW_DEFCONFIGS),$(MAKECMDGOALS)),)
+ifneq ($(filter-out $(FW_DEFCONFIGS),$(MAKECMDGOALS)),)
+$(error Run 'make <fw>_defconfig' on its own, then the other targets)
+endif
+else ifneq ($(FW),)
 FW_CONFIG := $(SDK_DIR)/configs/$(FW)_defconfig
 ifeq ($(wildcard $(FW_CONFIG)),)
 $(error Firmware config $(FW_CONFIG) not found)
 endif
 include $(FW_CONFIG)
 endif
-endif
-
-FW_DEFCONFIGS := $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig))
 .PHONY: $(FW_DEFCONFIGS)
 $(FW_DEFCONFIGS): %_defconfig:
 	@mkdir -p $(OUTPUT_DIR)
@@ -192,7 +201,7 @@ AML_FIP_BLOBS  := $(OUT)/fip-blobs
 AML_FIP_IMAGES := $(IMAGES_DIR)/u-boot-fip.bin $(IMAGES_DIR)/u-boot-fip-mbr.bin
 endif
 
-ifneq ($(FW),)
+ifneq ($(FW_CONFIG),)
 $(call inputs-stamp,$(UBOOT_OUT),$(UBOOT_DEFCONFIG) $(UBOOT_FRAGMENTS))
 endif
 
@@ -263,7 +272,7 @@ endif
 
 LINUX_MAKE = $(MAKE) -C $(LINUX_TREE) O=$(LINUX_OUT) ARCH=$(LINUX_ARCH) CROSS_COMPILE=$(CROSS_COMPILE) $(LINUX_MAKE_ARGS)
 
-ifneq ($(FW),)
+ifneq ($(FW_CONFIG),)
 $(call inputs-stamp,$(LINUX_OUT),$(LINUX_DEFCONFIG) $(LINUX_FRAGMENTS))
 endif
 
@@ -318,7 +327,7 @@ ROOTFS_APPS    := $(ROOTFS_OUT)/apps.config
 ROOTFS_DEFCONF := $(ROOTFS_OUT)/defconfig.sdk
 ROOTFS_BOARD_DEFCONFIG := $(if $(findstring /,$(BUILDROOT_DEFCONFIG)),$(BUILDROOT_DEFCONFIG),$(BUILDROOT_SRC)/configs/$(BUILDROOT_DEFCONFIG))
 
-ifneq ($(FW),)
+ifneq ($(FW_CONFIG),)
 $(call inputs-stamp,$(ROOTFS_OUT),$(BUILDROOT_DEFCONFIG) $(BUILDROOT_EXTERNAL) apps: $(APPS) autostart: $(APPS_AUTOSTART) config: $(APPS_CONFIG))
 endif
 
