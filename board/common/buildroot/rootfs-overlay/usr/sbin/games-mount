@@ -1,8 +1,9 @@
 #!/bin/sh
 #
-# /games from one or more FAT "GAMES" partitions, read-only: the boot
-# disk's own (p4, /etc/init.d/S05data) and an SD card's that the board did
-# not boot from (a card with only game files on it, an add-on).
+# /games from one or more FAT or exFAT "GAMES" partitions, read-only: the
+# boot disk's own (p4, /etc/init.d/S05data) and an SD card's that the
+# board did not boot from (a card with only game files on it; on the GO
+# Ultra the only one, exFAT).
 #
 #   games-mount start DEV...   mount them on /games, the first one first
 #   games-mount stop           unmount /games and the partitions under it
@@ -16,10 +17,10 @@
 # found in one partition is a link to it; a directory in more than one is
 # a directory whose entries are joined the same way, so a card can add
 # files to a game's directory (DOOM 3's base/maps of its add-ons). When
-# two have the same file the earlier partition's is used. FAT compares
-# names without case, and so does the joining: "DOOM3" on the card is the
-# same directory as "doom3". (overlayfs would do this, but it does not
-# take FAT file systems.)
+# two have the same file the earlier partition's is used. FAT and exFAT
+# compare names without case, and so does the joining: "DOOM3" on the card
+# is the same directory as "doom3". (overlayfs would do this, but it does
+# not take FAT or exFAT file systems.)
 #
 # "rw" puts the first partition alone on /games, writable, for copying a
 # game onto the board; "ro" makes it read-only and joins the others again.
@@ -27,9 +28,16 @@
 
 STATE=/run/games/mounted	# "device directory", a line each, in order
 BASE=/run/games
-OPTS=noatime,utf8,umask=022
 
 log() { echo "games: $*" >&2; logger -t games "$*" 2>/dev/null; }
+
+# mnt DEV DIR: the partition read-only on DIR, with UTF-8 names
+mnt() {
+	case $(blkid -o value -s TYPE "$1" 2>/dev/null) in
+	exfat) mount -t exfat -o ro,noatime,iocharset=utf8,umask=022 "$1" "$2" ;;
+	*) mount -t vfat -o ro,noatime,utf8,umask=022 "$1" "$2" ;;
+	esac
+}
 
 # join DST REL SRC...: the entries of REL in each SRC as links in DST
 join() {
@@ -39,7 +47,7 @@ join() {
 		for p in "$d$rel"/* "$d$rel"/.[!.]*; do
 			[ -e "$p" ] || [ -L "$p" ] || continue
 			n=${p##*/}
-			# taken from an earlier partition (FAT: whatever its case)
+			# taken from an earlier partition (whatever its case)
 			seen=
 			for e; do
 				[ "$e" = "$d" ] && break
@@ -87,7 +95,7 @@ start() {
 	mkdir -p /games $BASE
 	: > $STATE
 	if [ $# -eq 1 ]; then
-		mount -t vfat -o ro,$OPTS "$1" /games || { log "cannot mount $1"; rm -f $STATE; return 1; }
+		mnt "$1" /games || { log "cannot mount $1"; rm -f $STATE; return 1; }
 		echo "$1 /games" >> $STATE
 		log "$1 on /games"
 		return 0
@@ -96,7 +104,7 @@ start() {
 	for dev; do
 		dir=$BASE/$n
 		mkdir -p "$dir"
-		if mount -t vfat -o ro,$OPTS "$dev" "$dir"; then
+		if mnt "$dev" "$dir"; then
 			echo "$dev $dir" >> $STATE
 			log "$dev on /games ($dir)"
 		else
@@ -108,7 +116,7 @@ start() {
 	if [ "$(wc -l < $STATE)" -eq 1 ]; then
 		# only one could be mounted: on /games itself
 		read -r dev dir < $STATE
-		umount "$dir" && mount -t vfat -o ro,$OPTS "$dev" /games &&
+		umount "$dir" && mnt "$dev" /games &&
 			echo "$dev /games" > $STATE
 		return
 	fi

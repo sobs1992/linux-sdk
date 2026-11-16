@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
 """
-games-image.py: a complete disk image with the games, from the firmware's
-image and a manifest (games/games.manifest).
+games-image.py: the games of a manifest (games/games.manifest) onto a games
+card, or a complete disk image with them, from the firmware's image.
 
-  scripts/games-image.py [-m MANIFEST] [--out DIR] [--work DIR] [--only sd|emmc]
-                         [--games GAME,GAME...] [--reuse]
+  scripts/games-image.py [-m MANIFEST] [--work DIR] [--games GAME,GAME...] [--reuse]
+                         --card DIR [--delete] [--board HOST]
+  scripts/games-image.py [-m MANIFEST] [--work DIR] [--games GAME,GAME...] [--reuse]
+                         [--out DIR] [--only sd|emmc]
+
+--card: the games into a mounted "GAMES" file system, a directory per game:
+the GO Ultra's SD card of games (exFAT), in this PC's card reader or shared
+by the board over USB (bare_app's "USB disk", usb-disk). rsync copies only
+what changed, so a run after a change to one game is quick. Games already
+on the card that the manifest does not name stay; --delete also removes
+files from a game's directory that the manifest no longer puts there (and
+any put there by hand). Files of the manifest's "data" lines belong on the
+board's /data: --board HOST (root@192.168.7.2 over the USB cable) copies
+them there over ssh.
+
+Without --card: a disk image, for a firmware with a games partition on its
+own disk (IMAGE_DATA_SIZE_MB: the OGA's SD card).
 
 The firmware's images (make image: images/<fw>.img and <fw>-emmc.img) hold
 only BOOT and the rootfs; /etc/init.d/S05data adds the data partitions on
@@ -321,11 +336,70 @@ def make_image(base, out, data_img, games_img, data_start, data_size, games_mb):
     run(["sfdisk", "-l", out])
 
 
+def card_need(games, dirs, card):
+    """bytes the card still needs for these game directories: files not
+    there yet or of another size (rsync copies those)"""
+    need = 0
+    for gdir in dirs:
+        top = os.path.join(games, gdir)
+        for d, _, files in os.walk(top):
+            for f in files:
+                src = os.path.join(d, f)
+                dst = os.path.join(card, os.path.relpath(src, games))
+                size = os.path.getsize(src)
+                try:
+                    if os.path.getsize(dst) == size:
+                        continue
+                    size -= os.path.getsize(dst)
+                except OSError:
+                    pass
+                need += max(size, 0)
+    return need
+
+
+def fill_card(games, dirs, card, delete):
+    """the game directories into the mounted card: only what changed (size
+    or time; FAT and exFAT keep times to 2 s and 10 ms), no owners or modes,
+    which those file systems do not have"""
+    if not os.path.isdir(card):
+        die("%s: not a directory (the card, mounted)" % card)
+    if not os.path.ismount(card):
+        log("%s is not a mount point: copying there all the same" % card)
+    need, st = card_need(games, dirs, card), os.statvfs(card)
+    free = st.f_bavail * st.f_frsize
+    log("card %s: %d MiB to copy, %d MiB free" % (card, need // 2**20, free // 2**20))
+    if need > free:
+        die("the games do not fit on the card")
+    for gdir in dirs:
+        log("card: /games/%s" % gdir)
+        run(["rsync", "-rt", "--modify-window=1", "--info=stats0"] +
+            (["--delete"] if delete else []) +
+            [os.path.join(games, gdir) + "/", os.path.join(card, gdir) + "/"])
+    run(["sync", "-f", card])
+
+
+def data_to_board(data, host):
+    """the manifest's "data" files onto the board's /data, owned by root"""
+    if not os.listdir(data):
+        return
+    log("data: %s -> %s:/data" % (data, host))
+    tar = subprocess.Popen(["tar", "-C", data, "--owner=0", "--group=0", "-cf", "-", "."],
+                           stdout=subprocess.PIPE)
+    ssh = subprocess.run(["ssh", host, "tar -xf - -C /data && sync"], stdin=tar.stdout)
+    tar.stdout.close()
+    if tar.wait() or ssh.returncode:
+        die("could not copy the data files to %s" % host)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("-m", "--manifest", default=os.path.join(SDK, "games", "games.manifest"))
     ap.add_argument("--out", help="directory for the images (the manifest's out)")
     ap.add_argument("--work", help="directory to put the games together in (the manifest's work)")
+    ap.add_argument("--card", help="the games onto this mounted games card (no image)")
+    ap.add_argument("--delete", action="store_true",
+                    help="--card: remove files of a game's directory that the manifest does not put there")
+    ap.add_argument("--board", help="--card: the data files onto this board's /data (ssh host)")
     ap.add_argument("--only", choices=("sd", "emmc"), help="one of the two images")
     ap.add_argument("--games", help="only these sections, comma separated (with --reuse: copy them again)")
     ap.add_argument("--reuse", action="store_true", help="keep the games already in <work>")
@@ -345,11 +419,13 @@ def main():
     if pick and pick - {n for n, _ in games_sec}:
         die("no section %s in %s" % (", ".join(pick - {n for n, _ in games_sec}), a.manifest))
 
+    if not a.card and (a.delete or a.board):
+        die("--delete and --board go with --card")
     start_mb = image.get("data_start_mb") or fw_value(fw, "IMAGE_DATA_START_MB")
     size_mb = image.get("data_size_mb") or fw_value(fw, "IMAGE_DATA_SIZE_MB")
-    if not start_mb or not size_mb:
-        die("%s: no IMAGE_DATA_START_MB / IMAGE_DATA_SIZE_MB (data partitions)" % fw)
-    data_start, data_size = int(start_mb) * 2048, int(size_mb) * 2048
+    if not a.card and (not start_mb or not size_mb):
+        die("%s: no games partition in its image (IMAGE_DATA_START_MB, IMAGE_DATA_SIZE_MB): "
+            "its games go onto an SD card, --card DIR (the card mounted)" % fw)
 
     games, data = os.path.join(work, "games"), os.path.join(work, "data")
     if not a.reuse:
@@ -364,6 +440,16 @@ def main():
             continue
         install_game(name, g, games, data)
 
+    if a.card:
+        fill_card(games, [g.get("dir", n) for n, g in games_sec if not pick or n in pick],
+                  os.path.abspath(os.path.expanduser(a.card)), a.delete)
+        if a.board:
+            data_to_board(data, a.board)
+        elif os.listdir(data):
+            log("files for the board's /data are in %s: --board root@192.168.7.2 copies them" % data)
+        return
+
+    data_start, data_size = int(start_mb) * 2048, int(size_mb) * 2048
     games_img, data_img = os.path.join(work, "games.vfat"), os.path.join(work, "data.ext4")
     games_mb = make_games_fat(games, games_img, int(image.get("games_free_mb", 1024)),
                               int(image.get("games_size_mb", 0)))

@@ -6,10 +6,12 @@
 #   p4  FAT32 "GAMES" right after p3 to the end of the disk (optional),
 #       mounted read-only on /games: game files, copied there from a PC
 #
-# An SD card the board did not boot from adds its FAT "GAMES" partition
-# to /games (a card of game files: the board boots from the eMMC when the
-# card has no boot files). /usr/sbin/games-mount joins them: the boot
-# disk's files first, the card's next to them, in the same directories.
+# An SD card the board did not boot from gives its FAT or exFAT "GAMES"
+# partition to /games: a card of game files (the board boots from the
+# eMMC when the card has no boot files). The GO Ultra keeps its games
+# there: its eMMC has no p4, and p3 goes to the end of it. With a p4 too
+# /usr/sbin/games-mount joins them: the boot disk's files first, the
+# card's next to them, in the same directories.
 #
 # The image has only BOOT and rootfs; scripts/mkimage.sh writes "start
 # size" of p3 in sectors to /etc/data-partition when the firmware config
@@ -20,13 +22,22 @@
 # finds the "data" and "GAMES" file systems there and keeps them. A
 # partition with another file system is never touched.
 #
+# Without a size p3 takes the rest of the disk. Flashing leaves no p3 in
+# the table: a "data" file system at its start gets a p3 of its own size,
+# so that a "GAMES" file system right after it (a p4 of an older layout
+# with a size) is found and gets its p4 again; it stays on /games and p3
+# as it is. A p3 that ends before the end of the disk with nothing after
+# it (that p4 deleted) is grown to the end, its file system with it.
+#
 # /games is read-only, so switching the board off never leaves the FAT
 # dirty; "games-mount rw" to write there from the board ("games-mount ro"
 # after).
-# Needs sfdisk, partx and blkid (util-linux), mke2fs (e2fsprogs), mkdosfs.
+# Needs sfdisk, partx and blkid (util-linux), mke2fs and resize2fs
+# (e2fsprogs), mkdosfs.
 
 CONF=/etc/data-partition
 MIN_SECTORS=131072	# 64 MiB
+GAMES_FS="vfat exfat"	# the file systems of a "GAMES" partition
 
 log() { echo "data: $*"; logger -t data "$*" 2>/dev/null; }
 
@@ -61,11 +72,74 @@ add_part() {
 	wait_node "$(part_name "$disk" "$1")"
 }
 
-# the file system on partition $1 is of type $2 and labelled $3 (one
-# probe for both: each costs tens of ms on a card)
+# the file system on partition $1 is of a type of the list $2 and
+# labelled $3 (one probe for both: each costs tens of ms on a card)
 is_fs() {
 	fs=$(blkid -p -o export "/dev/$1" 2>/dev/null) || return 1
-	echo "$fs" | grep -qxF "TYPE=$2" && echo "$fs" | grep -qxF "LABEL=$3"
+	echo "$fs" | grep -qxF "LABEL=$3" || return 1
+	for t in $2; do
+		echo "$fs" | grep -qxF "TYPE=$t" && return 0
+	done
+	return 1
+}
+
+# the file system at sector $1 of the disk, of a type of the list $2 and
+# labelled $3: "type size", its size in sectors
+fs_at() {
+	fs=$(blkid -p -O $(($1 * 512)) -o export "/dev/$disk" 2>/dev/null) || return 1
+	echo "$fs" | grep -qxF "LABEL=$3" || return 1
+	size=$(echo "$fs" | sed -n 's/^FSSIZE=//p')
+	[ -n "$size" ] || return 1
+	for t in $2; do
+		if echo "$fs" | grep -qxF "TYPE=$t"; then
+			echo "$t $((size / 512))"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# the first MiB boundary at or after the end of p3: where p4 starts
+after_p3() {
+	echo $(( ($(part_end "$p3") + 2047) / 2048 * 2048 ))
+}
+
+# no size: the old p4 of a layout with a size, found after the p3 that
+# fs_at gave the size of "data", gets its partition again
+old_games() {
+	[ -z "$data_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
+	start=$(after_p3)
+	found=$(fs_at "$start" "$GAMES_FS" GAMES) || return 0
+	log "a \"GAMES\" file system after $p3: its partition back"
+	case $found in exfat*) type=7 ;; *) type=c ;; esac
+	add_part 4 "$start" "" $type
+}
+
+# p3 to the end of the disk when it may take the rest (no size, no p4,
+# no file system after it: a deleted p4 must be wiped first)
+grow_part() {
+	[ -z "$data_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
+	[ $((disk_size - $(part_end "$p3"))) -ge 2048 ] || return 0	# 1 MiB
+	if blkid -p -O $(($(after_p3) * 512)) "/dev/$disk" > /dev/null 2>&1; then
+		log "a file system after $p3: not growing it"
+		return 0
+	fi
+	log "growing $p3 to the end of $disk"
+	echo ",+" | sfdisk -q -N 3 --no-reread --no-tell-kernel "/dev/$disk" &&
+		partx -u -n 3 "/dev/$disk" || log "cannot grow $p3"
+}
+
+# the mounted /data to the size of p3 when it is 1 MiB or more smaller (p3
+# grown, now or on a boot that did not get as far): online, in the
+# background
+grow_fs() {
+	fs=$(blkid -p -o value -s FSSIZE "/dev/$p3" 2>/dev/null)
+	[ -n "$fs" ] || return 0
+	[ $((fs / 512 + 2048)) -le "$(cat "/sys/class/block/$p3/size")" ] || return 0
+	log "growing /data to the size of $p3"
+	( nice resize2fs "/dev/$p3" > /dev/null 2>&1 &&
+		log "/data grown to $(df -P -h /data | awk 'NR == 2 { print $2 }')" ||
+		log "cannot grow /data" ) &
 }
 
 data() {
@@ -80,12 +154,20 @@ data() {
 			log "no room for a data partition on $disk"
 			return 1
 		fi
+		size=$data_size
+		if [ -z "$size" ] && found=$(fs_at "$data_start" ext4 data) &&
+		   [ $((data_start + ${found#* })) -le "$disk_size" ]; then
+			# a "data" there: its own size (what is after it is kept)
+			size=${found#* }
+		fi
 		new=1
-		add_part 3 "$data_start" "$data_size" 83 || return 1
+		add_part 3 "$data_start" "$size" 83 || return 1
+		old_games
 	elif ! is_fs "$p3" ext4 data; then
 		log "$p3 is not an ext4 \"data\" file system, leaving it alone"
 		return 1
 	fi
+	grow_part
 	# only a new partition can still be empty (the check above passed)
 	if [ -n "$new" ] && ! is_fs "$p3" ext4 data; then
 		log "formatting $p3"
@@ -95,6 +177,7 @@ data() {
 	# fails, keeping it, if "data" is larger than p3 (from an older layout)
 	mount -t ext4 -o noatime "/dev/$p3" /data || { log "cannot mount $p3"; return 1; }
 	log "$p3 on /data"
+	grow_fs
 }
 
 games() {
@@ -110,18 +193,18 @@ games() {
 		fi
 		new=1
 		add_part 4 "$games_start" "" c || return 1
-	elif ! is_fs "$p4" vfat GAMES; then
-		log "$p4 is not a FAT \"GAMES\" file system, leaving it alone"
+	elif ! is_fs "$p4" "$GAMES_FS" GAMES; then
+		log "$p4 is not a FAT or exFAT \"GAMES\" file system, leaving it alone"
 		return 1
 	fi
 	# only a new partition can still be empty (the check above passed)
-	if [ -n "$new" ] && ! is_fs "$p4" vfat GAMES; then
+	if [ -n "$new" ] && ! is_fs "$p4" "$GAMES_FS" GAMES; then
 		log "formatting $p4"
 		mkdosfs -n GAMES "/dev/$p4" > /dev/null || return 1
 	fi
 }
 
-# the FAT "GAMES" partition of an SD card that is not the boot disk
+# the FAT or exFAT "GAMES" partition of an SD card that is not the boot disk
 card_games() {
 	for b in /sys/block/mmcblk*; do
 		c=${b##*/}
@@ -129,7 +212,7 @@ card_games() {
 		for p in "$b/${c}"p*; do
 			[ -e "$p" ] || continue
 			wait_node "${p##*/}"
-			if is_fs "${p##*/}" vfat GAMES; then
+			if is_fs "${p##*/}" "$GAMES_FS" GAMES; then
 				echo "/dev/${p##*/}"
 				return 0
 			fi
@@ -150,6 +233,11 @@ start() {
 		p4=$(part_name "$disk" 4)
 
 		if data && [ -n "$games_start" ] && games; then
+			main=/dev/$p4
+		elif [ -z "$data_size" ] && [ -e "/sys/class/block/$p4" ] &&
+		     is_fs "$p4" "$GAMES_FS" GAMES; then
+			# older layout: kept until p4 is deleted (p3 grows then)
+			log "$p4: games of an older layout, kept"
 			main=/dev/$p4
 		fi
 	fi

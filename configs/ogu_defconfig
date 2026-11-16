@@ -92,13 +92,14 @@ IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
 IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB   := 128
 IMAGE_ROOTFS_FREE_MB := 256
-# Data partitions, made on the first boot as on the OGA: p3 ext4 "data" on
-# /data, p4 FAT32 "GAMES" on /games to the end of the card. The rootfs
-# (p2 from 144 MiB) must end before p3: up to 2 GiB, room for Wine.
-# p4 stays at 5120 MiB, where it was when p3 was 1 GiB at 4096 MiB, so
-# moving p3 here kept the games and formatted a new "data".
+# Data partition, made on the first boot: p3 ext4 "data" on /data to the
+# end of the disk (saves, settings, Wine prefixes, the hibernation file).
+# The rootfs (p2 from 144 MiB) must end before p3: up to 2 GiB, room for
+# Wine. No games partition: the games are on an SD card with an exFAT
+# "GAMES" partition (S05data, games-mount; scripts/games-image.py --card
+# fills one). A p3 that ends early, from the layout with a FAT32 p4 at
+# 5120 MiB, grows to the end once that p4 is deleted.
 IMAGE_DATA_START_MB := 2192
-IMAGE_DATA_SIZE_MB  := 2928
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f475531
 

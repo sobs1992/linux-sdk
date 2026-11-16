@@ -1,9 +1,37 @@
-# Игры полного образа
+# Игры: карта GO Ultra и образ
 
-`scripts/games-image.py` собирает образ, в котором уже есть игры: берёт образы
-прошивки (`make FW=ogu image` → `output/ogu/images/ogu.img`, `ogu-emmc.img`) и
-дописывает в них разделы данных, которые иначе создаёт при первой загрузке
-`/etc/init.d/S05data`:
+`scripts/games-image.py` раскладывает игры манифеста `games/games.manifest` по
+каталогам `/games`: на карту игр или в полный образ.
+
+## Карта игр (GO Ultra)
+
+У GO Ultra игры лежат на SD-карте с разделом exFAT `GAMES` (README, «Игры: SD-карта
+(exFAT)»). `--card` кладёт их на смонтированную карту: карта вставлена в ПК или
+открыта приставкой по USB-C (bare_app, «USB-диск»):
+
+```sh
+scripts/games-image.py --card /media/$USER/GAMES --board root@192.168.7.2   # все игры
+scripts/games-image.py --card /media/$USER/GAMES --reuse --games pirates    # одна заново
+scripts/games-image.py --card /media/$USER/GAMES --reuse                    # только сверить
+```
+
+Игры сначала собираются в `<work>/games` (`work` манифеста, на диске с местом), потом
+`rsync -rt` переносит на карту то, что изменилось по размеру или времени. Поэтому
+повторный запуск с `--reuse` быстрый. Без `--reuse` `<work>` собирается заново. Каталоги
+на карте, которых нет в манифесте, не трогаются. Лишние файлы в каталоге игры
+остаются; `--delete` их удаляет, в том числе положенные туда руками. Перед
+копированием скрипт сверяет, хватит ли места.
+
+Файлы строк `data` (шрифты Daemonica в префиксе Wine) должны лежать на `/data` платы,
+не на карте: `--board ХОСТ` копирует их по SSH (`tar` от root). Без `--board` скрипт
+только говорит, где они лежат (`<work>/data`).
+
+## Полный образ (GO Advance)
+
+Без `--card` получается образ для прошивки, у которой раздел игр стоит на её же диске
+(`IMAGE_DATA_SIZE_MB`, у GO Advance — SD-карта). Скрипт берёт образы прошивки
+(`make FW=<fw> image`) и дописывает в них разделы данных, которые иначе создаёт при
+первой загрузке `/etc/init.d/S05data`:
 
 | Раздел | Где | Что |
 |---|---|---|
@@ -13,23 +41,21 @@
 Разделы стоят там, где их ищет S05data (`IMAGE_DATA_START_MB`, `IMAGE_DATA_SIZE_MB`
 из `configs/<fw>_defconfig`), поэтому первая загрузка находит их и оставляет как есть.
 Root и loop-устройства не нужны: ext4 собирается `mke2fs -d` под `fakeroot`, FAT32 —
-`mkfs.vfat` и `mcopy` (mtools), обложки — Python PIL.
+`mkfs.vfat` и `mcopy` (mtools), обложки — Python PIL. Манифест для такого образа
+указывает в `[image]` свою прошивку (`fw`) и её образы (`base`, `base_emmc`).
 
 ```sh
-make FW=ogu image                              # образы прошивки
-scripts/games-image.py                         # games/games.manifest, оба образа
-scripts/games-image.py --only emmc             # только для eMMC
-scripts/games-image.py --reuse --games pirates # остальные игры из прошлого раза
+scripts/games-image.py -m МАНИФЕСТ                       # оба образа
+scripts/games-image.py -m МАНИФЕСТ --only sd             # один
+scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # остальные игры из прошлого раза
 ```
 
-Результат — `<out>/<name>.img` и `<name>-emmc.img` (в манифесте
-`lab/images/ogu-games*.img`). Файлы разреженные: раздел данных пустой.
-Запись — штатными целями с другим файлом:
-
-```sh
-make FW=ogu flash IMAGE_FILE=lab/images/ogu-games.img DEV=/dev/sdX
-make FW=ogu flash-emmc IMAGE_EMMC_FILE=lab/images/ogu-games-emmc.img   # Vol+ при включении
-```
+Результат — `<out>/<name>.img` (и `<name>-emmc.img`). Файлы разреженные: раздел
+данных пустой. Запись — штатными целями с другим файлом:
+`make FW=<fw> flash IMAGE_FILE=<образ> DEV=/dev/sdX`. Запись образа стирает всё, что
+было на `/data` и `/games` платы, включая сохранения. Раздел игр в образе не
+растягивается до конца карты: если нужно место под игры, копируемые потом, задайте
+`games_free_mb` или `games_size_mb`.
 
 ## Данные проекта вне git: `lab/`
 
@@ -49,15 +75,11 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=lab/images/ogu-games-emmc.img   # Vol+ п
 Пути в манифесте — относительно SDK (`lab/games/...`) или через `${steam}`, без
 `/media/...` разделов Windows.
 
-Запись образа стирает всё, что было на `/data` и `/games` платы (сохранения тоже).
-Раздел игр в образе не растягивается до конца карты: если нужно место для игр,
-копируемых потом, задайте `games_free_mb` или `games_size_mb`.
-
 ## Манифест
 
-`games.manifest` — ini-файл. В `[image]`: прошивка (`fw`), её образы (`base`,
-`base_emmc`), куда класть результат (`out`, `name`) и промежуточные файлы (`work`,
-нужно место на 1–2 размера игр), запас места на `/games`. Дальше по секции на игру:
+`games.manifest` — ini-файл. В `[image]`: прошивка (`fw`), промежуточные файлы
+(`work`, нужно место на размер игр), для образа — образы прошивки (`base`,
+`base_emmc`), куда класть результат (`out`, `name`) и запас места на `/games`. Дальше по секции на игру:
 
 | Ключ | Что |
 |---|---|
@@ -111,10 +133,8 @@ make FW=ogu flash-emmc IMAGE_EMMC_FILE=lab/images/ogu-games-emmc.img   # Vol+ п
   (`PAN_MMAP_WINDOW`, 6 → 60 fps). Обложка — кадр ролика `bd_05.bik` (через ffmpeg).
 
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
-  сетевых карт. Все три кампании — 6,4 ГБ; если образ не помещается, карты
-  Resurrection of Evil (`deltax`, `erebus*`, `hell`, `phobos*`) и The Lost Mission
-  (`le_*`) можно исключить строками `exclude` и положить на отдельную SD-карту
-  с играми (README, «SD-карта с играми к eMMC»).
+  сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
+  6,4 ГБ.
 
 Doom (shareware `doom1.wad`) уже есть в rootfs; полный `doom.wad`/`doom2.wad` можно
 добавить секцией с `install = none` и `file = .../doom2.wad`, `dir = doom`.

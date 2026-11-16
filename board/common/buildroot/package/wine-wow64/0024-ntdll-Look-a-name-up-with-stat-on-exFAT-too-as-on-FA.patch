@@ -1,0 +1,80 @@
+From 820d4a92396c803711a7f919d0b9bbfd0a09e7ae Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Mon, 16 Nov 2026 19:48:23 +0100
+Subject: [PATCH] ntdll: Look a name up with stat() on exFAT too, as on FAT.
+
+exFAT's lookups ignore case as FAT's do (it has no short names), so
+stat() alone tells whether a name is there on it too. Wine takes exFAT
+for a case-sensitive file system: after a failed stat() it read the
+whole directory for a case-insensitive match, which cannot find one.
+
+The GO Ultra keeps its games on an SD card with an exFAT file system.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/ntdll/unix/file.c | 31 +++++++++++++++++--------------
+ 1 file changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 4c95f91..95de72f 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -150,14 +150,16 @@ typedef struct
+ /* Define the ext2 ioctl for handling extra attributes */
+ #define EXT2_IOC_GETFLAGS _IOR('f', 1, long)
+ 
+-/* FAT: its lookups ignore case and find the short names too, so stat()
+- * alone tells whether a name is there; reading the directory to find a
+- * name costs the kernel an inode lookup per entry */
++/* FAT and exFAT: their lookups ignore case (and FAT's find the short
++ * names too), so stat() alone tells whether a name is there; reading the
++ * directory to find a name costs the kernel an inode lookup per entry on
++ * FAT, a pass over the whole directory on both */
+ static BOOL is_fat_fd( int fd )
+ {
+     struct statfs stfs;
+ 
+-    return !fstatfs( fd, &stfs ) && stfs.f_type == 0x4d44 /* MSDOS_SUPER_MAGIC */;
++    return !fstatfs( fd, &stfs ) && (stfs.f_type == 0x4d44 /* MSDOS_SUPER_MAGIC */ ||
++                                     stfs.f_type == 0x2011bab0 /* EXFAT_SUPER_MAGIC */);
+ }
+ 
+ static BOOL has_tilde( const WCHAR *name, int length )
+@@ -2692,13 +2694,14 @@ static NTSTATUS read_directory_data( struct dir_data *data, int fd, const UNICOD
+     NTSTATUS status;
+ 
+ #ifdef VFAT_IOCTL_READDIR_BOTH
+-    /* A name without wildcards on FAT: stat() finds it or not (the kernel's
+-     * lookups there ignore case and know the short names), where reading
+-     * the whole directory costs an inode lookup per entry. Tales of Monkey
+-     * Island looks names up in Pack directories of ~2000 files, and its
+-     * main thread spent most of each scene change in the kernel doing that.
+-     * The name found is given as asked, in its case. A '~' may be Wine's
+-     * own short name of a long one: the directory is read for it. */
++    /* A name without wildcards on FAT or exFAT: stat() finds it or not (the
++     * kernel's lookups there ignore case; FAT's know the short names), where
++     * reading the whole directory is a pass over it, on FAT with an inode
++     * lookup per entry. Tales of Monkey Island looks names up in Pack
++     * directories of ~2000 files, and its main thread spent most of each
++     * scene change in the kernel doing that. The name found is given as
++     * asked, in its case. A '~' may be Wine's own short name of a long one:
++     * the directory is read for it. */
+     if (!has_wildcard( mask ) && !has_tilde( mask->Buffer, mask->Length / sizeof(WCHAR) ) && is_fat_fd( fd ))
+     {
+         char unix_name[MAX_DIR_ENTRY_LEN * 3 + 1];
+@@ -3014,9 +3017,9 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+     else unix_name[1] = 0;  /* keep the initial slash */
+ 
+ #ifdef VFAT_IOCTL_READDIR_BOTH
+-    /* On FAT the lookup above already ignored case and knew the real short
+-     * names: the name is not there. A '~' may be Wine's own short name of a
+-     * long one, which only the directory gives. */
++    /* On FAT and exFAT the lookup above already ignored case (and on FAT
++     * knew the real short names): the name is not there. A '~' may be
++     * Wine's own short name of a long one, which only the directory gives. */
+     if (!has_tilde( name, length ))
+     {
+         BOOL fat;
+-- 
+2.53.0
+

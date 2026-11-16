@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# The games partitions (/games, FAT32 "GAMES": the boot disk's and an SD
-# card's, see games-mount) as USB disks for the computer, a disk each,
+# The games partitions (/games, FAT or exFAT "GAMES": the boot disk's and
+# an SD card's, see games-mount) as USB disks for the computer, a disk each,
 # next to the network of the USB gadget (S42usbnet): a mass storage
 # function is added to the running configfs gadget while they are shared
 # and removed afterwards. Used by bare_app's "USB disk" screen.
@@ -104,15 +104,25 @@ stop() {
 		echo "$udc" > "$G/UDC"
 	fi
 	# Ejected or not, the computer may have left them dirty
-	if command -v fsck.fat >/dev/null; then
-		for dev in $devs; do
-			fsck.fat -a -w "$dev" >/dev/null 2>&1
-			[ $? -le 1 ] || log "fsck.fat found errors it could not fix on $dev"
-		done
-	fi
+	for dev in $devs; do
+		check "$dev"
+	done
 	games-mount start $devs || { log "cannot mount /games"; return 1; }
 	rm -f $STATE
 	log "back on /games:" $devs
+}
+
+# fsck of a partition, repairing what it can (exit 1: repaired)
+check() {
+	local part=$1
+	case $(blkid -o value -s TYPE "$part" 2>/dev/null) in
+	exfat) set -- fsck.exfat -p ;;
+	vfat) set -- fsck.fat -a -w ;;
+	*) return 0 ;;
+	esac
+	command -v $1 >/dev/null || return 0
+	"$@" "$part" >/dev/null 2>&1
+	[ $? -le 1 ] || log "$1 found errors it could not fix on $part"
 }
 
 case "$1" in

@@ -1,11 +1,12 @@
-; games.manifest: the games of a complete image, for scripts/games-image.py.
+; games.manifest: the games of the GO Ultra's games card, for
+; scripts/games-image.py.
 ;
-;   scripts/games-image.py                     # this manifest, both images
-;   scripts/games-image.py -m my.manifest --only emmc
+;   scripts/games-image.py --card /media/$USER/GAMES --board root@192.168.7.2
+;   scripts/games-image.py --card /media/$USER/GAMES --reuse --games pirates
 ;
-; The script takes the firmware's images (make FW=ogu image) and adds the
-; data partitions to them, filled: /games (FAT32 "GAMES") with a directory
-; per game below, /data (ext4 "data") with the files of the "data" lines.
+; The script puts a directory per game below onto the card's /games
+; (exFAT "GAMES"), and the files of the "data" lines onto the board's
+; /data (ext4 "data") over ssh. See games/README.md.
 ; Paths not starting with / are the SDK's; globs work in "file", "data",
 ; "cover". ${key} is that key of [image] (set above its use). Comments
 ; start with ";" or "#".
@@ -17,20 +18,14 @@
 [image]
 ; The Steam library: its games stay there for Steam
 steam = /media/D/Games/Steam
-; Firmware: its configs/<fw>_defconfig gives where the data partitions go
+; Firmware: the GO Ultra keeps its games on an SD card (exFAT "GAMES"):
+;   scripts/games-image.py --card /media/$USER/GAMES --board root@192.168.7.2
+; The games are put together in <work> first (a disk with room), then
+; rsync copies what changed onto the card.
 fw = ogu
-; The firmware's images (these are the defaults)
-base = output/ogu/images/ogu.img
-base_emmc = output/ogu/images/ogu-emmc.img
-; Where the results go: <out>/<name>.img and <name>-emmc.img, about the
-; size of the games plus 5 GiB (the data partition is empty space: the
-; files are sparse). The games are put together in <work> first. Both
-; want a disk with room.
-out = lab/images
 work = lab/images/work
-name = ogu-games
-; Free space on /games besides the games, MiB (games_size_mb = a fixed size)
-games_free_mb = 1024
+; A full image (a firmware with a games partition of its own, IMAGE_DATA_SIZE_MB
+; of configs/<fw>_defconfig) takes base, base_emmc, out, name, games_free_mb
 
 ; ---------------------------------------------------------------------------
 ; A game: [id] with

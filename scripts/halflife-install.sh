@@ -14,9 +14,10 @@
 # of that copy (the board keeps its own in /data/halflife).
 #
 # Everything goes to halflife/ of the games partition: GAMES_DIR is where
-# the card's FAT32 "GAMES" partition is mounted on this PC; over SSH it is
-# /games, mounted read-only, writable for the copy. The board has no
-# rsync: files go as a tar stream, so a rerun copies all of them again.
+# the card's "GAMES" partition (exFAT or FAT32) is mounted on this PC;
+# over SSH it is /games, mounted read-only, writable for the copy. The
+# board has no rsync: files go as a tar stream, so a rerun copies all of
+# them again.
 set -euo pipefail
 
 die() { echo "halflife-install: $*" >&2; exit 1; }
@@ -36,7 +37,7 @@ fi
 
 if [ -n "$host" ]; then
 	ssh "$host" "mountpoint -q /games" ||
-		die "$host: /games is not mounted (games partition, IMAGE_DATA_SIZE_MB)"
+		die "$host: /games is not mounted (no games card or games partition)"
 fi
 
 # valve_<language>/ with the menus' strings, resource/gameui_<language>.txt
