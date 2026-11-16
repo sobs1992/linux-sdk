@@ -19,7 +19,7 @@ so the first boot finds and keeps them:
 
 The manifest is an ini file: [image] for the whole image, then a [section]
 per game (see games/games.manifest for every key). Games are put together
-in <work>/games and <work>/data first (on a disk with room: /media/D...),
+in <work>/games and <work>/data first (on a disk with room: lab/images),
 then made into the partitions with mke2fs -d and mtools: no root, no loop
 devices. --reuse keeps what is already in <work> for games not named by
 --games (only those are copied again).
@@ -56,20 +56,27 @@ def sdk_path(p):
 
 
 def read_manifest(path):
-    """[(section, {key: value or [values]})] in file order"""
-    sections, cur = [], None
+    """[(section, {key: value or [values]})] in file order; ${key} in a
+    value is that key of [image], set above it (a path many games share)"""
+    sections, cur, image = [], None, {}
+
+    def var(m):
+        if m.group(1) not in image:
+            die("%s:%d: ${%s}: no %s in [image] above" % (path, n, m.group(1), m.group(1)))
+        return image[m.group(1)]
     for n, line in enumerate(open(path, encoding="utf-8"), 1):
         s = re.sub(r"(^|\s)[;#].*$", "", line).strip()
         if not s:
             continue
         m = re.fullmatch(r"\[([^\]]+)\]", s)
         if m:
-            cur = {}
+            cur = image if m.group(1).strip() == "image" else {}
             sections.append((m.group(1).strip(), cur))
             continue
         if "=" not in s or cur is None:
             die("%s:%d: %s?" % (path, n, s))
         k, v = (x.strip() for x in s.split("=", 1))
+        v = re.sub(r"\$\{(\w+)\}", var, v)
         if k in MULTI:
             cur.setdefault(k, []).append(v)
         else:
@@ -194,7 +201,7 @@ def install_game(name, g, games, data):
     gdir = g.get("dir", name)
     dest = os.path.join(games, gdir)
     how = g.get("install", "copy")
-    src = g.get("source")
+    src = g.get("source") and sdk_path(g["source"])
     if src and not os.path.isdir(src):
         die("[%s] source %s: not a directory" % (name, src))
     shutil.rmtree(dest, ignore_errors=True)
@@ -328,8 +335,12 @@ def main():
     image = dict(next((s for n, s in sections if n == "image"), {}))
     games_sec = [(n, s) for n, s in sections if n != "image"]
     fw = image.get("fw", "ogu")
-    out = os.path.expanduser(a.out or image.get("out") or os.path.join(SDK, "output", fw, "images"))
-    work = os.path.expanduser(a.work or image.get("work") or os.path.join(out, "games-work"))
+    out = (os.path.abspath(os.path.expanduser(a.out)) if a.out else
+           sdk_path(image.get("out", os.path.join("output", fw, "images"))))
+    work = (os.path.abspath(os.path.expanduser(a.work)) if a.work else
+            sdk_path(image.get("work", os.path.join(out, "games-work"))))
+    if not os.path.isdir(os.path.join(SDK, "lab")):
+        log("lab: no link to the project's data (ln -s /media/D/OdroidLab lab, games/README.md)")
     pick = set(a.games.split(",")) if a.games else None
     if pick and pick - {n for n, _ in games_sec}:
         die("no section %s in %s" % (", ".join(pick - {n for n, _ in games_sec}), a.manifest))

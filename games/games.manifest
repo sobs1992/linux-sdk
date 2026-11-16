@@ -7,9 +7,16 @@
 ; data partitions to them, filled: /games (FAT32 "GAMES") with a directory
 ; per game below, /data (ext4 "data") with the files of the "data" lines.
 ; Paths not starting with / are the SDK's; globs work in "file", "data",
-; "cover". Comments start with ";" or "#".
+; "cover". ${key} is that key of [image] (set above its use). Comments
+; start with ";" or "#".
+;
+; lab/ is the SDK's link (not in git) to the project's data outside it,
+; /media/D/OdroidLab: games/ (the games of this manifest), redist/ (DLLs
+; and fonts of Windows), images/, backups/, wip/. See games/README.md.
 
 [image]
+; The Steam library: its games stay there for Steam
+steam = /media/D/Games/Steam
 ; Firmware: its configs/<fw>_defconfig gives where the data partitions go
 fw = ogu
 ; The firmware's images (these are the defaults)
@@ -19,8 +26,8 @@ base_emmc = output/ogu/images/ogu-emmc.img
 ; size of the games plus 5 GiB (the data partition is empty space: the
 ; files are sparse). The games are put together in <work> first. Both
 ; want a disk with room.
-out = /media/D/ogu-images
-work = /media/D/ogu-images/work
+out = lab/images
+work = lab/images/work
 name = ogu-games
 ; Free space on /games besides the games, MiB (games_size_mb = a fixed size)
 games_free_mb = 1024
@@ -57,16 +64,16 @@ games_free_mb = 1024
 ; HotA one), the VCMI mods Horn of the Abyss and the Russian translation
 ; (downloaded once into dl/hota)
 install = homm3
-source = /media/D/Games/HoMM3_HotA/game_info/data
+source = lab/games/HoMM3_HotA/game_info/data
 ; the main menu's background with the two heroes (HotA.lod is encrypted)
-cover = /media/D/Games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:gamselb1.pcx
+cover = lab/games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:gamselb1.pcx
 cover_crop = left
 
 [hota]
 ; Heroes III: Horn of the Abyss as it is (HotA 1.8 + HD mod 5), Wine, from
 ; the same installation as heroes3 (its own copy: Wine runs the HD mod's exe).
 ; prepare.sh sets the HD mod's resolution and renderer for wine.ini's mode.
-source = /media/D/Games/HoMM3_HotA/game_info/data
+source = lab/games/HoMM3_HotA/game_info/data
 exclude = Uninstall_HotA
 exclude = HotA_logs
 exclude = HD_CRASH_LOG.txt
@@ -76,8 +83,8 @@ overlay = games/hota/overlay
 run = games/hota/prepare.sh
 ; HotA's horn (the HD exe's icon) on the original's dark game selection
 ; background (HotA.lod, with HotA's own pictures, is encrypted)
-cover = /media/D/Games/HoMM3_HotA/game_info/data/h3hota HD.exe:icon
-cover_back = /media/D/Games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:GamSelBk.pcx
+cover = lab/games/HoMM3_HotA/game_info/data/h3hota HD.exe:icon
+cover_back = lab/games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:GamSelBk.pcx
 
 [doom]
 ; Doom: the firmware has doom1.wad (bare-app.DOOM_WAD=y); /games/doom gets
@@ -89,17 +96,17 @@ cover_crop = fit
 [halflife]
 ; Half-Life from Steam: valve/ and valve_russian/ (scripts/halflife-install.sh)
 install = halflife
-source = /media/D/Games/Steam/steamapps/common/Half-Life
-cover = /media/D/Games/Steam/appcache/librarycache/70/library_600x900.jpg
+source = ${steam}/steamapps/common/Half-Life
+cover = ${steam}/appcache/librarycache/70/library_600x900.jpg
 cover_crop = top
 
 [pirates]
 ; Sid Meier's Pirates! (2004, Steam), Wine: bare_app_wine's wine.ini is
 ; this game's
-source = /media/D/Games/Steam/steamapps/common/Sid Meier's Pirates!
+source = ${steam}/steamapps/common/Sid Meier's Pirates!
 exclude = *.log
 file = apps/bare_app/ports/wine/wine.ini -> wine.ini
-cover = /media/D/Games/Steam/appcache/librarycache/3920/library_600x900.jpg
+cover = ${steam}/appcache/librarycache/3920/library_600x900.jpg
 cover_crop = top
 
 [daemonica]
@@ -107,7 +114,7 @@ cover_crop = top
 ; leftovers and GameRus.exe (283 MB: the Russian files, already unpacked).
 ; The engine wants OpenAL from Windows' SysWOW64 next to it, its text the
 ; Arial and Palatino fonts in the Wine prefix (a new prefix keeps them).
-source = /media/D/Games/Daemonica
+source = lab/games/Daemonica
 exclude = GameRus.exe
 exclude = UNWISE.EXE
 exclude = UNWISE.INI
@@ -115,14 +122,14 @@ exclude = INSTALL.LOG
 exclude = *.url
 exclude = Data/daemonica.log
 exclude = Data/Savedgames/*
-file = /media/C/Windows/SysWOW64/OpenAL32.dll
-file = /media/C/Windows/SysWOW64/wrap_oal.dll
+file = lab/redist/SysWOW64/OpenAL32.dll
+file = lab/redist/SysWOW64/wrap_oal.dll
 overlay = games/daemonica/overlay
 run = games/daemonica/prepare.sh
-data = /media/C/Windows/Fonts/arial*.ttf -> wine/prefix/drive_c/windows/Fonts/
-data = /media/C/Windows/Fonts/pala*.ttf -> wine/prefix/drive_c/windows/Fonts/
-data = /media/C/Windows/Fonts/Meatcm__.ttf -> wine/prefix/drive_c/windows/Fonts/
-cover = /media/D/Games/Daemonica/Bitmaps/Externals/MMenubcg.png
+data = lab/redist/Fonts/arial*.ttf -> wine/prefix/drive_c/windows/Fonts/
+data = lab/redist/Fonts/pala*.ttf -> wine/prefix/drive_c/windows/Fonts/
+data = lab/redist/Fonts/Meatcm__.ttf -> wine/prefix/drive_c/windows/Fonts/
+cover = lab/games/Daemonica/Bitmaps/Externals/MMenubcg.png
 cover_crop = center
 
 [doom3]
@@ -130,7 +137,7 @@ cover_crop = center
 ; without the multiplayer maps (about 0.6 GB). All three campaigns are
 ; 6.4 GB; Resurrection of Evil (erebus*, phobos*, deltax, hell) and The Lost
 ; Mission (le_*) can be left out the same way when /games is small.
-source = /media/D/Games/DOOM 3 BFG Edition
+source = lab/games/DOOM 3 BFG Edition
 exclude = *.exe
 exclude = *.dll
 exclude = *.ico
@@ -141,7 +148,7 @@ exclude = Uninstall
 exclude = base/maps/d3ctf*
 exclude = base/maps/d3dm*
 exclude = base/maps/d3xpdm*
-cover = /media/D/Games/DOOM 3 BFG Edition/2.ico
+cover = lab/games/DOOM 3 BFG Edition/2.ico
 cover_crop = fit
 
 [neighbours]
@@ -150,13 +157,13 @@ cover_crop = fit
 ; prepare.sh moves its 800x600 interface into the top 480 rows and makes
 ; cover.png: Woody of the end screen's picture (NfH 2: the neighbour of
 ; its outro), not the main menu's, two pictures meeting across its middle
-source = /media/D/Games/NeighborsFromHell
+source = lab/games/NeighborsFromHell
 overlay = games/neighbours/overlay
 run = games/neighbours/prepare.sh
 
 [neighbours2]
 ; Neighbours from Hell 2: On Vacation (2004), the same way
-source = /media/D/Games/NeighborsFromHell2
+source = lab/games/NeighborsFromHell2
 overlay = games/neighbours2/overlay
 run = games/neighbours2/prepare.sh
 
@@ -164,14 +171,14 @@ run = games/neighbours2/prepare.sh
 ; Knights of the Temple: Infernal Crusade (2004), 1C's Russian edition
 ; ("Тамплиеры: Крестовый поход"), as installed (games/templar/README.md).
 ; The cover: the templar of its intro's last painting
-source = /media/D/Games/Tampliers
+source = lab/games/Tampliers
 exclude = Manual.pdf
 exclude = unins000.*
 exclude = *.URL
 exclude = KillSave.exe
 exclude = protect.dll
 overlay = games/templar/overlay
-cover = /media/D/Games/Tampliers/Sbz1/Videos/bd_05.bik:4
+cover = lab/games/Tampliers/Sbz1/Videos/bd_05.bik:4
 cover_crop = 60 0 360
 
 [monkey1]
@@ -182,42 +189,42 @@ cover_crop = 60 0 360
 ; comes from Windows. Chapter 1's program has only Telltale's logo for an
 ; icon: its cover is GOG's icon of the game, Flotsam Island.
 dir = monkey1
-source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 1
+source = lab/games/Tales of Monkey Island/Tales of Monkey Island 1
 overlay = games/monkey1/overlay
-file = /media/C/Windows/SysWOW64/D3DX9_41.dll
-cover = /media/D/Games/Tales of Monkey Island/goggame-1207659066.ico
+file = lab/redist/SysWOW64/D3DX9_41.dll
+cover = lab/games/Tales of Monkey Island/goggame-1207659066.ico
 cover_crop = fit
 
 [monkey2]
 dir = monkey2
-source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 2
+source = lab/games/Tales of Monkey Island/Tales of Monkey Island 2
 overlay = games/monkey2/overlay
-file = /media/C/Windows/SysWOW64/D3DX9_41.dll
-cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 2/MonkeyIsland102.exe:icon
+file = lab/redist/SysWOW64/D3DX9_41.dll
+cover = lab/games/Tales of Monkey Island/Tales of Monkey Island 2/MonkeyIsland102.exe:icon
 cover_crop = fit
 
 [monkey3]
 dir = monkey3
-source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 3
+source = lab/games/Tales of Monkey Island/Tales of Monkey Island 3
 overlay = games/monkey3/overlay
-file = /media/C/Windows/SysWOW64/D3DX9_41.dll
-cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 3/MonkeyIsland103.exe:icon
+file = lab/redist/SysWOW64/D3DX9_41.dll
+cover = lab/games/Tales of Monkey Island/Tales of Monkey Island 3/MonkeyIsland103.exe:icon
 cover_crop = fit
 
 [monkey4]
 dir = monkey4
-source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 4
+source = lab/games/Tales of Monkey Island/Tales of Monkey Island 4
 overlay = games/monkey4/overlay
-file = /media/C/Windows/SysWOW64/D3DX9_41.dll
-cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 4/MonkeyIsland104.exe:icon
+file = lab/redist/SysWOW64/D3DX9_41.dll
+cover = lab/games/Tales of Monkey Island/Tales of Monkey Island 4/MonkeyIsland104.exe:icon
 cover_crop = fit
 
 [monkey5]
 dir = monkey5
-source = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 5
+source = lab/games/Tales of Monkey Island/Tales of Monkey Island 5
 overlay = games/monkey5/overlay
-file = /media/C/Windows/SysWOW64/D3DX9_41.dll
-cover = /media/D/Games/Tales of Monkey Island/Tales of Monkey Island 5/MonkeyIsland105.exe:icon
+file = lab/redist/SysWOW64/D3DX9_41.dll
+cover = lab/games/Tales of Monkey Island/Tales of Monkey Island 5/MonkeyIsland105.exe:icon
 cover_crop = fit
 
 [rtcw]
@@ -228,8 +235,8 @@ cover_crop = fit
 ; programs, nor the unofficial 1.42d patch (its menus are for its own
 ; WolfSP.exe).
 install = none
-file = /media/D/Games/Return to Castle Wolfenstein/Main/pak0.pk3 -> main/
-file = /media/D/Games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
-file = /media/D/Games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
-cover = /media/D/Games/Return to Castle Wolfenstein/2.ico
+file = lab/games/Return to Castle Wolfenstein/Main/pak0.pk3 -> main/
+file = lab/games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
+file = lab/games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
+cover = lab/games/Return to Castle Wolfenstein/2.ico
 cover_crop = fit

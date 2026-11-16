@@ -9,3 +9,5 @@
 /apps/oga-pad/oga-pad
 # Python bytecode caches of the scripts
 __pycache__/
+# The project's data outside git: games, redist, images, backups (games/README.md)
+/lab

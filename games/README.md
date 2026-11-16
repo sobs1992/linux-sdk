@@ -22,14 +22,32 @@ scripts/games-image.py --only emmc             # только для eMMC
 scripts/games-image.py --reuse --games pirates # остальные игры из прошлого раза
 ```
 
-Результат — `<out>/<name>.img` и `<name>-emmc.img` (по умолчанию
-`/media/D/ogu-images/ogu-games*.img`). Файлы разреженные: раздел данных пустой.
+Результат — `<out>/<name>.img` и `<name>-emmc.img` (в манифесте
+`lab/images/ogu-games*.img`). Файлы разреженные: раздел данных пустой.
 Запись — штатными целями с другим файлом:
 
 ```sh
-make FW=ogu flash IMAGE_FILE=/media/D/ogu-images/ogu-games.img DEV=/dev/sdX
-make FW=ogu flash-emmc IMAGE_EMMC_FILE=/media/D/ogu-images/ogu-games-emmc.img   # Vol+ при включении
+make FW=ogu flash IMAGE_FILE=lab/images/ogu-games.img DEV=/dev/sdX
+make FW=ogu flash-emmc IMAGE_EMMC_FILE=lab/images/ogu-games-emmc.img   # Vol+ при включении
 ```
+
+## Данные проекта вне git: `lab/`
+
+Всё, что не входит в git и не нужно самой сборке (Buildroot живёт на ext4 в
+`output/`), лежит в одном месте — `/media/D/OdroidLab`, а в корне SDK на него
+указывает ссылка `lab` (в `.gitignore`; на новом ПК:
+`ln -s /media/D/OdroidLab lab`):
+
+| Каталог | Что |
+|---|---|
+| `lab/games/` | игры манифеста (кроме Steam: они остаются в библиотеке Steam, `steam` в `[image]`) |
+| `lab/redist/` | DLL (`SysWOW64/`) и шрифты (`Fonts/`) из Windows, которые манифест кладёт к играм |
+| `lab/images/` | собранные образы с играми (`out`, `work` манифеста) |
+| `lab/backups/<плата>/` | снятые с плат бэкапы: eMMC, загрузочная область, FIP, /data, карта игр |
+| `lab/wip/` | исходники и сборки на время работы (box64, innoextract, RTCW, sdk-dl…) |
+
+Пути в манифесте — относительно SDK (`lab/games/...`) или через `${steam}`, без
+`/media/...` разделов Windows.
 
 Запись образа стирает всё, что было на `/data` и `/games` платы (сохранения тоже).
 Раздел игр в образе не растягивается до конца карты: если нужно место для игр,
