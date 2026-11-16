@@ -135,6 +135,15 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
   6,4 ГБ.
+- **rtcw** — Return to Castle Wolfenstein под iortcw (одиночная игра): из `Main/`
+  установки только `pak0.pk3`, `sp_pak*.pk3` патча 1.41 и `z_*.pk3` перевода в
+  `rtcw/main/`; движок и `gamepad.cfg` — в rootfs (пакет `iortcw`, его `rtcw.ini` —
+  пункт меню). Обложка — значок exe.
+- **neighbours**, **neighbours2** — Neighbours from Hell 1 и 2 (Wine): игра 800×600,
+  показываются верхние 480 строк 1:1 (`rows = 480` в `wine.ini`), интерфейс
+  перекладывает `neighbours*/prepare.sh`; подробности в `apps/bare_app/README.md`.
+- **doom** — Doom: shareware `doom1.wad` уже в rootfs, секция ставит только обложку
+  (`TITLEPIC` из wad собранного образа `output/ogu`).
 
 Doom (shareware `doom1.wad`) уже есть в rootfs; полный `doom.wad`/`doom2.wad` можно
 добавить секцией с `install = none` и `file = .../doom2.wad`, `dir = doom`.
