@@ -41,6 +41,13 @@ endif
 ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)
 BARE_APP_KCONFIG += CONFIG_GAME_NATIVE=y
 endif
+# The stress test (GAME_BENCH, bare_app_bench) draws with OpenGL ES 3
+# through EGL: Mesa's, so only "off" without it
+ifeq ($(BR2_PACKAGE_MESA_PANFROST),y)
+BARE_APP_DEPENDENCIES += mesa-panfrost host-pkgconf
+else
+BARE_APP_KCONFIG += CONFIG_GAME_BENCH=n
+endif
 BARE_APP_CONF_OPTS += \
 	-DBARE_APP_CONFIG_EXTRA="$(subst $(space),;,$(strip $(BARE_APP_KCONFIG)))"
 
