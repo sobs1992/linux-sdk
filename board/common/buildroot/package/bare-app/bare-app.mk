@@ -73,6 +73,9 @@ endef
 # partitions, before the network)
 ifeq ($(BR2_PACKAGE_BARE_APP_AUTOSTART),y)
 BARE_APP_INIT_ORDER = $(call qstrip,$(BR2_PACKAGE_BARE_APP_INIT_ORDER))
+ifneq ($(filter-out 0 1 2 3 4 5 6 7 8 9,$(subst 9,9 ,$(subst 8,8 ,$(subst 7,7 ,$(subst 6,6 ,$(subst 5,5 ,$(subst 4,4 ,$(subst 3,3 ,$(subst 2,2 ,$(subst 1,1 ,$(subst 0,0 ,$(BARE_APP_INIT_ORDER)))))))))))),)
+$(error BR2_PACKAGE_BARE_APP_INIT_ORDER must be digits (two, as S90bare-app), not "$(BARE_APP_INIT_ORDER)")
+endif
 define BARE_APP_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(BARE_APP_PKGDIR)/bare-app.init \
 		$(TARGET_DIR)/etc/init.d/S$(BARE_APP_INIT_ORDER)bare-app

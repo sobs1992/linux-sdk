@@ -73,7 +73,14 @@ cmd=$1
 if [ "$cmd" = purge ]; then
 	out=$2 pkg=$3 list=$2/build/packages-file-list.txt
 	[ -f "$list" ] || exit 0
-	grep "^$pkg," "$list" | cut -d, -f2- | while read -r f; do
+	# only the files no other package installed too (alsa-lib and alsa-utils
+	# both bring /usr/share/alsa/*.conf): the other one stays and is not
+	# installed again. Buildroot keeps the list from the last target-finalize;
+	# a package rebuilt by hand (X-rebuild, X-reinstall) has an empty one
+	# until its next configure, so its files are not found then.
+	awk -F, -v pkg="$pkg" '{ path = substr($0, length($1) + 2); owners[path]++;
+			if ($1 == pkg) mine[path] = 1 }
+		END { for (p in mine) if (owners[p] == 1) print p }' "$list" | while read -r f; do
 		[ -f "$out/target/$f" ] || [ -L "$out/target/$f" ] || continue
 		rm -f "$out/target/$f"
 	done
