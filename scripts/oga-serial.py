@@ -26,11 +26,11 @@ import gzip
 import hashlib
 import os
 import re
-import struct
 import sys
 import time
-import zlib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from devlib import KEYS, key_press, write_png
 try:
     import serial
 except ImportError:
@@ -38,14 +38,6 @@ except ImportError:
 
 PROMPT = re.compile(rb"[#$] $")
 B64_LINE = 76
-
-# gpio-keys codes from rk3326-odroid-go.dtsi
-KEYS = {
-    "up": 0x220, "down": 0x221, "left": 0x222, "right": 0x223,
-    "a": 0x131, "b": 0x130, "y": 0x134, "x": 0x133,   # BTN_EAST/SOUTH/WEST/NORTH
-    "l": 0x136, "r": 0x137,                           # BTN_TL/BTN_TR
-    **{"f%d" % i: 0x2bf + i for i in range(1, 7)},    # BTN_TRIGGER_HAPPY1..6
-}
 
 
 class Console:
@@ -126,14 +118,6 @@ class Console:
         return gzip.decompress(base64.b64decode(re.sub(rb"\s", b"", out)))
 
 
-def write_png(path, w, h, rgb):
-    raw = b"".join(b"\0" + rgb[y * w * 3:(y + 1) * w * 3] for y in range(h))
-    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-                + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
-
-
 def screenshot(con, path):
     st, info = con.sh("cat /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/bits_per_pixel "
                       "/sys/class/graphics/fbcon/rotate 2>/dev/null")
@@ -158,9 +142,7 @@ def keys(con, names, delay):
         codes = [KEYS[n.lower()] for n in names]
     except KeyError as e:
         sys.exit("oga-serial: unknown button %s, known: %s" % (e, " ".join(KEYS)))
-    # struct input_event on arm64: timeval (16), u16 type, u16 code, s32 value
-    ev = lambda t, c, v: b"\0" * 16 + struct.pack("<HHi", t, c, v)
-    data = b"".join(ev(1, c, 1) + ev(0, 0, 0) + ev(1, c, 0) + ev(0, 0, 0) for c in codes)
+    data = b"".join(key_press(c) for c in codes)
     con.heredoc_cmd(data, "cat > /tmp/.oga-keys")
     st, out = con.sh(
         "for d in /sys/class/input/event*; do [ \"$(cat $d/device/name)\" = gpio-keys ] && dev=/dev/input/${d##*/}; done; "

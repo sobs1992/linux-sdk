@@ -68,7 +68,7 @@ BASE = "/data/doom3/base"
 QLOG = BASE + "/qconsole.log"
 BLOG = "/var/log/bare_app.log"
 TEST_ARGS = "+set com_cmdFile cmd.cfg +set logFile 2"
-TARGET = os.path.join(SDK, "output/ogu/buildroot/target")
+TARGET = os.path.join(ogu.OUT, "buildroot", "target")
 FILES = {"engine": "/usr/lib/rbdoom3bfg/RBDoom3BFG",
          "sdl2": "/usr/lib/libSDL2-2.0.so.0.3200.10",
          "gallium": "/usr/lib64/libgallium-25.0.7.so"}
@@ -385,8 +385,8 @@ def need_helper(name):
     cc = ogu.CC
     if not os.path.exists(cc):
         raise RuntimeError("no ogu toolchain (%s) for /root/%s" % (cc, name))
-    src = os.path.join(SDK, "output/ogu/%s.c" % name)
-    out = os.path.join(SDK, "output/ogu/%s" % name)
+    src = os.path.join(ogu.OUT, "%s.c" % name)
+    out = os.path.join(ogu.OUT, name)
     with open(src, "w") as f:
         f.write(HELPERS[name])
     subprocess.run([cc, "-O2", "-s", "-Wall", "-o", out, src], check=True)

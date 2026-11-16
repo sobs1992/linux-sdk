@@ -32,23 +32,20 @@ a cable between two machines: the key is neither checked nor remembered.
 """
 import os
 import shlex
-import struct
 import subprocess
 import sys
-import zlib
 
-SDK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import devlib
+from devlib import KEYS, SDK, input_event as event
+
 HOST = "root@" + os.environ.get("OGU_HOST", "192.168.7.2")
 SSH = ["ssh", "-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no",
        "-o", "LogLevel=ERROR", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", HOST]
 HOLD = "/tmp/ogu-hold"
-CC = os.path.join(SDK, "output/ogu/buildroot/host/bin/aarch64-buildroot-linux-gnu-gcc")
+OUT = devlib.output("ogu")		# the firmware's build output (OUTPUT_DIR)
+CC = devlib.toolchain_cc("ogu")
 
-# gpio-keys codes from meson-g12b-odroid-go-ultra.dts
-KEYS = {"up": 0x220, "down": 0x221, "left": 0x222, "right": 0x223,
-        "a": 0x131, "b": 0x130, "x": 0x133, "y": 0x134,      # BTN_EAST/SOUTH/NORTH/WEST
-        "l": 0x136, "r": 0x137, "l2": 0x138, "r2": 0x139,
-        **{"f%d" % i: 0x2bf + i for i in range(1, 7)}}       # BTN_TRIGGER_HAPPY1..6
 # evdev device variable, (code, min, max) of X and Y: the dts ranges, up/left the minimum
 STICKS = {"stick": ("L", (0, 700, 2900), (1, 950, 3150)),
           "rstick": ("R", (3, 800, 3000), (4, 950, 3150))}
@@ -79,21 +76,9 @@ def ssh(cmd, data=None):
     return r.stdout
 
 
-def event(type_, code, value):
-    # struct input_event on arm64: timeval (16), u16 type, u16 code, s32 value
-    return b"\0" * 16 + struct.pack("<HHi", type_, code, value)
-
-
 def shot(path):
     ppm = ssh("kill -USR1 $(pidof bare_app) && sleep 0.7 && cat /tmp/bare_app.ppm")
-    end = ppm.index(b"\n255\n")
-    w, h = map(int, ppm[:end].split()[-2:])
-    px = ppm[end + 5:]
-    raw = b"".join(b"\0" + px[y * w * 3:(y + 1) * w * 3] for y in range(h))
-    chunk = lambda t, b: struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b))
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
-                chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    w, h = devlib.ppm_to_png(ppm, path)
     print("%s: %dx%d" % (path, w, h))
 
 
@@ -102,7 +87,7 @@ def need_hold():
         return
     if not os.path.exists(CC):
         die("no ogu toolchain (%s): run 'make FW=ogu rootfs'" % CC)
-    out = os.path.join(SDK, "output/ogu/ogu-hold")
+    out = os.path.join(OUT, "ogu-hold")
     subprocess.run([CC, "-O2", "-s", "-Wall", "-o", out, os.path.join(SDK, "scripts/ogu-hold.c")], check=True)
     with open(out, "rb") as f:
         ssh("cat > %s && chmod 755 %s" % (HOLD, HOLD), f.read())

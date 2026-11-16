@@ -108,6 +108,7 @@ scripts/homm3-install.sh       данные Героев III и моды VCMI (H
 scripts/halflife-install.sh    файлы Half-Life (valve, valve_russian) на раздел GAMES (с ПК или по SSH)
 scripts/games-image.py         карта игр или полный образ с играми по манифесту (games/games.manifest)
 scripts/game_pictures.py       обложки игр из .lod/.wad/.exe/.bik (для games-image.py)
+scripts/devlib.py              общее для инструментов плат: пути output/, коды кнопок, события, PNG
 scripts/oga-serial.py          плата по UART: команды, файлы, кнопки, снимок (GO Advance)
 scripts/ogu-ctl.py             плата по ssh: кнопки, снимок, запуск игры, клики (GO Ultra)
 scripts/doom3-test.py          автоматический прогон DOOM 3 BFG на GO Ultra
