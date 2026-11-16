@@ -116,4 +116,29 @@
 
 ## Выполнение
 
-(заполняется по шагам)
+### Шаг 1 — Makefile (коммит `c7a9610`)
+
+- Штампы входов пишутся только при загруженном конфиге (`FW_CONFIG`), а не
+  при любом непустом `FW`; `make -n ogu_defconfig` больше не обнуляет их.
+- `make <fw>_defconfig <что-то ещё>` — ошибка с подсказкой.
+- `.NOTPARALLEL`: компоненты по очереди, каждый со своим `-j$(JOBS)`.
+- Проверка: `make FW=x info` и dry-run `uboot linux rootfs image flash` для
+  пяти прошивок — вывод до и после совпадает побайтно.
+- `amlogic-fip.sh` оставлен как есть: его список файлов — это требование
+  процедуры упаковки (`--ddrfw1..8` по именам), а `AML_FIP_FILES` — что
+  скачать; проверка в скрипте как раз сверяет одно с другим.
+
+### Шаг 2 — умолчания и конфиги
+
+- Makefile задаёт умолчания (`?=`): `BOARD_DIR=board/$(FW)` (до включения
+  конфига — конфиги раскрывают его сразу), `TFA/UBOOT/LINUX/BUILDROOT_SRC`,
+  `BUILDROOT_EXTERNAL`, `BUILDROOT_DEFCONFIG`, `IMAGE_NAME=$(FW)`,
+  `IMAGE_ROOTFS_FREE_MB=256`. Из пяти конфигов ушло 41 одинаковых строк;
+  умолчания описаны в шапке `oga_defconfig` (на него ссылаются остальные).
+- Удалены строки без эффекта: `BR2_PACKAGE_KMOD_TOOLS=y` (все платы),
+  `# CONFIG_RPMSG is not set` (oga, ogu); исправлены устаревшие комментарии
+  `oga_defconfig` (данные Героев, кодер H.264).
+- Проверка: dry-run пяти прошивок совпадает; `linux-configure` и
+  `rootfs-configure` для oga и ogu — `.config` ядра идентичны, `.config`
+  Buildroot отличаются только строкой `BR2_EXTERNAL_SDK_VERSION`
+  (`git describe`) и комментарием Kconfig; предупреждение про RPMSG исчезло.

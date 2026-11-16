@@ -16,11 +16,9 @@
 #
 # See configs/oga_defconfig for the meaning of the variables.
 
-BOARD_DIR     := board/ogu
 CROSS_COMPILE := aarch64-linux-gnu-
 
 # --- U-Boot ---
-UBOOT_SRC       := src/u-boot
 UBOOT_DEFCONFIG := odroid-go-ultra_defconfig
 UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/ogu.config
 # U-Boot patches (*.patch, in name order), applied to a copy of UBOOT_SRC:
@@ -41,7 +39,6 @@ AML_FIP_FILES  := aml_encrypt_g12b bl2.bin acs.bin bl30.bin bl301.bin bl31.img \
 AML_FIP_HASH   := $(BOARD_DIR)/fip/amlogic-boot-fip.sha256
 
 # --- Linux ---
-LINUX_SRC       := src/linux
 LINUX_ARCH      := arm64
 LINUX_IMAGE     := Image
 LINUX_DEFCONFIG := defconfig
@@ -57,10 +54,7 @@ LINUX_EXT_MODULES := $(BOARD_DIR)/linux/meson-venc
 # instead of hanging until the power key is held.
 LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet panic=10
 
-# --- Root filesystem (Buildroot) ---
-BUILDROOT_SRC       := src/buildroot
-BUILDROOT_EXTERNAL  := board/common/buildroot
-BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+# --- Root filesystem (Buildroot): $(BOARD_DIR)/buildroot/defconfig ---
 
 # --- Applications (apps/, see "make apps-list") ---
 # Built into the rootfs; the board's Buildroot defconfig does not list them
@@ -84,14 +78,12 @@ APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,
 #          u-boot.bin, Image, dtbs, extlinux][p2 ext4 rootfs]
-IMAGE_NAME := ogu
 IMAGE_RAW      := $(IMAGES_DIR)/u-boot-fip.bin@1
 IMAGE_MBR_CODE := $(IMAGES_DIR)/u-boot-fip-mbr.bin
 IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
 # U-Boot builds fdtfile as amlogic/<name>.dtb
 IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB   := 128
-IMAGE_ROOTFS_FREE_MB := 256
 # Data partition, made on the first boot: p3 ext4 "data" on /data to the
 # end of the disk (saves, settings, Wine prefixes, the hibernation file).
 # The rootfs (p2 from 144 MiB) must end before p3: up to 2 GiB, room for

@@ -5,16 +5,23 @@
 # Paths are relative to the SDK root. *_DEFCONFIG is either an in-tree
 # defconfig name or a path to a defconfig file (anything containing '/').
 # $(IMAGES_DIR) and $(LINUX_INSTALL) point to this firmware's build outputs.
+#
+# Set by the Makefile unless the config says otherwise:
+#   BOARD_DIR            board/<fw>       the board's files
+#   TFA_SRC, UBOOT_SRC, LINUX_SRC, BUILDROOT_SRC   src/<component>
+#   BUILDROOT_EXTERNAL   board/common/buildroot    the SDK's BR2_EXTERNAL
+#   BUILDROOT_DEFCONFIG  $(BOARD_DIR)/buildroot/defconfig
+#   LINUX_ARCH, LINUX_IMAGE   arm64, Image
+#   IMAGE_NAME           <fw>             images/<fw>.img
+#   IMAGE_ROOTFS_FREE_MB 256              free space on top of the rootfs
+#   IMAGE_DTB_LAYOUT     tree             dtbs in BOOT as vendor/<name>.dtb
 
-BOARD_DIR     := board/oga
 CROSS_COMPILE := aarch64-linux-gnu-
 
 # --- Trusted Firmware-A (BL31) ---
-TFA_SRC  := src/tf-a
 TFA_PLAT := px30
 
 # --- U-Boot ---
-UBOOT_SRC       := src/u-boot
 UBOOT_DEFCONFIG := odroid-go2_defconfig
 UBOOT_FRAGMENTS := $(BOARD_DIR)/u-boot/oga.config
 # "tf-a" builds BL31 from TFA_SRC; otherwise a path to a bl31 ELF,
@@ -35,7 +42,6 @@ RKBIN_DIR     := $(BOARD_DIR)/rkbin
 RK_TRUST_BL31 := $(BOARD_DIR)/rkbin/bin/rk3326_bl31_v1.34.elf
 
 # --- Linux ---
-LINUX_SRC       := src/linux
 LINUX_ARCH      := arm64
 LINUX_IMAGE     := Image
 LINUX_DEFCONFIG := defconfig
@@ -50,10 +56,7 @@ LINUX_EXT_MODULES := $(BOARD_DIR)/linux/esp8089 \
                      $(BOARD_DIR)/linux/rk-vepu-h264
 LINUX_CMDLINE   :=rootwait rw console=ttyS2,115200n8 console=tty1 fbcon=rotate:3 consoleblank=0 quiet
 
-# --- Root filesystem (Buildroot) ---
-BUILDROOT_SRC       := src/buildroot
-BUILDROOT_EXTERNAL  := board/common/buildroot
-BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+# --- Root filesystem (Buildroot): $(BOARD_DIR)/buildroot/defconfig ---
 
 # --- Applications (apps/, see "make apps-list") ---
 # Built into the rootfs; the board's Buildroot defconfig does not list them
@@ -63,17 +66,17 @@ APPS           := bare-app oga-pad
 APPS_AUTOSTART := bare-app
 # Package options, package.OPTION=value: bare_app's own Kconfig defconfig
 # (Doom is GAME_DOOM there); DOOM_WAD installs the shareware doom1.wad;
-# HOMM3 adds the Heroes III engine VCMI (game data goes to /data/vcmi);
-# HALFLIFE adds Xash3D FWGS + hlsdk-portable + Mesa panfrost (data: /games/halflife)
-# STREAM: the screen over RTSP (rtsp://<address>:8554/live), H.264 by
-# OpenH264 (the PX30's VPU encodes JPEG only)
+# HOMM3 adds the Heroes III engine VCMI (game data on /games/heroes3,
+# saves and settings on /data); HALFLIFE adds Xash3D FWGS + hlsdk-portable
+# + Mesa panfrost (data: /games/halflife); STREAM: the screen over RTSP
+# (rtsp://<address>:8554/live), H.264 by the PX30's encoder (the kernel
+# module rk-vepu-h264 of LINUX_EXT_MODULES), OpenH264 without it
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.STREAM=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]
 #         [uboot.img @8M][trust.img @12M][p1 FAT32 BOOT @16M][p2 ext4 rootfs]
-IMAGE_NAME := oga
 # Raw blobs below 16M: file@sector
 IMAGE_RAW  := $(IMAGES_DIR)/u-boot-rockchip.bin@64
 ifeq ($(RK_LEGACY),y)
@@ -82,8 +85,6 @@ endif
 # U-Boot builds fdtfile as rockchip/<name>.dtb
 IMAGE_DTB_LAYOUT := tree
 IMAGE_BOOT_SIZE_MB  := 128
-# Free space added on top of the rootfs contents
-IMAGE_ROOTFS_FREE_MB := 256
 # Data partitions, not in the image: the board creates them on the first
 # boot and finds them again after "make flash", so their contents survive
 # reflashing. p3 ext4 "data" on /data (saved games, settings) from here,

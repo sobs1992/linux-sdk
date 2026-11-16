@@ -7,16 +7,13 @@
 #
 # See configs/oga_defconfig for the meaning of the variables.
 
-BOARD_DIR     := board/bbb
 CROSS_COMPILE := arm-linux-gnueabihf-
 
 # --- U-Boot ---
-UBOOT_SRC       := src/u-boot
 UBOOT_DEFCONFIG := am335x_evm_defconfig
 UBOOT_IMAGES    := MLO u-boot.img
 
 # --- Linux ---
-LINUX_SRC       := src/linux
 LINUX_ARCH      := arm
 LINUX_IMAGE     := zImage
 LINUX_DEFCONFIG := omap2plus_defconfig
@@ -27,19 +24,14 @@ LINUX_DTBS      := ti/omap/am335x-boneblack.dtb \
                    ti/omap/am335x-bonegreen-wireless.dtb
 LINUX_CMDLINE   := rootwait rw console=tty1 console=ttyS0,115200n8
 
-# --- Root filesystem (Buildroot) ---
-BUILDROOT_SRC       := src/buildroot
-BUILDROOT_EXTERNAL  := board/common/buildroot
-BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+# --- Root filesystem (Buildroot): $(BOARD_DIR)/buildroot/defconfig ---
 
 # --- Applications (apps/, see "make apps-list"): APPS, APPS_AUTOSTART, APPS_CONFIG ---
 APPS :=
 
 # --- SD card image ---
 # Layout: [MBR][p1 FAT32 BOOT @16M: MLO, u-boot.img, zImage, dtbs][p2 ext4 rootfs]
-IMAGE_NAME       := bbb
 IMAGE_BOOT_FILES := $(IMAGES_DIR)/MLO $(IMAGES_DIR)/u-boot.img
 IMAGE_DTB_LAYOUT := flat
 IMAGE_BOOT_SIZE_MB   := 64
-IMAGE_ROOTFS_FREE_MB := 256
 IMAGE_DISK_ID        := 0x42424231

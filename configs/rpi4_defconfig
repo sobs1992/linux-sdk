@@ -5,11 +5,9 @@
 #
 # See configs/oga_defconfig for the meaning of the variables.
 
-BOARD_DIR     := board/rpi4
 CROSS_COMPILE := aarch64-linux-gnu-
 
 # --- U-Boot ---
-UBOOT_SRC       := src/u-boot
 UBOOT_DEFCONFIG := rpi_4_defconfig
 UBOOT_IMAGES    := u-boot.bin
 
@@ -20,7 +18,6 @@ BOOTFW_FILES := start4.elf fixup4.dat LICENCE.broadcom
 BOOTFW_HASH  := board/common/rpi-firmware.sha256
 
 # --- Linux ---
-LINUX_SRC       := src/linux
 LINUX_ARCH      := arm64
 LINUX_IMAGE     := Image
 LINUX_DEFCONFIG := defconfig
@@ -30,10 +27,7 @@ LINUX_DTBS      := broadcom/bcm2711-rpi-4-b.dtb \
                    broadcom/bcm2711-rpi-cm4-io.dtb
 LINUX_CMDLINE   := rootwait rw console=tty1 console=ttyS1,115200n8
 
-# --- Root filesystem (Buildroot) ---
-BUILDROOT_SRC       := src/buildroot
-BUILDROOT_EXTERNAL  := board/common/buildroot
-BUILDROOT_DEFCONFIG := $(BOARD_DIR)/buildroot/defconfig
+# --- Root filesystem (Buildroot): $(BOARD_DIR)/buildroot/defconfig ---
 
 # --- Applications (apps/, see "make apps-list"): APPS, APPS_AUTOSTART, APPS_CONFIG ---
 APPS :=
@@ -41,11 +35,9 @@ APPS :=
 # --- SD card image ---
 # Layout: [MBR][p1 FAT32 BOOT @16M: firmware, config.txt, u-boot.bin,
 #          Image, dtbs][p2 ext4 rootfs]
-IMAGE_NAME := rpi4
 IMAGE_BOOT_FILES := $(addprefix $(IMAGES_DIR)/,$(BOOTFW_FILES) u-boot.bin) \
                     $(BOARD_DIR)/boot/config.txt
 # U-Boot wants broadcom/<model>.dtb, the firmware wants <model>.dtb in the root
 IMAGE_DTB_LAYOUT := both
 IMAGE_BOOT_SIZE_MB   := 128
-IMAGE_ROOTFS_FREE_MB := 256
 IMAGE_DISK_ID        := 0x52504934

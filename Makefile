@@ -34,6 +34,8 @@ FW ?= $(shell cat $(OUTPUT_DIR)/.fw 2>/dev/null)
 OUT           := $(OUTPUT_DIR)/$(FW)
 IMAGES_DIR    := $(OUT)/images
 LINUX_INSTALL := $(OUT)/linux-install
+# The board's files, unless the config names another directory
+BOARD_DIR     ?= board/$(FW)
 
 FW_DEFCONFIGS := $(notdir $(wildcard $(SDK_DIR)/configs/*_defconfig))
 
@@ -63,8 +65,18 @@ cfgpath = $(if $(findstring /,$(1)),$(call sdkpath,$(1)),$(1))
 # "path<sep>suffix" -> "/abs/path<sep>suffix" ($(1)=list $(2)=separator)
 sdkpath-pairs = $(foreach e,$(1),$(call sdkpath,$(firstword $(subst $(2), ,$(e))))$(if $(findstring $(2),$(e)),$(2)$(lastword $(subst $(2), ,$(e)))))
 
+# Defaults a firmware config may leave out (BOARD_DIR above: the configs
+# expand it at once)
+TFA_SRC            ?= src/tf-a
+UBOOT_SRC          ?= src/u-boot
+LINUX_SRC          ?= src/linux
+BUILDROOT_SRC      ?= src/buildroot
+BUILDROOT_EXTERNAL ?= board/common/buildroot
+BUILDROOT_DEFCONFIG ?= $(BOARD_DIR)/buildroot/defconfig
 LINUX_ARCH  ?= arm64
 LINUX_IMAGE ?= Image
+IMAGE_NAME  ?= $(FW)
+IMAGE_ROOTFS_FREE_MB ?= 256
 
 TFA_SRC   := $(call sdkpath,$(TFA_SRC))
 UBOOT_SRC := $(call sdkpath,$(UBOOT_SRC))
