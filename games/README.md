@@ -98,6 +98,11 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
 
 ## Игры
 
+Описание каждой игры (`wine.ini`, `game.ini`) лежит на карте в каталоге игры — из
+`games/<id>/overlay` или `apps/bare_app/ports/wine/wine.ini`; в rootfs только движки.
+bare_app показывает лишь игры, файлы которых есть, и сам перестраивает меню, когда
+карта или каталоги игр меняются: после `games-image.py` перезагружать плату не нужно.
+
 - **heroes3** — Heroes III: `Data`, `Maps`, `MP3` установки и моды VCMI (HotA,
   русский перевод) через `scripts/homm3-install.sh`.
 - **hota** — та же установка Heroes III: Horn of the Abyss целиком, оригинальная
@@ -141,11 +146,22 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
 
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
-  6,4 ГБ.
+  6,4 ГБ; `doom3/overlay/game.ini` — пункт меню (движок в rootfs).
 - **rtcw** — Return to Castle Wolfenstein под iortcw (одиночная игра): из `Main/`
   установки только `pak0.pk3`, `sp_pak*.pk3` патча 1.41 и `z_*.pk3` перевода в
-  `rtcw/main/`; движок и `gamepad.cfg` — в rootfs (пакет `iortcw`, его `rtcw.ini` —
-  пункт меню). Обложка — значок exe.
+  `rtcw/main/`; движок и `gamepad.cfg` — в rootfs (пакет `iortcw`), пункт меню —
+  `rtcw/overlay/game.ini`. Обложка — значок exe.
+- **ut2004** — Unreal Tournament 2004 со своего DVD (`.iso`) и Linux-патча 3369-2 в
+  `${installers}/UT2004`: ставит `scripts/ut2004-install.py` (`install = ut2004`,
+  английский, x86_64-программы, `.uz2` распакованы, ~5,3 ГБ); исполняет Box64
+  (пакеты `box64`, `sdl12-compat`, стартер `ut2004`: `bare-app.UT2004=y`). В
+  `ut2004/overlay/` — `game.ini` (стики — джойстик игры, кнопки — клавиши) и
+  `bare_app/UT2004.ini`, `User.ini` — настройки, которые стартер накладывает на
+  `Default*.ini` при первом запуске. Обложка — логотип установщика
+  (`cover = game:Help/UT2004Logo.bmp`). **Нужен CD-ключ своей копии**: допишите
+  `--cdkey KEY` в `options` (без него игра выходит сразу после запуска рендера).
+  Образ в `/media/D/Games/Install/UT2004` — сцен-рип (каталоги `DEViANCE/Crack`,
+  `Keygen`): ими не пользоваться.
 - **neighbours**, **neighbours2** — Neighbours from Hell 1 и 2 (Wine): игра 800×600,
   показываются верхние 480 строк 1:1 (`rows = 480` в `wine.ini`), интерфейс
   перекладывает `neighbours*/prepare.sh`; подробности в `apps/bare_app/README.md`.

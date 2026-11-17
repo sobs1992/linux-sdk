@@ -150,18 +150,18 @@ scripts/ogu-ctl.py wfmove:400,240 wclick wkey:esc quit-game
 <li>Пакет <code>board/common/buildroot/package/&lt;pkg&gt;/</code>: <code>Config.in</code>, <code>&lt;pkg&gt;.mk</code>,
    <code>&lt;pkg&gt;.hash</code>, патчи; <code>source</code> в <code>board/common/buildroot/Config.in</code>. Зависимости
    от Mesa объявлять в самом пакете (<code>iortcw</code> когда-то полагался на <code>bare-app.mk</code>).</li>
-<li><code>&lt;pkg&gt;.ini</code> рядом с пакетом, его ставит сам пакет хуком:
-   <code>make
-   define MYGAME_POST_INSTALL_TARGET_INI
-    $(INSTALL) -D -m 0644 $(MYGAME_PKGDIR)/mygame.ini \
-        $(TARGET_DIR)/usr/share/bare_app/games/mygame.ini
-   endef
-   MYGAME_POST_INSTALL_TARGET_HOOKS += MYGAME_POST_INSTALL_TARGET_INI</code></li>
+<li>Описание — <code>games/&lt;id&gt;/overlay/game.ini</code> в SDK, а не в пакете: его кладёт на
+   карту вместе с файлами игры <code>scripts/games-image.py</code> (<code>overlay = games/&lt;id&gt;/overlay</code>
+   в секции манифеста). Так пункт меню появляется и пропадает вместе с игрой, а
+   исправить описание можно без нового rootfs. Пути в нём — относительно каталога
+   игры: <code>needs = base/data.pak</code>, <code>args = --data {dir}</code>. (Игра, целиком лежащая в
+   образе, может ставить <code>&lt;pkg&gt;.ini</code> в <code>/usr/share/bare_app/games/</code> хуком пакета;
+   описание с тем же именем на карте всё равно главнее.)</li>
 <li>Опция <code>BR2_PACKAGE_BARE_APP_&lt;GAME&gt;</code> в <code>package/bare-app/Config.in</code> с
    <code>depends on BR2_PACKAGE_BARE_APP_SDL</code> и <code>select BR2_PACKAGE_&lt;PKG&gt;</code>.</li>
 <li><code>APPS_CONFIG += bare-app.&lt;GAME&gt;=y</code>, <code>make rootfs</code>.</li>
 <li>Секция в манифесте с файлами игры (<code>install = none</code> + <code>file = … -&gt; main/</code>,
-   как у <code>[rtcw]</code>), <code>needs</code> в ini указывает на них, <code>cover = /games/&lt;id&gt;/cover.png</code>.</li>
+   как у <code>[rtcw]</code>), <code>overlay</code> с <code>game.ini</code>, <code>cover</code> — картинка для <code>cover.png</code>.</li>
 </ol>
 <p>В <code>game.ini</code>: <code>keys</code> — для игр без контроллера SDL; <code>gamepad</code> — если движок ждёт
 другую раскладку (<code>f1=start, f4=back</code>); <code>scale = fit</code>; <code>fps = 0</code>, если движок
@@ -170,9 +170,28 @@ software</code> (на OGA чтение кадров GPU медленнее, че
 <code>SDL_LOGGING = video=debug</code> для отладки драйвера. <strong>Не ставьте</strong> <code>SDL_VIDEODRIVER</code>.</p>
 <p>Проверка без перепрошивки:</p>
 <pre><code class="language-sh">T=output/ogu/buildroot/target
-tar -C $T -cf - usr/bin/mygame usr/share/bare_app/games/mygame.ini | ssh root@192.168.7.2 'tar -C / -xf -'
+tar -C $T -cf - usr/bin/mygame | ssh root@192.168.7.2 'tar -C / -xf -'
+tar -C games/mygame/overlay -cf - . | ssh root@192.168.7.2 \
+    'mount -o remount,rw /games &amp;&amp; tar -C /games/mygame -xf - &amp;&amp; mount -o remount,ro /games'
 scripts/ogu-ctl.py launch:&quot;My Game&quot; wait:20000 shot:/tmp/s.png
 </code></pre>
+<p>Главный экран заметит новую игру сам (каталоги игр проверяются раз в 2 секунды).</p>
+<h3 id="b3-linux-x86_64-box64-ut2004">B3. Linux-игра x86_64 под Box64 (UT2004)</h3>
+<p>Старые Linux-порты (Loki, icculus) — x86/x86_64 на SDL 1.2. Их запускает Box64
+(пакет <code>box64</code>), SDL 1.2 даёт <code>sdl12-compat</code> поверх SDL2 с драйвером <code>bareapp</code>,
+OpenAL и GL Box64 берёт системные. Нужно:</p>
+<ol>
+<li>пакет-стартер (как <code>package/ut2004</code>): скрипт в <code>/usr/bin</code> с HOME в <code>/data/&lt;id&gt;</code>,
+   <code>SDL_VIDEO_GL_DRIVER=libEGL.so.1</code>, <code>BOX64_PREFER_WRAPPED=1</code> (игра может звать
+   свою <code>./libSDL-1.2.so.0</code> — её не ставить), файл OpenAL Soft с устройством из
+   <code>AUDIODEV</code>; опция <code>bare-app.&lt;GAME&gt;=y</code> с <code>select BR2_PACKAGE_BOX64</code>,
+   <code>BR2_PACKAGE_SDL12_COMPAT</code>, <code>BR2_PACKAGE_OPENAL</code>;</li>
+<li>установщик или секция манифеста с файлами игры, <code>game.ini</code> в overlay;</li>
+<li>управление: если у игры есть свой джойстик SDL 1.2 — стики через него (оси
+   SDL идут по порядку: левый X/Y, правый X/Y, триггеры), кнопки — клавишами через
+   <code>keys</code>, а <code>gamepad = … =none</code> убирает их из джойстика, чтобы не было двойных
+   нажатий.</li>
+</ol>
 <h3 id="b3">B3. Готовая программа на карте, без пакета</h3>
 <pre><code>/games/mygame/
     game.ini        exe = mygame, dir = {dir}, needs = data

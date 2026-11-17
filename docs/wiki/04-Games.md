@@ -9,7 +9,7 @@
 | Путь | Для чего | Что связывает с bare_app | Код bare_app |
 |---|---|---|---|
 | **A. Windows-игра под Wine** (`wine.ini`) | x86-32 игры 1998–2010: D3D8/D3D9/DirectDraw, GDI | `bare_app_wine` (ports/wine) + драйвер `winebare.drv` внутри Wine | не меняется |
-| **B. SDL2-игра** (`game.ini`) | Linux-порты на SDL2: RBDOOM-3-BFG, iortcw, Chocolate Doom, своя программа | SDL2 SDK с драйверами `bareapp` (video + joystick) | не меняется |
+| **B. SDL2-игра** (`game.ini`) | Linux-порты на SDL2: RBDOOM-3-BFG, iortcw, Chocolate Doom, своя программа; Linux-игры x86_64 на SDL 1.2 под Box64 (UT2004) | SDL2 SDK с драйверами `bareapp` (video + joystick), для SDL 1.2 — sdl12-compat | не меняется |
 | **C. Свой движок** (`struct game_def`) | движок без SDL или с особым выводом: VCMI (лупа), Xash3D, Doom (doomgeneric) | патч движка с `game_ipc_client.h` + `src/games/<игра>.c` | один файл + строки |
 
 Пути A и B — без единой строки кода в лаунчере. Текущие игры:
@@ -21,6 +21,7 @@
 | Doom | C | doomgeneric (`bare_app_doom`) | `doom/*.wad` (иначе shareware из образа) | `doom/` |
 | DOOM 3 BFG | B | RBDOOM-3-BFG, `rbdoom3-bfg` | `doom3/base` | `doom3/` |
 | RTCW | B | iortcw, `iortcw` | `rtcw/main/*.pk3` | `rtcw/` |
+| Unreal Tournament 2004 | B | своя Linux-сборка x86_64 под Box64, `ut2004` (+ `box64`, `sdl12-compat`) | `ut2004/` (DVD + патч 3369) | `ut2004/.ut2004` |
 | Chocolate Doom | B | пакет Buildroot (в ogu выключен) | — | `chocolate-doom/` |
 | HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT | A | Wine 11.0 WoW64 + Box64 | `<id>/` с `wine.ini` | `wine/prefix`, `wine/games/<id>` |
 
@@ -33,7 +34,12 @@
 - **`/games/<id>`** — файлы игры, только чтение, с ПК по манифесту;
 - **`/data/<id>`** — HOME игры: сохранения, настройки (Wine: общий префикс
   `/data/wine/prefix` и копии «writable» в `/data/wine/games/<id>`);
-- **`cover.png`** в каталоге игры — обложка 240×240 для плитки.
+- **`cover.png`** в каталоге игры — обложка 240×240 для плитки;
+- **описание** (`wine.ini`, `game.ini`) — тоже в каталоге игры на карте: в образе
+  только движки, поэтому новая игра или исправленное описание не требуют нового
+  rootfs. Игры без файлов в меню не показываются, а пока открыт главный экран,
+  bare_app раз в 2 секунды смотрит на каталоги игр и перестраивает меню, когда
+  карту вставили, вынули или на неё скопировали игру.
 
 `<id>` — имя каталога, оно же имя каталога данных, оно же входит в ключ настроек
 управления. После первого запуска его лучше не менять.
@@ -122,17 +128,18 @@ SDL2 в образе собран с драйверами `bareapp` (патч `p
   поддержки контроллера. Linux-драйвер джойстика выключается, чтобы те же evdev
   не читались дважды.
 
-Пункт меню появляется для каждого `/usr/share/bare_app/games/<игра>.ini` (так
-ставит пакет) и `/games/<игра>/game.ini` (так приходит игра с ПК). Формат с
-комментариями — [apps/bare_app/docs/game.ini](../../apps/bare_app/docs/game.ini);
-пример из образа — `board/common/buildroot/package/rbdoom3-bfg/doom3.ini`:
+Пункт меню появляется для каждого `/games/<игра>/game.ini` (игра на карте вместе
+с описанием: SDK кладёт его из `games/<игра>/overlay`, даже когда движок — пакет
+образа) и `/usr/share/bare_app/games/<игра>.ini` (игра целиком в образе); одно имя —
+один пункт, описание на карте главнее. Формат с комментариями —
+[apps/bare_app/docs/game.ini](../../apps/bare_app/docs/game.ini); пример —
+`games/doom3/overlay/game.ini` (относительные пути — от каталога игры):
 
 ```ini
 name = DOOM 3 BFG Edition
 exe = /usr/bin/rbdoom3bfg
-args = +set fs_basepath /games/doom3 +set fs_savepath {data} +set r_fullscreen 1 +set r_vidMode -1 +set r_customWidth {width} +set r_customHeight {height}
-needs = /games/doom3/base/_common.resources
-cover = /games/doom3/cover.png
+args = +set fs_basepath {dir} +set fs_savepath {data} +set r_fullscreen 1 +set r_vidMode -1 +set r_customWidth {width} +set r_customHeight {height}
+needs = base/_common.resources
 gamepad = f1=start, f2=none, f3=none, f4=back
 keys = f2=F9, f3=F5
 hint.ru = R1  огонь    L1  перезарядка  ...  F5  свернуть    F6 (держать)  выйти
@@ -144,8 +151,39 @@ SDL_BAREAPP_GL_ASYNC = 1
 ```
 
 Подстановки в `args`, `dir`, `[env]`: `{width}`, `{height}`, `{lang}`, `{data}`,
-`{dir}`. `needs` — файл, без которого плитка пишет «Не найдено: …». SDL2-играм
-bare_app сам ставит `PAN_MESA_DEBUG=noafbc`.
+`{dir}`. `needs` — файл, без которого игры нет в меню. SDL2-играм bare_app сам
+ставит `PAN_MESA_DEBUG=noafbc`.
+
+### Linux-игры x86_64: Unreal Tournament 2004 под Box64
+
+![UT2004: заставка](img/shots/ut2004-splash.png)
+*Unreal Tournament 2004 (своя Linux-сборка, патч 3369) под Box64: заставка SDL 1.2 через sdl12-compat и драйвер `bareapp`.*
+
+У UT2004 есть родная Linux-версия (DVD + патч 3369-2 с x86_64-бинарником
+`ut2004-bin-linux-amd64`), поэтому Wine не нужен:
+
+- **Box64** (пакет `box64`, тот же коммит, что и wowbox64; сборка `ODROIDN2`) исполняет
+  x86_64-код, а libc, libm, SDL 1.2, OpenAL, GL подменяет родными aarch64-библиотеками.
+  Старый C++-рантайм игры `libstdc++.so.5` (x86_64) берётся из `x64lib` Box64
+  (`/usr/lib/box64-x86_64-linux-gnu`);
+- **SDL 1.2** — `sdl12-compat` поверх SDL2 с драйвером `bareapp`; патч 0001 просит
+  настольный OpenGL там, где SDL2 по умолчанию даёт GLES, патч 0002 держит
+  GL-библиотеку, уже загруженную окном заставки (иначе указатели на функции GL,
+  взятые игрой, повисали, и первый `glGetString` падал);
+- **запуск** — `/usr/bin/ut2004` (пакет `ut2004`): HOME в `/data/ut2004`, при первом
+  запуске `UT2004.ini`/`User.ini` из `Default*.ini` игры с наложенными
+  `bare_app/UT2004.ini` и `User.ini` с карты (джойстик, оси стиков, клавиши кнопок),
+  размер экрана — при каждом запуске, устройство OpenAL Soft — из `AUDIODEV`;
+- **установка** — `scripts/ut2004-install.py`: делает то же, что Linux-установщик
+  DVD (`setup.xml` внутри `linux-installer.sh`, без его запуска): базовые файлы,
+  один язык, распаковка `.uz2`, x86_64-программы, патч; в каталог карты или по ssh
+  потоком tar прямо на плату (5,3 ГБ, на ПК ничего не складывается).
+
+Стики — джойстик самой игры (левый: JoyX/JoyY — ходьба, правый: JoyZ/JoyR — обзор),
+кнопки — клавиши: R1 огонь, L1 альтернативный огонь, R2/L2 оружие, A прыжок и
+выбор в меню, B меню/назад, X присесть, Y действие. **Игре нужен CD-ключ**: без
+`System/cdkey` она выходит сразу после запуска рендера («Your CD key appears to be
+invalid»); ключ своей копии пишет `ut2004-install.py --cdkey KEY`.
 
 ## Путь C: свой движок
 
@@ -173,6 +211,7 @@ GLES офскрин на GO Ultra, программный на OGA — Cortex-A3
 `cover.png` делает `scripts/games-image.py` по ключу `cover` манифеста из
 картинки, записи `.lod`/`.wad` (`H3bitmap.lod:gamselb1.pcx`, `doom1.wad:TITLEPIC`),
 значка exe (`Game.exe:icon`) или кадра ролика (`intro.bik:4`, через ffmpeg);
+`game:PATH` — файл уже установленной игры (UT2004: `game:Help/UT2004Logo.bmp`);
 `cover_crop` режет в квадрат (`center|top|bottom|left|right|fit|"X Y SIZE"`),
 `cover_back` подкладывает размытый фон под значок. Делает всё `scripts/game_pictures.py`
 и PIL.

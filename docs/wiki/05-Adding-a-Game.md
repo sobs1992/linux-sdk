@@ -146,19 +146,18 @@ scripts/ogu-ctl.py wfmove:400,240 wclick wkey:esc quit-game
 1. Пакет `board/common/buildroot/package/<pkg>/`: `Config.in`, `<pkg>.mk`,
    `<pkg>.hash`, патчи; `source` в `board/common/buildroot/Config.in`. Зависимости
    от Mesa объявлять в самом пакете (`iortcw` когда-то полагался на `bare-app.mk`).
-2. `<pkg>.ini` рядом с пакетом, его ставит сам пакет хуком:
-   ```make
-   define MYGAME_POST_INSTALL_TARGET_INI
-   	$(INSTALL) -D -m 0644 $(MYGAME_PKGDIR)/mygame.ini \
-   		$(TARGET_DIR)/usr/share/bare_app/games/mygame.ini
-   endef
-   MYGAME_POST_INSTALL_TARGET_HOOKS += MYGAME_POST_INSTALL_TARGET_INI
-   ```
+2. Описание — `games/<id>/overlay/game.ini` в SDK, а не в пакете: его кладёт на
+   карту вместе с файлами игры `scripts/games-image.py` (`overlay = games/<id>/overlay`
+   в секции манифеста). Так пункт меню появляется и пропадает вместе с игрой, а
+   исправить описание можно без нового rootfs. Пути в нём — относительно каталога
+   игры: `needs = base/data.pak`, `args = --data {dir}`. (Игра, целиком лежащая в
+   образе, может ставить `<pkg>.ini` в `/usr/share/bare_app/games/` хуком пакета;
+   описание с тем же именем на карте всё равно главнее.)
 3. Опция `BR2_PACKAGE_BARE_APP_<GAME>` в `package/bare-app/Config.in` с
    `depends on BR2_PACKAGE_BARE_APP_SDL` и `select BR2_PACKAGE_<PKG>`.
 4. `APPS_CONFIG += bare-app.<GAME>=y`, `make rootfs`.
 5. Секция в манифесте с файлами игры (`install = none` + `file = … -> main/`,
-   как у `[rtcw]`), `needs` в ini указывает на них, `cover = /games/<id>/cover.png`.
+   как у `[rtcw]`), `overlay` с `game.ini`, `cover` — картинка для `cover.png`.
 
 В `game.ini`: `keys` — для игр без контроллера SDL; `gamepad` — если движок ждёт
 другую раскладку (`f1=start, f4=back`); `scale = fit`; `fps = 0`, если движок
@@ -170,9 +169,30 @@ software` (на OGA чтение кадров GPU медленнее, чем п�
 
 ```sh
 T=output/ogu/buildroot/target
-tar -C $T -cf - usr/bin/mygame usr/share/bare_app/games/mygame.ini | ssh root@192.168.7.2 'tar -C / -xf -'
+tar -C $T -cf - usr/bin/mygame | ssh root@192.168.7.2 'tar -C / -xf -'
+tar -C games/mygame/overlay -cf - . | ssh root@192.168.7.2 \
+    'mount -o remount,rw /games && tar -C /games/mygame -xf - && mount -o remount,ro /games'
 scripts/ogu-ctl.py launch:"My Game" wait:20000 shot:/tmp/s.png
 ```
+
+Главный экран заметит новую игру сам (каталоги игр проверяются раз в 2 секунды).
+
+### B3. Linux-игра x86_64 под Box64 (UT2004)
+
+Старые Linux-порты (Loki, icculus) — x86/x86_64 на SDL 1.2. Их запускает Box64
+(пакет `box64`), SDL 1.2 даёт `sdl12-compat` поверх SDL2 с драйвером `bareapp`,
+OpenAL и GL Box64 берёт системные. Нужно:
+
+1. пакет-стартер (как `package/ut2004`): скрипт в `/usr/bin` с HOME в `/data/<id>`,
+   `SDL_VIDEO_GL_DRIVER=libEGL.so.1`, `BOX64_PREFER_WRAPPED=1` (игра может звать
+   свою `./libSDL-1.2.so.0` — её не ставить), файл OpenAL Soft с устройством из
+   `AUDIODEV`; опция `bare-app.<GAME>=y` с `select BR2_PACKAGE_BOX64`,
+   `BR2_PACKAGE_SDL12_COMPAT`, `BR2_PACKAGE_OPENAL`;
+2. установщик или секция манифеста с файлами игры, `game.ini` в overlay;
+3. управление: если у игры есть свой джойстик SDL 1.2 — стики через него (оси
+   SDL идут по порядку: левый X/Y, правый X/Y, триггеры), кнопки — клавишами через
+   `keys`, а `gamepad = … =none` убирает их из джойстика, чтобы не было двойных
+   нажатий.
 
 ### B3. Готовая программа на карте, без пакета
 

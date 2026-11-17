@@ -109,6 +109,7 @@ scripts/homm3-install.sh       данные Героев III и моды VCMI (H
 scripts/halflife-install.sh    файлы Half-Life (valve, valve_russian) на раздел GAMES (с ПК или по SSH)
 scripts/games-image.py         карта игр или полный образ с играми по манифесту (games/games.manifest)
 scripts/game_pictures.py       обложки игр из .lod/.wad/.exe/.bik (для games-image.py)
+scripts/ut2004-install.py      Unreal Tournament 2004 с DVD (как его Linux-установщик) на карту или плату
 scripts/devlib.py              общее для инструментов плат: пути output/, коды кнопок, события, PNG
 scripts/oga-serial.py          плата по UART: команды, файлы, кнопки, снимок (GO Advance)
 scripts/ogu-ctl.py             плата по ssh: кнопки, снимок, запуск игры, клики (GO Ultra)
@@ -131,7 +132,7 @@ output/<fw>/                   результаты сборки прошивк�
 | [docs/adding-a-game.md](docs/adding-a-game.md) | как добавить игру или программу: три пути и где что лежит |
 | [docs/patches.md](docs/patches.md) | где лежат патчи ядра, U-Boot и пакетов, как их менять и что пересобирается |
 | [docs/boards/oga.md](docs/boards/oga.md) | ODROID-GO Advance: загрузка, быстрая загрузка, кодер H.264, UART, bare_app, Doom, Герои III |
-| [docs/boards/ogu.md](docs/boards/ogu.md) | ODROID-GO Ultra: FIP, eMMC, карта игр exFAT, быстрая загрузка, гибернация, часы, USB-сеть, Half-Life, RTCW |
+| [docs/boards/ogu.md](docs/boards/ogu.md) | ODROID-GO Ultra: FIP, eMMC, карта игр exFAT, быстрая загрузка, гибернация, часы, USB-сеть, Half-Life, RTCW, UT2004 (Box64) |
 | [docs/boards/bbb-rpi.md](docs/boards/bbb-rpi.md) | BeagleBone Black, Raspberry Pi 1 и 4 |
 | [docs/architecture-review-2026-11-16.md](docs/architecture-review-2026-11-16.md) | обзор архитектуры и журнал переделок ноября 2026 |
 | [docs/wiki/Home.md](docs/wiki/Home.md) | вики: устройство проекта со схемами и снимками экрана, как добавить игру, нюансы, инструменты; HTML — `docs/wiki/build-html.py` → `docs/wiki/html/` |

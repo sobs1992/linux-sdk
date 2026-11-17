@@ -345,7 +345,7 @@ scripts/halflife-install.sh ~/.steam/steam/steamapps/common/Half-Life 192.168.7.
 
 `APPS_CONFIG += bare-app.RTCW=y` (включено в `ogu_defconfig`) собирает пакет `iortcw`:
 движок [iortcw](https://github.com/iortcw/iortcw), одиночная игра, как SDL2-игра
-bare_app (`rtcw.ini` пакета `iortcw`). Рисует OpenGL 1 (контекст совместимости OpenGL 3.1 Mesa)
+bare_app (`game.ini` на карте рядом с игрой, из `games/rtcw/overlay` SDK). Рисует OpenGL 1 (контекст совместимости OpenGL 3.1 Mesa)
 через GPU, 60 кадров/с; HUD и прицел без растяжения на широком экране (`cg_fixedAspect 2`
 в `/usr/bin/iowolfsp`). Файлы игры в образ не входят: в `rtcw/main/` раздела GAMES
 нужны `pak0.pk3`, `sp_pak1.pk3`–`sp_pak4.pk3` (`sp_pak4` — патч 1.41) и pk3 перевода,
@@ -369,3 +369,23 @@ B — на уровень вверх (из панели настроек к вк
 ждёт щелчка по стрелке, начинается по A, катсцены пропускаются по A, B, F1. Патч SDL
 0005: после `vid_restart` (смена видеорежима) драйвер bareapp брал функции GL из
 выгруженной библиотеки и падал.
+
+## Unreal Tournament 2004 (Box64)
+
+`APPS_CONFIG += bare-app.UT2004=y` (включено в `ogu_defconfig`) собирает Box64
+(пакет `box64`: тот же коммит, что и wowbox64, сборка `ODROIDN2`, x86_64
+`libstdc++.so.5/.6` и `libgcc_s` из его `x64lib`, `/etc/box64.box64rc`),
+`sdl12-compat` 1.2.78 (SDL 1.2 поверх SDL2 с драйвером `bareapp`; патчи: настольный
+OpenGL вместо GLES по умолчанию, ссылка на уже загруженную GL-библиотеку) и стартер
+`/usr/bin/ut2004` (пакет `ut2004`). Игра — своя Linux-сборка x86_64 (патч 3369):
+`scripts/ut2004-install.py` ставит её с DVD на карту (`[ut2004]` манифеста или по ssh
+прямо на плату), с `game.ini` и настройками из `games/ut2004/overlay`. HOME игры —
+`/data/ut2004` (`.ut2004/System/UT2004.ini`, `User.ini`, сохранения, кэш).
+
+На плате поднимаются заставка, OpenGL (Mesa panfrost, контекст совместимости:
+`GL_ARB_vertex_buffer_object`, `GL_ARB_fragment_program`, FBO, анизотропия ×16),
+звук (OpenAL Soft через ALSA из `AUDIODEV`), старт занимает около 10 с. Дальше
+проверка ключа: без `System/cdkey` своей копии игра выходит («Your CD key appears to
+be invalid»), ключ ставит `ut2004-install.py --cdkey KEY`. Управление (стики через
+джойстик SDL 1.2 игры, кнопки — клавишами) в матче ещё не проверено.
+

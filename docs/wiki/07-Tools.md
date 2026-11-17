@@ -18,7 +18,17 @@ scripts/games-image.py -m МАНИФЕСТ [--only sd|emmc]                     
 отдельных игр — `unrar`, `llvm-mingw` из `output/ogu/buildroot/host`.
 Сопутствующие: `game_pictures.py` (картинки из `.lod`/`.wad`/`.exe`/`.bik`),
 `homm3-install.sh`, `halflife-install.sh` (только нужные движку файлы, на карту
-или по ssh).
+или по ssh), `ut2004-install.py` (Unreal Tournament 2004 с DVD как его
+Linux-установщик, плюс патч 3369; на карту или по ssh потоком tar прямо на плату,
+без копии на ПК):
+
+```sh
+scripts/ut2004-install.py --cdkey XXXXX-XXXXX-XXXXX-XXXXX /media/D/Games/Install/UT2004 root@192.168.7.2
+scripts/ut2004-install.py --lang det … /media/$USER/GAMES     # немецкий; в каталог карты
+```
+
+Каталог-источник — смонтированный DVD или каталог с `.iso` (его на время
+монтирует `udisksctl`) и `ut2004-lnxpatch3369*.tar.bz2`.
 
 ## GO Ultra по сети: `ogu-ctl.py`
 

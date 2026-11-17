@@ -57,7 +57,13 @@
   (<code>X-rebuild</code>), до следующего <code>configure</code> имеет пустой список файлов, и purge
   его не увидит.</li>
 <li><strong>Buildroot <code>target/</code> помнит выключенные пакеты</strong> иначе: после реконфигурации
-  проверяйте <code>ls output/&lt;fw&gt;/buildroot/target/usr/share/bare_app/games/</code>.</li>
+  проверяйте <code>ls output/&lt;fw&gt;/buildroot/target/usr/share/bare_app/games/</code>. Описания
+  DOOM 3 и RTCW оттуда переехали на карту (<code>games/&lt;id&gt;/overlay</code>); старый
+  <code>doom3.ini</code>/<code>rtcw.ini</code> в rootfs не мешает — описание на карте с тем же именем главнее.</li>
+<li><strong>cmake-пакеты ставятся <code>cmake --install</code></strong>: <code>&lt;PKG&gt;_INSTALL_TARGET_OPTS = ...
+  install/strip</code> старого вида ломает установку («Unknown argument DESTDIR=»).</li>
+<li><strong>x86-библиотеки в rootfs</strong> (x64lib Box64) не проходят проверку архитектуры
+  Buildroot: <code>&lt;PKG&gt;_BIN_ARCH_EXCLUDE = /usr/lib/box64-x86_64-linux-gnu</code>.</li>
 <li><strong>Патчи Mesa</strong> (<code>mesa-panfrost-dirclean</code>): зависящие от неё пакеты пересобирать
   не нужно.</li>
 <li><strong>Нумерация патчей</strong> сплошная по каталогу; при слиянии веток с патчами
@@ -131,6 +137,16 @@
 <li><strong>Настольного OpenGL нет</strong> — GLES 2/3 и compat-контекст 3.1 через Mesa.</li>
 <li><strong>Mesa 25.0 <code>pan_cast_and_pack</code></strong> ломала DOOM 3 (DATA_INVALID, падение preload):
   Mesa 0004. Утечки Bink и файлов ресурсов — engine 0018.</li>
+<li><strong>SDL 1.2 через sdl12-compat</strong>: окно, которое sdl12-compat создаёт под заставку,
+  держит GL-библиотеку SDL2; <code>SDL_GL_LoadLibrary()</code> игры получало «already loaded» и
+  не брало своей ссылки, <code>SetVideoMode</code> закрывал окно, SDL2 выгружал библиотеку — и
+  указатели на функции GL, взятые игрой, вели в никуда (UT2004: SIGSEGV в
+  <code>glGetString</code>). sdl12-compat 0002 берёт ссылку. Под Box64 такие падения видны с
+  <code>BOX64_SHOWSEGV=1 BOX64_LOG=1</code> (адрес «prot=0» — выгруженная библиотека).</li>
+<li><strong>Box64 и библиотеки игры по пути</strong> (<code>./libSDL-1.2.so.0</code>): с путём Box64 сначала
+  пробует x86_64-файл; <code>BOX64_PREFER_WRAPPED=1</code> и не ставить его — берётся системная.</li>
+<li><strong>UT2004 без CD-ключа</strong> выходит сразу после запуска рендера («Your CD key appears to
+  be invalid»): нужен <code>System/cdkey</code> своей копии (<code>ut2004-install.py --cdkey</code>).</li>
 </ul>
 <h2 id="_3">Игры с движком</h2>
 <ul>
@@ -176,7 +192,10 @@
 <li><strong>Снимки и журналы в <code>logs/</code></strong>, бэкапы eMMC/FIP/<code>/data</code> — в <code>lab/backups/&lt;плата&gt;/</code>
   перед любой записью загрузчика.</li>
 <li><strong>Карта игр и <code>/data</code> — пользовательские</strong>: <code>games-image.py</code> без <code>--delete</code>,
-  сохранения не трогать без просьбы.</li>
+  сохранения не трогать без просьбы. Сценарии кнопок на плате (<code>ogu-ctl.py</code>) —
+  только в заранее созданных тестовых каталогах и после того, как экран их увидел:
+  файловый менеджер, открытый до создания каталога, показал старый список, и сценарий
+  «вниз, A» открыл и сохранил чужой файл.</li>
 </ul>
 <footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
 </main>
