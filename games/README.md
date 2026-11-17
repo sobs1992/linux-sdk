@@ -132,6 +132,16 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
   правый стик — камера), `gamma = 1.6` для тёмных подземелий; нужен Mesa-патч 0005
   (`PAN_MMAP_WINDOW`, 6 → 60 fps). Обложка — кадр ролика `bd_05.bik` (через ffmpeg).
 
+- **gothic2**, **archolos** — Gothic II: Ночь Ворона (2.6, Steam, русская) и
+  Хроники Миртаны: Архолос (Steam, русские текст и озвучка) под Wine, без GD3D11.
+  Общее — в `gothic/`: `prepare.sh` собирает и ставит g2fast (быстрый поиск
+  ближайшей путевой точки вместо обхода всех, как `BugslayerUtil.dll`), ставит в
+  `Gothic.ini` режим 1066×600 и повороты на стрелках, в `SystemPack.ini` —
+  вертикальный угол обзора 50,625°. Нужны Mesa-патч 0005 (`PAN_MMAP_WINDOW`) и
+  Wine-патчи 0025 (зависание `Vdfs32g.exe`) и 0026
+  (`WINE_WOW64_GL_BUFFER_STORAGE=1`): ночной город Архолоса 2,8 → 14 fps.
+  Подробности — `gothic/README.md`.
+
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
   6,4 ГБ.

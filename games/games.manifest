@@ -235,3 +235,33 @@ file = lab/games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
 file = lab/games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
 cover = lab/games/Return to Castle Wolfenstein/2.ico
 cover_crop = fit
+
+[gothic2]
+; Gothic II: Night of the Raven (2.6, Steam's "Gold Classic", Russian),
+; Wine (games/gothic/README.md). Left out: GD3D11 (its ddraw.dll would take
+; DirectDraw from Wine: Direct3D 11 the GO Ultra has not), DirectX's
+; installer, the modding tools, the saved games. prepare.sh puts g2fast in
+; as BugslayerUtil.dll and sets the display mode, the view and the turns.
+source = ${steam}/steamapps/common/Gothic II
+exclude = DirectX EmptySteamDepot installscript.vdf _work/tools Saves/*
+exclude = system/GD3D11 system/ddraw.dll system/AntTweakBar.dll system/GFSDK*
+exclude = system/assimp* system/d3dcompiler_47.dll system/COPYING-GD3D11 system/Log.txt system/MSSSOFT.M3D
+run = games/gothic2/prepare.sh
+overlay = games/gothic2/overlay
+cover = ${steam}/appcache/librarycache/39510/library_600x900.jpg
+cover_crop = top
+
+[archolos]
+; The Chronicles of Myrtana: Archolos (Steam, Russian text and voices: 7 GB
+; with the voices), a game of its own on Gothic II 2.6, Wine, as gothic2.
+; Also left out: GD3D11's archive, the crash handler (a .NET program),
+; the saved games and logs.
+source = ${steam}/steamapps/common/TheChroniclesOfMyrtana
+exclude = DirectX installscript.vdf _work/tools Saves/* Saves_TheChroniclesOfMyrtana/*
+exclude = GD3D11-* system/GD3D11 system/ddraw.dll system/AntTweakBar.dll system/GFSDK*
+exclude = system/assimp* system/d3dcompiler_47.dll system/COPYING-GD3D11 system/Log.txt system/MSSSOFT.M3D
+exclude = system/KmCrashHandler system/GOTHIC_ERRORLOG.TXT system/Gothic2.RPT
+run = games/archolos/prepare.sh
+overlay = games/archolos/overlay
+cover = ${steam}/appcache/librarycache/1467450/library_600x900_russian.jpg
+cover_crop = center
