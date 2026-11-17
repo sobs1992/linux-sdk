@@ -22,7 +22,7 @@
 зачем и как измерено. Порядок — по имени (`0001-...`), нумерация сплошная.
 
 Сколько их сейчас: ядро GO Ultra 31, ядро GO Advance 3, U-Boot GO Ultra 17; пакеты:
-wine-wow64 24, rbdoom3-bfg 19, vcmi 13, xash3d-fwgs 10, mesa-panfrost 5, iortcw 5,
+wine-wow64 26, rbdoom3-bfg 19, vcmi 13, xash3d-fwgs 10, mesa-panfrost 5, iortcw 5,
 wowbox64 3, SDL2 5, SDL2_mixer 2. Темы всех патчей каталога:
 
 ```sh

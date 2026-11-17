@@ -1,0 +1,79 @@
+From 45acfd4b228a6ba8f65731016631e99f76c495ac Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Tue, 17 Nov 2026 00:51:23 +0100
+Subject: [PATCH 26/26] opengl32: WINE_WOW64_GL_BUFFER_STORAGE=1 keeps
+ GL_ARB_buffer_storage for wow64 programs.
+
+For a GL driver that maps buffers below 4 GiB (the SDK's Mesa patch
+PAN_MMAP_WINDOW): there a mapping is handed to the 32-bit program as it
+is, also a persistent one. WineD3D then keeps its buffers mapped and
+writes DISCARD and NOOVERWRITE maps of Direct3D buffers straight into
+them instead of draining its command thread twice for each (map and
+unmap). A persistent mapping that still lands above 4 GiB fails, with
+an error saying the driver's window is full.
+
+Gothic II (DirectDraw 7, ~2000 NOOVERWRITE vertex buffer locks a
+second) in a Khorinis dungeon on the GO Ultra: 12.8 fps with
+PAN_MMAP_WINDOW alone, 15.9 with HeapMaps, 26 with this.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/opengl32/unix_wgl.c | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/opengl32/unix_wgl.c b/dlls/opengl32/unix_wgl.c
+index ee899b1..1224b74 100644
+--- a/dlls/opengl32/unix_wgl.c
++++ b/dlls/opengl32/unix_wgl.c
+@@ -1218,6 +1218,26 @@ static BOOL initialize_vk_device( TEB *teb, struct context *ctx )
+     return FALSE;
+ }
+ 
++/* WINE_WOW64_GL_BUFFER_STORAGE=1: GL_ARB_buffer_storage stays for wow64
++ * programs. Only for a GL driver that maps buffers below 4 GiB, where the
++ * program reaches them (Mesa's panfrost with PAN_MMAP_WINDOW, a patch of
++ * the GO Ultra's SDK): a mapping above that is handed over as a copy, and a
++ * persistent one not at all (wow64_map_buffer() fails it). WineD3D then
++ * keeps its buffers mapped and writes the DISCARD and NOOVERWRITE maps of
++ * Direct3D buffers straight into them, as for 64-bit programs, instead of
++ * waiting each time for its command thread to drain. */
++static BOOL wow64_low_buffer_maps(void)
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        const char *env = getenv( "WINE_WOW64_GL_BUFFER_STORAGE" );
++        enabled = env && atoi( env ) > 0;
++    }
++    return enabled;
++}
++
+ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HDC draw_hdc, HDC read_hdc,
+                                   HGLRC hglrc, struct context *ctx )
+ {
+@@ -1305,7 +1325,8 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
+     ctx->extension_count = count;
+ 
+     if (is_win64 && ctx->buffers && !initialize_vk_device( teb, ctx )
+-        && !(ctx->use_pinned_memory = is_extension_supported( ctx, "GL_AMD_pinned_memory" )))
++        && !(ctx->use_pinned_memory = is_extension_supported( ctx, "GL_AMD_pinned_memory" ))
++        && !wow64_low_buffer_maps())
+     {
+         if (ctx->major_version > 4 || (ctx->major_version == 4 && ctx->minor_version > 3))
+         {
+@@ -2614,7 +2635,10 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
+ 
+     if (access & GL_MAP_PERSISTENT_BIT)
+     {
+-        FIXME( "GL_MAP_PERSISTENT_BIT not supported!\n" );
++        if (wow64_low_buffer_maps())
++            ERR( "persistent mapping %p above 4 GiB: the GL driver's buffer window is full\n", ptr );
++        else
++            FIXME( "GL_MAP_PERSISTENT_BIT not supported!\n" );
+         goto unmap;
+     }
+ 
+-- 
+2.53.0
+

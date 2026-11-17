@@ -1,0 +1,115 @@
+From 2c702a795686a729b9ca59100a7169418a10835d Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Tue, 17 Nov 2026 00:51:23 +0100
+Subject: [PATCH 25/26] ntdll: A Wow64 thread killed while it holds a 64-bit
+ lock ends once it lets go of it.
+
+A thread killed by another (TerminateThread, or ExitProcess ending every
+other thread) gets SIGQUIT and ended wherever it is, also inside the CPU
+emulator while that holds one of its locks (a critical section of the
+64-bit ntdll). The thread ending the process then runs the dlls'
+DLL_PROCESS_DETACH, guest code, and waits for that lock for good.
+Gothic II's VDFS init tool (Vdfs32g.exe, which the game starts and waits
+for after an unclean exit) hung so in about half of its starts on the GO
+Ultra: its main thread dead, the other waiting for wowbox64's lock.
+
+The SIGQUIT handler now leaves a Wow64 thread holding any 64-bit critical
+section (counted in WOW64_TLS_HELD_LOCKS) running with
+WOW64_TLS_ABORT_PENDING set, and RtlLeaveCriticalSection ends it with
+NtTerminateThread() once it holds none: between two guest instructions,
+as Windows ends a thread. The count now drops only after the section is
+released, so a kill between the two never leaves it taken.
+
+Gothic II: 8 of 8 starts with the init tool, before ~1 in 2 hung.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/ntdll/sync.c              | 22 +++++++++++++++++++++-
+ dlls/ntdll/unix/signal_arm64.c | 13 ++++++++++++-
+ include/winternl.h             |  1 +
+ 3 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 2507b62..4b309ba 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -361,6 +361,23 @@ static inline void count_held_locks( LONG_PTR diff )
+ }
+ 
+ 
++/* A Wow64 thread killed (TerminateThread, ExitProcess ending the others)
++ * while it held a 64-bit critical section was let run by the unix side's
++ * SIGQUIT handler: killed there, it would keep the CPU emulator's lock from
++ * every thread left, among them the one ending the process, which still runs
++ * guest code (the dlls' DLL_PROCESS_DETACH). It ends once it holds none. */
++static inline void end_if_killed(void)
++{
++#ifdef _WIN64
++    TEB *teb = NtCurrentTeb();
++
++    if (teb->WowTebOffset && teb->TlsSlots[WOW64_TLS_ABORT_PENDING] &&
++        !teb->TlsSlots[WOW64_TLS_HELD_LOCKS])
++        NtTerminateThread( GetCurrentThread(), 0 );
++#endif
++}
++
++
+ /******************************************************************************
+  *      RtlEnterCriticalSection   (NTDLL.@)
+  */
+@@ -458,12 +475,15 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
+     else
+     {
+         crit->OwningThread = 0;
+-        count_held_locks( -1 );
+         if (InterlockedDecrement( &crit->LockCount ) >= 0)
+         {
+             /* someone is waiting */
+             RtlpUnWaitCriticalSection( crit );
+         }
++        /* counted out only now: killed before this, the thread lets the
++         * section go first (see end_if_killed) */
++        count_held_locks( -1 );
++        end_if_killed();
+     }
+     return STATUS_SUCCESS;
+ }
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+index a08175d..897d523 100644
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -1278,7 +1278,18 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
+     ucontext_t *context = sigcontext;
+-
++    TEB *teb = NtCurrentTeb();
++
++    /* A Wow64 thread holding a 64-bit critical section (the CPU emulator's
++     * locks, the 64-bit heap's) ends when it lets go of the last one, in
++     * RtlLeaveCriticalSection: it is between two guest instructions then, as
++     * a killed thread is on Windows. Killed here, it would keep the lock from
++     * the threads left for good. */
++    if (teb->WowTebOffset && teb->TlsSlots[WOW64_TLS_HELD_LOCKS])
++    {
++        teb->TlsSlots[WOW64_TLS_ABORT_PENDING] = (void *)1;
++        return;
++    }
+     if (!is_inside_syscall( SP_sig(context) )) user_mode_abort_thread( 0, get_syscall_frame() );
+     abort_thread(0);
+ }
+diff --git a/include/winternl.h b/include/winternl.h
+index 1371cac..19b9974 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -1341,6 +1341,7 @@ C_ASSERT( sizeof(TEB) == sizeof(TEB32) );
+ #define WOW64_TLS_FILESYSREDIR     8
+ #define WOW64_TLS_WOW64INFO        10
+ #define WOW64_TLS_HELD_LOCKS       12  /* Wine: the 64-bit critical sections the thread holds */
++#define WOW64_TLS_ABORT_PENDING    13  /* Wine: killed while holding them, ends when it lets go */
+ #define WOW64_TLS_MAX_NUMBER       19
+ 
+ 
+-- 
+2.53.0
+
