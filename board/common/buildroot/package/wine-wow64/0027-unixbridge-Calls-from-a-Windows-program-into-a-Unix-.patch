@@ -1,0 +1,344 @@
+From 202606fc22554f966f2927c12840699bb15ab8c2 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Tue, 17 Nov 2026 18:15:29 +0100
+Subject: [PATCH] unixbridge: Calls from a Windows program into a Unix library
+ of its own.
+
+A program (or a DLL it loads) that comes with a Unix library for the
+machine it runs on opens it by its Unix path (unixbridge_open) and calls
+its unixbridge_entry(code, args) (unixbridge_call) with a pointer into
+its own memory; for a 32-bit program the pointer and what it points at
+are 32-bit ones.
+---
+ configure                       |   1 +
+ configure.ac                    |   1 +
+ dlls/unixbridge/Makefile.in     |   7 ++
+ dlls/unixbridge/main.c          |  63 ++++++++++++++
+ dlls/unixbridge/unix.c          | 148 ++++++++++++++++++++++++++++++++
+ dlls/unixbridge/unixbridge.h    |  41 +++++++++
+ dlls/unixbridge/unixbridge.spec |   2 +
+ 7 files changed, 263 insertions(+)
+ create mode 100644 dlls/unixbridge/Makefile.in
+ create mode 100644 dlls/unixbridge/main.c
+ create mode 100644 dlls/unixbridge/unix.c
+ create mode 100644 dlls/unixbridge/unixbridge.h
+ create mode 100644 dlls/unixbridge/unixbridge.spec
+
+diff --git a/configure b/configure
+index 63d045c..8930a51 100755
+--- a/configure
++++ b/configure
+@@ -23082,6 +23082,7 @@ wine_fn_config_makefile dlls/uiautomationcore enable_uiautomationcore
+ wine_fn_config_makefile dlls/uiautomationcore/tests enable_tests
+ wine_fn_config_makefile dlls/uiribbon enable_uiribbon
+ wine_fn_config_makefile dlls/unicows enable_unicows
++wine_fn_config_makefile dlls/unixbridge enable_unixbridge
+ wine_fn_config_makefile dlls/updspapi enable_updspapi
+ wine_fn_config_makefile dlls/url enable_url
+ wine_fn_config_makefile dlls/urlmon enable_urlmon
+diff --git a/configure.ac b/configure.ac
+index 937d04b..5697bba 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3224,6 +3224,7 @@ WINE_CONFIG_MAKEFILE(dlls/uiautomationcore)
+ WINE_CONFIG_MAKEFILE(dlls/uiautomationcore/tests)
+ WINE_CONFIG_MAKEFILE(dlls/uiribbon)
+ WINE_CONFIG_MAKEFILE(dlls/unicows)
++WINE_CONFIG_MAKEFILE(dlls/unixbridge)
+ WINE_CONFIG_MAKEFILE(dlls/updspapi)
+ WINE_CONFIG_MAKEFILE(dlls/url)
+ WINE_CONFIG_MAKEFILE(dlls/urlmon)
+diff --git a/dlls/unixbridge/Makefile.in b/dlls/unixbridge/Makefile.in
+new file mode 100644
+index 0000000..f168381
+--- /dev/null
++++ b/dlls/unixbridge/Makefile.in
+@@ -0,0 +1,7 @@
++MODULE    = unixbridge.dll
++UNIXLIB   = unixbridge.so
++UNIX_LIBS = $(PTHREAD_LIBS)
++
++SOURCES = \
++	main.c \
++	unix.c
+diff --git a/dlls/unixbridge/main.c b/dlls/unixbridge/main.c
+new file mode 100644
+index 0000000..f4abc3a
+--- /dev/null
++++ b/dlls/unixbridge/main.c
+@@ -0,0 +1,63 @@
++/*
++ * unixbridge: calls from a Windows program into a Unix library of its own
++ *
++ * A program (or a DLL it loads) that comes with a Unix library for the
++ * machine it runs on opens it here by its Unix path and calls its
++ * function
++ *
++ *     unsigned int unixbridge_entry(unsigned int code, void *args);
++ *
++ * with the program's own code and pointer: the library works on the
++ * program's memory directly. For a 32-bit program (WoW64) the pointer is
++ * a 32-bit one, and so are the ones in what it points at: the library is
++ * made for the program it serves.
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winbase.h"
++#include "winternl.h"
++
++#include "unixbridge.h"
++
++BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
++{
++    if (reason != DLL_PROCESS_ATTACH) return TRUE;
++    DisableThreadLibraryCalls(instance);
++    return !__wine_init_unix_call();
++}
++
++/* the library at the Unix path (UTF-8) loaded: a handle for unixbridge_call, 0 on failure */
++UINT WINAPI unixbridge_open(const char *path)
++{
++    struct open_params params = { path, 0 };
++
++    if (!path || WINE_UNIX_CALL(unix_open, &params)) return 0;
++    return params.handle;
++}
++
++UINT WINAPI unixbridge_call(UINT handle, UINT code, void *args)
++{
++    struct call_params params = { handle, code, args };
++
++    return WINE_UNIX_CALL(unix_call, &params);
++}
+diff --git a/dlls/unixbridge/unix.c b/dlls/unixbridge/unix.c
+new file mode 100644
+index 0000000..3b09748
+--- /dev/null
++++ b/dlls/unixbridge/unix.c
+@@ -0,0 +1,148 @@
++/*
++ * unixbridge: the Unix side
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdarg.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winternl.h"
++#include "wine/debug.h"
++
++#include "unixbridge.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(unixbridge);
++
++typedef unsigned int (*entry_fn)(unsigned int code, void *args);
++
++#define MAX_LIBS 16
++
++static entry_fn libs[MAX_LIBS];
++static unsigned int lib_count;
++static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++
++static NTSTATUS open_lib(const char *path, UINT *handle)
++{
++    NTSTATUS status = STATUS_SUCCESS;
++    entry_fn entry;
++    void *dl;
++
++    if (!(dl = dlopen(path, RTLD_NOW | RTLD_LOCAL)))
++    {
++        ERR("%s\n", dlerror());
++        return STATUS_DLL_NOT_FOUND;
++    }
++    if (!(entry = (entry_fn)dlsym(dl, "unixbridge_entry")))
++    {
++        ERR("%s: no unixbridge_entry\n", debugstr_a(path));
++        dlclose(dl);
++        return STATUS_ENTRYPOINT_NOT_FOUND;
++    }
++    pthread_mutex_lock(&lock);
++    for (*handle = 0; *handle < lib_count; (*handle)++)
++        if (libs[*handle] == entry) break;
++    if (*handle == lib_count)
++    {
++        if (lib_count < MAX_LIBS) libs[lib_count++] = entry;
++        else status = STATUS_TOO_MANY_OPENED_FILES;
++    }
++    pthread_mutex_unlock(&lock);
++    if (status) dlclose(dl);
++    else TRACE("%s: handle %u\n", debugstr_a(path), *handle + 1);
++    (*handle)++;
++    return status;
++}
++
++static entry_fn lib_of(UINT handle)
++{
++    entry_fn entry = NULL;
++
++    if (handle - 1 < MAX_LIBS) entry = __atomic_load_n(&libs[handle - 1], __ATOMIC_ACQUIRE);
++    return entry;
++}
++
++static NTSTATUS unixbridge_open(void *args)
++{
++    struct open_params *params = args;
++
++    return open_lib(params->path, &params->handle);
++}
++
++static NTSTATUS unixbridge_call(void *args)
++{
++    struct call_params *params = args;
++    entry_fn entry = lib_of(params->handle);
++
++    return entry ? entry(params->code, params->args) : STATUS_INVALID_HANDLE;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    unixbridge_open,
++    unixbridge_call,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count);
++
++#ifdef _WIN64
++
++typedef ULONG PTR32;
++
++static NTSTATUS wow64_unixbridge_open(void *args)
++{
++    struct
++    {
++        PTR32 path;
++        UINT handle;
++    } *params32 = args;
++
++    return open_lib(ULongToPtr(params32->path), &params32->handle);
++}
++
++static NTSTATUS wow64_unixbridge_call(void *args)
++{
++    struct
++    {
++        UINT handle;
++        UINT code;
++        PTR32 args;
++    } *params32 = args;
++    entry_fn entry = lib_of(params32->handle);
++
++    return entry ? entry(params32->code, ULongToPtr(params32->args)) : STATUS_INVALID_HANDLE;
++}
++
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    wow64_unixbridge_open,
++    wow64_unixbridge_call,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count);
++
++#endif /* _WIN64 */
+diff --git a/dlls/unixbridge/unixbridge.h b/dlls/unixbridge/unixbridge.h
+new file mode 100644
+index 0000000..978784c
+--- /dev/null
++++ b/dlls/unixbridge/unixbridge.h
+@@ -0,0 +1,41 @@
++/*
++ * unixbridge: calls from a Windows program into a Unix library of its own
++ *
++ * Copyright 2026 Sobs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include "wine/unixlib.h"
++
++enum unixbridge_funcs
++{
++    unix_open,
++    unix_call,
++    unix_funcs_count,
++};
++
++struct open_params
++{
++    const char *path;
++    UINT handle;
++};
++
++struct call_params
++{
++    UINT handle;
++    UINT code;
++    void *args;
++};
+diff --git a/dlls/unixbridge/unixbridge.spec b/dlls/unixbridge/unixbridge.spec
+new file mode 100644
+index 0000000..d95510a
+--- /dev/null
++++ b/dlls/unixbridge/unixbridge.spec
+@@ -0,0 +1,2 @@
++@ stdcall unixbridge_open(str)
++@ stdcall unixbridge_call(long long ptr)
+-- 
+2.53.0
+

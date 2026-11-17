@@ -27,16 +27,32 @@
  * g2fast.def. If the code at the patched addresses is not the expected
  * one (another version of the program), nothing is changed.
  *
- * Environment: G2FAST=0 leaves the game as it is; G2FAST_CHECK=1 also runs
- * the engine's walk for every query and counts the answers that differ;
- * G2FAST_STATS=1 writes counts (queries, cells looked at, grid rebuilds,
- * callers) to C:\g2fast.log every 10 seconds.
+ * The world's polygons outdoors (zCBspBase::RenderNodeOutdoor, a BSP leaf
+ * at a time) are rendered by g2light.so, a Unix library of the GO Ultra
+ * (g2light.c) next to this DLL, called through Wine's unixbridge: the
+ * engine's own work on its own data, run natively instead of emulated (the
+ * city of Archolos at night: a fifth of the main thread). The engine's
+ * functions it does the work of are checked here byte for byte; without
+ * the library or the bridge the engine renders as before.
+ *
+ * Unfinished (see README.md): off unless G2FAST_WORLD=1.
+ *
+ * Environment: G2FAST=0 leaves the game as it is; G2FAST_WORLD=1 renders
+ * the world's polygons with g2light.so; G2FAST_CHECK=1 also runs the
+ * engine's walk for every query and counts the answers that differ, and
+ * relights each polygon g2light lit with the engine's code and counts the
+ * colours that differ; G2FAST_STATS=1 writes counts (queries, cells looked
+ * at, grid rebuilds, callers, leaves and polygons) to C:\g2fast.log every
+ * 10 seconds.
  */
 #include <windows.h>
 #include <stdint.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "g2light.h"
 
 /* ---- Gothic2.exe 2.6 ------------------------------------------------- */
 
@@ -114,6 +130,7 @@ static BOOL check_mode, stats_mode;
 
 static struct {
 	unsigned queries, rebuilds, mismatches, fallbacks, points_scored, cells;
+	unsigned leaves, portal_leaves, faults, light_checked, light_diff, light_maxdiff, back_checked, back_differ;
 	DWORD last;
 	uintptr_t callers[16];
 	unsigned caller_count[16];
@@ -414,6 +431,8 @@ static void stats_caller(uintptr_t ret)
 	stats.caller_count[least] = 1;
 }
 
+static void world_stats(char *line, int *len);
+
 static void stats_write(void)
 {
 	char line[1024];
@@ -429,6 +448,7 @@ static void stats_write(void)
 	for (i = 0; i < 16; i++)
 		if (stats.caller_count[i])
 			len += wsprintfA(line + len, " %lx:%u", (unsigned long)stats.callers[i], stats.caller_count[i]);
+	world_stats(line, &len);
 	line[len++] = '\r';
 	line[len++] = '\n';
 	f = CreateFileA("C:\\g2fast.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -547,6 +567,358 @@ static BOOL write_code(void *at, const void *bytes, SIZE_T len)
 	return TRUE;
 }
 
+/* ---- the world's polygons: g2light.so ---------------------------------- */
+
+#define ADDR_RENDER_OUTDOOR_CALL 0x0052f693	/* zCBspBase::RenderOutdoor: call RenderNodeOutdoor */
+#define ADDR_FLUSH		 0x005d79f0	/* void __thiscall zCRenderManager::Flush(void) */
+#define ADDR_FLUSH_CALL1	 0x005304b5	/* zCBspTree::Render: its two calls of Flush */
+#define ADDR_FLUSH_CALL2	 0x005309a1
+#define ADDR_RENDER_NODE_OUTDOOR 0x0052f180	/* void __fastcall (zCBspBase *leaf, int clip) */
+#define ADDR_RENDER_POLY	 0x00529dd0	/* int __thiscall zCPolygon::RenderPoly(int clip) */
+#define ADDR_LIGHT_CLIPPED_POLY	 0x0052ad40	/* void __fastcall zCPolygon::LightClippedPoly(int) */
+#define ADDR_COLLECT_NODE_LIGHTS 0x0052ed80	/* void __thiscall zCBspBase::CollectNodeLights(void) */
+#define ADDR_LEAVES_RENDERED	 0x008d4a30	/* counted by RenderNodeOutdoor */
+#define ADDR_BSP_FRAME_CTR	 0x008d4944
+#define ADDR_ACT_BSP_TREE	 0x008d4978	/* its mode at 0x5c, 0 outdoor */
+#define ADDR_RENDERER		 0x00982f08	/* zrenderer */
+#define RENDERER_HAS_CAP	 (0xdc / 4)	/* vtable: int HasCapability(int); RenderPoly asks for 5 */
+#define ADDR_USE_RENDERER_TNL	 0x008a5a00	/* zCRenderManager::s_useRendererTNL */
+#define LEAF_POLYS		 0x1c		/* zCBspLeaf: zCPolygon**, count */
+#define LEAF_NPOLYS		 0x20
+#define POLY_FEATS		 0x2c		/* zCPolygon: zCVertFeature**, count (u8) */
+#define POLY_NVERTS		 0x30
+#define FEAT_DYN		 0x10		/* zCVertFeature: the colour drawn */
+#define LIT_MAX			 4096
+#define BACK_MAX		 4096
+#define SNAP_MAX		 65536
+
+/* the engine's functions g2light does the work of (FNV-1a of their code) */
+static const struct {
+	uintptr_t addr;
+	unsigned len;
+	uint32_t fnv;
+} world_code[] = {
+	{ ADDR_LIGHT_CLIPPED_POLY,  0x8f5, 0xe97035b0 },
+	{ ADDR_RENDER_POLY,	    0x119, 0xb3775123 },	/* up to its clipping */
+	{ ADDR_RENDER_NODE_OUTDOOR, 0x307, 0x7d8588f0 },
+	{ 0x0053c890,		    0x038, 0xabf7a9ee },	/* zTRayTurboValMap<zCPolygon*, int>::GetNode */
+	{ 0x005faa40,		    0x031, 0xb058c79b },	/* zSinApprox */
+	{ ADDR_COLLECT_NODE_LIGHTS, 0x264, 0x31bec976 },
+};
+static const unsigned char render_outdoor_call[5] = { 0xe8, 0xe8, 0xfa, 0xff, 0xff };	/* call 52f180 */
+static const unsigned char flush_call1[5] = { 0xe8, 0x36, 0x75, 0x0a, 0x00 };			/* call 5d79f0 */
+static const unsigned char flush_call2[5] = { 0xe8, 0x4a, 0x70, 0x0a, 0x00 };
+
+typedef UINT (WINAPI *ub_open_fn)(const char *path);
+typedef UINT (WINAPI *ub_call_fn)(UINT lib, UINT code, void *args);
+typedef char *(CDECL *unix_name_fn)(const WCHAR *path);
+typedef void (__fastcall *render_node_fn)(void *leaf, int clip);
+typedef int (__fastcall *render_poly_fn)(void *poly, void *edx, int clip);
+typedef void (__fastcall *collect_lights_fn)(void *leaf);
+typedef void (__fastcall *light_poly_fn)(void *poly, int param);
+typedef int (__fastcall *has_cap_fn)(void *renderer, void *edx, int cap);
+typedef void (__fastcall *flush_fn)(void *renderman);
+
+static HINSTANCE self;
+static BOOL env_on(const char *name, BOOL dflt);
+
+static struct {
+	int state;		/* 0: g2light not loaded yet, 1: in use, -1: not */
+	ub_call_fn call;
+	UINT lib;
+	struct g2l_leaf *args;	/* in pages of their own, as the lists below */
+	uint32_t *snap;
+	UINT workers;		/* threads lighting the polygons: G2L_JOIN before Flush */
+	LONG frame;		/* the frame `tnl` is for */
+	BOOL tnl;		/* RenderPoly takes polygons to their lists, unclipped */
+} world = { 0, NULL, 0, NULL, NULL, 0, 0x7fffffff, FALSE };
+
+static uint32_t fnv1a(const unsigned char *p, unsigned len)
+{
+	uint32_t h = 0x811c9dc5;
+
+	while (len--)
+		h = (h ^ *p++) * 0x01000193;
+	return h;
+}
+
+static BOOL world_code_ok(void)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+	unsigned i;
+
+	for (i = 0; i < ARRAYSIZE(world_code); i++)
+		if (!VirtualQuery((void *)world_code[i].addr, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+		    mbi.AllocationBase != (void *)0x00400000 ||
+		    fnv1a((const unsigned char *)world_code[i].addr, world_code[i].len) != world_code[i].fnv)
+			return FALSE;
+	return !memcmp((void *)ADDR_RENDER_OUTDOOR_CALL, render_outdoor_call, 5) &&
+	       !memcmp((void *)ADDR_FLUSH_CALL1, flush_call1, 5) && !memcmp((void *)ADDR_FLUSH_CALL2, flush_call2, 5);
+}
+
+static int env_int(const char *name, int dflt)
+{
+	char v[16];
+	DWORD n = GetEnvironmentVariableA(name, v, sizeof(v));
+
+	if (!n || n >= sizeof(v))
+		return dflt;
+	return atoi(v);
+}
+
+/* unixbridge.dll and g2light.so next to this DLL */
+static BOOL world_load(void)
+{
+	WCHAR path[MAX_PATH];
+	HMODULE ub;
+	ub_open_fn open;
+	unix_name_fn unix_name;
+	char *upath;
+	DWORD n;
+	size_t size = 4096;
+	struct g2l_init *init;
+
+	ub = LoadLibraryA("unixbridge.dll");
+	if (!ub)	/* a Wine prefix made before Wine had it */
+		ub = LoadLibraryA("Z:\\usr\\lib\\wine\\i386-windows\\unixbridge.dll");
+	open = ub ? (ub_open_fn)GetProcAddress(ub, "unixbridge_open") : NULL;
+	world.call = ub ? (ub_call_fn)GetProcAddress(ub, "unixbridge_call") : NULL;
+	unix_name = (unix_name_fn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_unix_file_name");
+	if (!open || !world.call || !unix_name)
+		return FALSE;
+	n = GetModuleFileNameW(self, path, MAX_PATH);
+	if (!n || n >= MAX_PATH - 16)
+		return FALSE;
+	while (n && path[n - 1] != '\\')
+		n--;
+	lstrcpyW(path + n, L"g2light.so");
+	if (!(upath = unix_name(path)))
+		return FALSE;
+	world.lib = open(upath);
+	HeapFree(GetProcessHeap(), 0, upath);
+	if (!world.lib)
+		return FALSE;
+
+	if (check_mode)
+		size += (LIT_MAX + 3 * BACK_MAX + SNAP_MAX) * sizeof(uint32_t);
+	if (!(world.args = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)))
+		return FALSE;
+	init = (struct g2l_init *)world.args;
+	init->version = G2L_VERSION;
+	init->size = sizeof(struct g2l_leaf);
+	/* the check compares right after each leaf: the engine's thread lights */
+	init->workers = check_mode ? 0 : env_int("G2FAST_WORKERS", 3);
+	if (world.call(world.lib, G2L_INIT, init))
+		return FALSE;
+	world.workers = init->workers;
+	ZeroMemory(world.args, sizeof(*world.args));
+	if (check_mode) {
+		uint32_t *lists = (uint32_t *)((char *)world.args + 4096);
+
+		world.args->lit_polys = (uint32_t)(uintptr_t)lists;
+		world.args->lit_max = LIT_MAX;
+		world.args->back_polys = (uint32_t)(uintptr_t)(lists + LIT_MAX);
+		world.args->back_max = BACK_MAX;
+		world.snap = lists + LIT_MAX + 3 * BACK_MAX;
+	}
+	return TRUE;
+}
+
+static void world_log(const char *line, int len)
+{
+	HANDLE f = CreateFileA("C:\\g2fast.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+			       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	DWORD written;
+
+	if (f != INVALID_HANDLE_VALUE) {
+		WriteFile(f, line, len, &written, NULL);
+		CloseHandle(f);
+	}
+}
+
+/* G2FAST_CHECK: the polygons g2light found facing away, as they were, to
+ * the engine's RenderPoly, which renders them if it finds them facing */
+static void world_check_back(struct g2l_leaf *a, int clip)
+{
+	uint32_t *b = (uint32_t *)(uintptr_t)a->back_polys;
+	unsigned i;
+
+	for (i = 0; i < a->back; i++, b += 3) {
+		char *p = (char *)(uintptr_t)b[0];
+
+		*(uint32_t *)(p + 4) = b[1];
+		*(unsigned char *)(p + 0x31) = (unsigned char)b[2];
+		stats.back_checked++;
+		if (((render_poly_fn)ADDR_RENDER_POLY)(p, NULL, clip)) {
+			char line[256];
+			const float *n = (const float *)(p + 0xc), *cam = (const float *)0x008d7f88;
+
+			if (stats.back_differ++ < 20)
+				world_log(line, wsprintfA(line, "back? poly %p n %d %d %d d %d cam %d %d %d flags %x\r\n", p,
+							  (int)(n[0] * 1000), (int)(n[1] * 1000), (int)(n[2] * 1000), (int)*(float *)(p + 8),
+							  (int)cam[0], (int)cam[1], (int)cam[2], b[2]));
+		}
+	}
+}
+
+/* G2FAST_CHECK: the polygons g2light lit, lit again by the engine */
+static void world_check(struct g2l_leaf *a)
+{
+	const uint32_t *lit = (const uint32_t *)(uintptr_t)a->lit_polys;
+	int param = *(int *)(*(char **)ADDR_ACT_BSP_TREE + 0x5c) == 0;
+	unsigned i, k, n = 0;
+
+	for (i = 0; i < a->lit; i++) {
+		char *p = (char *)(uintptr_t)lit[i];
+		char **feats = *(char ***)(p + POLY_FEATS);
+		unsigned nv = *(unsigned char *)(p + POLY_NVERTS);
+
+		for (k = 0; k < nv && n < SNAP_MAX; k++)
+			world.snap[n++] = *(uint32_t *)(feats[k] + FEAT_DYN);
+	}
+	for (i = n = 0; i < a->lit; i++) {
+		char *p = (char *)(uintptr_t)lit[i];
+		char **feats = *(char ***)(p + POLY_FEATS);
+		unsigned nv = *(unsigned char *)(p + POLY_NVERTS);
+		BOOL differ = FALSE;
+
+		if (n + nv > SNAP_MAX)
+			break;
+		((light_poly_fn)ADDR_LIGHT_CLIPPED_POLY)(p, param);
+		for (k = 0; k < nv; k++, n++) {
+			uint32_t mine = world.snap[n], ref = *(uint32_t *)(feats[k] + FEAT_DYN);
+			unsigned b;
+
+			for (b = 0; b < 32; b += 8) {
+				int d = (int)((mine >> b) & 0xff) - (int)((ref >> b) & 0xff);
+
+				if (d) {
+					differ = TRUE;
+					if ((unsigned)abs(d) > stats.light_maxdiff)
+						stats.light_maxdiff = abs(d);
+				}
+			}
+		}
+		stats.light_checked++;
+		stats.light_diff += differ;
+	}
+}
+
+static void world_stats(char *line, int *len)
+{
+	struct g2l_leaf *a = world.args;
+
+	if (world.state <= 0 || !a) {
+		*len += wsprintfA(line + *len, "; world: engine's (%d)", world.state);
+		return;
+	}
+	*len += wsprintfA(line + *len, "; world: %u leaves (%u with portals), %u polygons lit (%u in the engine's thread, %u threads), "
+			  "%u back, %u to the engine (%u occluders, %u water, %u list growths, %u faults), %u joins waited; "
+			  "check: %u polygons, %u differ (by %u at most), %u facing away, %u not",
+			  stats.leaves, stats.portal_leaves, a->n_lit, a->n_sync, world.workers, a->n_back, a->n_engine,
+			  a->n_occluder, a->n_wave, a->n_grow, stats.faults, a->n_join_wait,
+			  stats.light_checked, stats.light_diff, stats.light_maxdiff, stats.back_checked, stats.back_differ);
+	a->n_lit = a->n_back = a->n_engine = a->n_done = a->n_sync = a->n_occluder = a->n_wave = a->n_grow = a->n_join_wait = 0;
+}
+
+/* zCBspBase::RenderNodeOutdoor, as RenderOutdoor calls it */
+static void __fastcall hook_render_node(void *leaf, int clip)
+{
+	struct g2l_leaf *a;
+	LONG frame = *(LONG *)ADDR_BSP_FRAME_CTR;
+	void **polys;
+
+	if (!world.state)
+		world.state = world_load() ? 1 : -1;
+	a = world.args;
+	if (world.state > 0 && frame != world.frame) {
+		void *r = *(void **)ADDR_RENDERER;
+
+		world.frame = frame;
+		world.tnl = ((has_cap_fn)(*(void ***)r)[RENDERER_HAS_CAP])(r, NULL, 5) && *(int *)ADDR_USE_RENDERER_TNL;
+	}
+	if (world.state <= 0 || !world.tnl || *(int *)((char *)leaf + LEAF_NPOLYS) <= 0) {
+		((render_node_fn)ADDR_RENDER_NODE_OUTDOOR)(leaf, clip);
+		return;
+	}
+
+	/* RenderNodeOutdoor's own start */
+	(*(int *)ADDR_LEAVES_RENDERED)++;
+	((collect_lights_fn)ADDR_COLLECT_NODE_LIGHTS)(leaf);
+
+	polys = *(void ***)((char *)leaf + LEAF_POLYS);
+	a->leaf = (uint32_t)(uintptr_t)leaf;
+	a->start = 0;
+	a->portals = 0;
+	a->lit = 0;
+	a->back = 0;
+	for (;;) {
+		UINT r;
+
+		a->stop = a->start;
+		r = world.call(world.lib, G2L_LEAF, a);
+		if (!r)
+			break;
+		/* 1: a polygon g2light leaves to the engine; else a write of
+		 * g2light's faulted (a page the emulator keeps read-only, see
+		 * g2light.c), before it changed the polygon: the engine's
+		 * writes are the emulator's to let through */
+		if (r != 1)
+			stats.faults++;
+		if (a->stop >= (uint32_t)*(int *)((char *)leaf + LEAF_NPOLYS))
+			break;
+		((render_poly_fn)ADDR_RENDER_POLY)(polys[a->stop], NULL, clip & 0xf);
+		a->start = a->stop + 1;
+	}
+	if (check_mode) {
+		world_check(a);
+		world_check_back(a, clip & 0xf);
+	}
+	if (stats_mode) {
+		stats.leaves++;
+		stats.portal_leaves += a->portals;
+		stats_write();
+	}
+	/* the portals by the engine's loop, which skips the polygons rendered
+	 * this frame (and counts the leaf once) */
+	if (a->portals) {
+		(*(int *)ADDR_LEAVES_RENDERED)--;
+		((render_node_fn)ADDR_RENDER_NODE_OUTDOOR)(leaf, clip);
+	}
+}
+
+/* zCRenderManager::Flush, as zCBspTree::Render calls it: the first reader
+ * of the colours the threads compute (PackVB) */
+static void __fastcall hook_flush(void *renderman)
+{
+	if (world.state > 0 && world.workers) {
+		unsigned tries;
+
+		/* a fault (a page the emulator keeps read-only) skips one polygon's colours */
+		for (tries = 0; tries < 16 && world.call(world.lib, G2L_JOIN, world.args); tries++)
+			stats.faults++;
+	}
+	((flush_fn)ADDR_FLUSH)(renderman);
+}
+
+static BOOL write_call(uintptr_t at, void *to)
+{
+	unsigned char call[5];
+	int32_t rel = (int32_t)((uintptr_t)to - (at + 5));
+
+	call[0] = 0xe8;
+	CopyMemory(call + 1, &rel, 4);
+	return write_code((void *)at, call, 5);
+}
+
+static BOOL world_install(void)
+{
+	if (!world_code_ok())
+		return FALSE;
+	return write_call(ADDR_FLUSH_CALL1, hook_flush) && write_call(ADDR_FLUSH_CALL2, hook_flush) &&
+	       write_call(ADDR_RENDER_OUTDOOR_CALL, hook_render_node);
+}
+
 static BOOL install(void)
 {
 	void **vtbl = (void **)ADDR_VTBL_WAYNET;
@@ -612,6 +984,8 @@ static BOOL install(void)
 		CopyMemory(jmp + 1, &rel, 4);
 		write_code((void *)patches[i].addr, jmp, 5);
 	}
+	if (env_on("G2FAST_WORLD", FALSE))	/* unfinished: see README.md */
+		world_install();
 	return TRUE;
 }
 
@@ -630,6 +1004,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 	if (reason != DLL_PROCESS_ATTACH)
 		return TRUE;
 	DisableThreadLibraryCalls(inst);
+	self = inst;
 	if (!env_on("G2FAST", TRUE))
 		return TRUE;
 	heap = GetProcessHeap();

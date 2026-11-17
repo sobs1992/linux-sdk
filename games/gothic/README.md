@@ -1,5 +1,11 @@
 # Gothic II and Archolos
 
+**Unfinished, not on the console.** This work lives on branch `gothic`
+only (not merged into `master`): the city of Archolos runs at 14 fps at
+night and 17 at dusk, Gothic II's Khorinis at ~21 fps, short of what the
+console's games should do. What was tried and what is left: "Unfinished
+work" below.
+
 Piranha Bytes' Gothic II: Night of the Raven (2.6, Steam's "Gold Classic",
 Russian) and The Chronicles of Myrtana: Archolos (Steam, Russian text and
 voices), a game of its own on the same `Gothic2.exe`, under Wine on the
@@ -112,3 +118,55 @@ button would use an item twice in the inventory.
   Shift+/ (US). The console completes a word from its first letter.
 - `Gothic2.exe` carries its public symbols (CodeView NB11, 25288 names):
   they name the functions of a profile.
+
+## Unfinished work
+
+State of 2026-11-17, measured on the GO Ultra at 1066x600:
+
+| | fps |
+|---|---|
+| Archolos, Silbach's market at night, view distance 2 | 13.9 |
+| Archolos, the same at dusk | 17.0 |
+| Gothic II, Khorinis' market by day, view distance 6 (a crowd fighting the hero) | ~21 |
+| Gothic II, a crypt of Khorinis | 24 |
+
+Archolos' `prepare.sh` sets the view distance to 2 (`sightValue`, Steam's
+4): night 11.8 -> 14.0 fps, dusk 15.7 -> 16.9.
+
+**Native world render** (`g2fast/g2light.c`, `g2light.h`; off unless
+`G2FAST_WORLD=1`). g2fast hands each BSP leaf the engine renders outdoors
+(`zCBspBase::RenderNodeOutdoor`, the call at 0x52f693) to `g2light.so`, a
+Unix library next to the DLL, through Wine's `unixbridge` (Wine patch
+0027): backface test, `zCPolygon::LightClippedPoly` (its x87 arithmetic
+as Box64 runs it; `G2FAST_CHECK=1` relights each polygon with the
+engine's code: 0.1% of the polygons differ, by 1 of 255 at most) and the
+polygons' way to their materials' lists. Portals, occluders, water and
+growing lists stay the engine's. Build it with the firmware's
+`aarch64-linux-gcc -O2 -fPIC -shared -ffp-contract=off -fno-strict-aliasing`
+into `system/g2light.so`. Result: night 13.9 -> 14.4 fps, dusk 17.0 ->
+16.7; with the lighting removed altogether the night was 15.6, so the
+lighting alone cannot give much more. Started, not measured: the colours
+computed by worker threads (`G2FAST_WORKERS`, joined before
+`zCRenderManager::Flush`).
+
+- Pitfall: Box64 keeps a guest page read-only while it holds code it
+  translated from it (the patches of Archolos' DLLs put code in the
+  game's heap). A write by the game is caught and let through; one from
+  native code inside a Wine Unix call makes the call return
+  `STATUS_ACCESS_VIOLATION` instead. g2light tries a polygon's pages
+  before it changes anything and g2fast gives that polygon to the engine.
+- The main thread, Archolos at night with the native render (profile):
+  game code 66% (`PackVB` 9%, NPC rays and collisions ~10%, the Daedalus
+  VM ~5%, particles ~4%, BSP and vob walks ~4%), g2light 10%, WineD3D
+  10%. Other cores idle but WineD3D's thread (~47% of one).
+- Left, in the order of what each would give: lighting in worker threads
+  (~+8%), `PackVB` native (~+8%), a native Direct3D 7 layer in place of
+  WineD3D and DirectDraw's x86 code (~+15%), NPC rays (~+8%). With all of
+  them about 20 fps in Archolos' city at night, likely ~30 in Khorinis.
+  A static recompilation of `Gothic2.exe` would add 15-25% more at a cost
+  of months. OpenGothic (native) ran at 7 fps on the G52 (Vulkan, memory).
+
+Testing: a Gothic II save in the city is reached with `args = -devmode` in
+`wine.ini` (marvin mode; typing "marvin" fails, M, N and R are bound) and
+the console (F2): `goto waypoint NW_CITY_MERCHANT_PATH_14`.
+
