@@ -1,0 +1,69 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='980' height='560' viewBox='0 0 980 560' font-family='Segoe UI, Noto Sans, DejaVu Sans, Arial, sans-serif'>
+<title>Какой путь добавления игры выбрать</title>
+<defs>
+<marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto-start-reverse'><path d='M 0 0 L 10 5 L 0 10 z' fill='#444'/></marker>
+<marker id='dot' viewBox='0 0 10 10' refX='5' refY='5' markerWidth='6' markerHeight='6'><circle cx='5' cy='5' r='4' fill='#444'/></marker>
+</defs>
+<rect width='980' height='560' fill='white'/>
+<rect x='340' y='20' width='300' height='50' rx='6' fill='#fffbe6' stroke='#b5a642' stroke-width='1.5'/>
+<text x='490.0' y='41.0' font-size='13' text-anchor='middle' font-weight='bold' fill='#222'>Новая игра</text>
+<text x='490.0' y='58.0' font-size='13' text-anchor='middle' fill='#222'>на чём она написана и для какой ОС?</text>
+<rect x='40' y='120' width='270' height='60' rx='6' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='175.0' y='146.1' font-size='13' text-anchor='middle' font-weight='bold' fill='#222'>Windows-игра (x86, 32-бит)</text>
+<text x='175.0' y='163.1' font-size='13' text-anchor='middle' fill='#222'>D3D8/D3D9/DirectDraw, GDI</text>
+<rect x='355' y='120' width='270' height='60' rx='6' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='490.0' y='146.1' font-size='13' text-anchor='middle' font-weight='bold' fill='#222'>Linux-порт на SDL2</text>
+<text x='490.0' y='163.1' font-size='13' text-anchor='middle' fill='#222'>есть в Buildroot или собирается</text>
+<rect x='670' y='120' width='270' height='60' rx='6' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='805.0' y='146.1' font-size='13' text-anchor='middle' font-weight='bold' fill='#222'>Свой движок без SDL</text>
+<text x='805.0' y='163.1' font-size='13' text-anchor='middle' fill='#222'>или вывод нужен особый (лупа)</text>
+<line x1='490' y1='70' x2='490' y2='95' stroke='#444' stroke-width='1.6' stroke-linecap='square'/>
+<line x1='490' y1='95' x2='175' y2='95' stroke='#444' stroke-width='1.6' stroke-linecap='square'/>
+<line x1='175' y1='95' x2='175' y2='120' stroke='#444' stroke-width='1.6' stroke-linecap='square' marker-end='url(#arr)'/>
+<line x1='490' y1='70' x2='490' y2='120' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<line x1='490' y1='70' x2='490' y2='95' stroke='#444' stroke-width='1.6' stroke-linecap='square'/>
+<line x1='490' y1='95' x2='805' y2='95' stroke='#444' stroke-width='1.6' stroke-linecap='square'/>
+<line x1='805' y1='95' x2='805' y2='120' stroke='#444' stroke-width='1.6' stroke-linecap='square' marker-end='url(#arr)'/>
+<rect x='40' y='215' width='270' height='150' rx='6' fill='#e8f1fb' stroke='#4a79a8' stroke-width='1.5'/>
+<text x='175.0' y='243.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Путь A: wine.ini — код не меняется</text>
+<text x='175.0' y='260.2' font-size='12' text-anchor='middle' fill='#222'>каталог /games/&lt;id&gt;/ с игрой</text>
+<text x='175.0' y='277.2' font-size='12' text-anchor='middle' fill='#222'>games/&lt;id&gt;/overlay/wine.ini</text>
+<text x='175.0' y='294.2' font-size='12' text-anchor='middle' fill='#222'>games/&lt;id&gt;/prepare.sh (если нужно)</text>
+<text x='175.0' y='311.2' font-size='12' text-anchor='middle' fill='#222'>секция в games/games.manifest</text>
+<text x='175.0' y='328.2' font-size='12' text-anchor='middle' fill='#222'>обложка cover = …</text>
+<text x='175.0' y='345.2' font-size='12' text-anchor='middle' fill='#222'>строка в games/README.md</text>
+<rect x='355' y='215' width='270' height='150' rx='6' fill='#e8f1fb' stroke='#4a79a8' stroke-width='1.5'/>
+<text x='490.0' y='243.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Путь B: game.ini — код не меняется</text>
+<text x='490.0' y='260.2' font-size='12' text-anchor='middle' fill='#222'>пакет Buildroot движка</text>
+<text x='490.0' y='277.2' font-size='12' text-anchor='middle' fill='#222'>&lt;pkg&gt;.ini ставит сам пакет →</text>
+<text x='490.0' y='294.2' font-size='12' text-anchor='middle' fill='#222'>/usr/share/bare_app/games/</text>
+<text x='490.0' y='311.2' font-size='12' text-anchor='middle' fill='#222'>BR2_PACKAGE_BARE_APP_&lt;GAME&gt; (select)</text>
+<text x='490.0' y='328.2' font-size='12' text-anchor='middle' fill='#222'>bare-app.&lt;GAME&gt;=y в APPS_CONFIG</text>
+<text x='490.0' y='345.2' font-size='12' text-anchor='middle' fill='#222'>секция в манифесте с файлами игры</text>
+<rect x='670' y='215' width='270' height='150' rx='6' fill='#e8f1fb' stroke='#4a79a8' stroke-width='1.5'/>
+<text x='805.0' y='243.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Путь C: struct game_def</text>
+<text x='805.0' y='260.2' font-size='12' text-anchor='middle' fill='#222'>программа с game_ipc_client.h</text>
+<text x='805.0' y='277.2' font-size='12' text-anchor='middle' fill='#222'>src/games/&lt;игра&gt;.c + строка в games.c</text>
+<text x='805.0' y='294.2' font-size='12' text-anchor='middle' fill='#222'>GAME_&lt;ИГРА&gt; в Kconfig, add_if() в CMake</text>
+<text x='805.0' y='311.2' font-size='12' text-anchor='middle' fill='#222'>строки i18n (en, ru)</text>
+<text x='805.0' y='328.2' font-size='12' text-anchor='middle' fill='#222'>пакет SDK + CONFIG_GAME_… в bare-app.mk</text>
+<text x='805.0' y='345.2' font-size='12' text-anchor='middle' fill='#222'>опция Config.in + APPS_CONFIG</text>
+<line x1='175' y1='180' x2='175' y2='215' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<line x1='490' y1='180' x2='490' y2='215' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<line x1='805' y1='180' x2='805' y2='215' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<rect x='40' y='400' width='270' height='60' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='175.0' y='425.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Пересборка: нет</text>
+<text x='175.0' y='442.7' font-size='12' text-anchor='middle' fill='#222'>games-image.py --card … --games &lt;id&gt;</text>
+<rect x='355' y='400' width='270' height='60' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='490.0' y='425.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Пересборка: пакет и rootfs</text>
+<text x='490.0' y='442.7' font-size='12' text-anchor='middle' fill='#222'>make rootfs (проверка — tar по ssh)</text>
+<rect x='670' y='400' width='270' height='60' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='805.0' y='425.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Пересборка: bare_app, пакет, rootfs</text>
+<text x='805.0' y='442.7' font-size='12' text-anchor='middle' fill='#222'>make rootfs-make BR=bare-app-rebuild</text>
+<line x1='175' y1='365' x2='175' y2='400' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<line x1='490' y1='365' x2='490' y2='400' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<line x1='805' y1='365' x2='805' y2='400' stroke='#444' stroke-width='1.6' marker-end='url(#arr)'/>
+<rect x='40' y='490' width='900' height='50' rx='6' fill='#fffbe6' stroke='#b5a642' stroke-width='1.5'/>
+<text x='490.0' y='510.7' font-size='12' text-anchor='middle' fill='#222'>Общее для всех: файлы игры — /games/&lt;id&gt; (только чтение), сохранения — /data/&lt;id&gt; (Wine: /data/wine/…),</text>
+<text x='490.0' y='527.7' font-size='12' text-anchor='middle' fill='#222'>обложка cover.png 240×240 в каталоге игры, управление — [keys]/[labels], имена кнопок одни (a, b, l1, stick, rstick…)</text>
+</svg>

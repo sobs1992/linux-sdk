@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8. Платы — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="current">8. Платы</a>
+<div class="toc">
+<a href="#odroid-go-ultra-ogu">ODROID-GO Ultra (ogu) — основная игровая платформа</a>
+<a href="#odroid-go-advance-oga">ODROID-GO Advance (oga)</a>
+<a href="#beaglebone-black-raspberry-pi">BeagleBone Black, Raspberry Pi</a>
+<a href="#_1">Добавить плату</a>
+</div>
+</nav>
+<main>
+<h1 id="8">8. Платы</h1>
+<p>Краткие портреты; подробности с номерами патчей — <code>docs/boards/*.md</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Прошивка</th>
+<th>Плата</th>
+<th>SoC</th>
+<th>Экран</th>
+<th>Консоль</th>
+<th>Сеть</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>oga</code></td>
+<td>ODROID-GO Advance / Black Edition / Super</td>
+<td>RK3326 (4×A35)</td>
+<td>480×320</td>
+<td><code>ttyS2</code> 115200</td>
+<td>ESP8089 Wi-Fi</td>
+</tr>
+<tr>
+<td><code>ogu</code></td>
+<td>ODROID-GO Ultra</td>
+<td>S922X (4×A73 + 2×A53), Mali-G52</td>
+<td>854×480</td>
+<td><code>ttyAML0</code> 115200</td>
+<td>USB-NCM 192.168.7.2, USB Wi-Fi</td>
+</tr>
+<tr>
+<td><code>bbb</code></td>
+<td>BeagleBone Black / Green</td>
+<td>AM335x (A8, armhf)</td>
+<td>—</td>
+<td><code>ttyS0</code></td>
+<td>Ethernet</td>
+</tr>
+<tr>
+<td><code>rpi1</code></td>
+<td>Raspberry Pi 1 / Zero</td>
+<td>BCM2835 (armhf)</td>
+<td>HDMI</td>
+<td><code>ttyAMA0</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>rpi4</code></td>
+<td>Raspberry Pi 4 / 400 / CM4</td>
+<td>BCM2711 (A72)</td>
+<td>HDMI</td>
+<td><code>ttyS1</code></td>
+<td>Ethernet</td>
+</tr>
+</tbody>
+</table>
+<h2 id="odroid-go-ultra-ogu">ODROID-GO Ultra (<code>ogu</code>) — основная игровая платформа</h2>
+<ul>
+<li><strong>Загрузчик.</strong> Свой FIP (BL2/BL30/BL31 Amlogic + mainline U-Boot) с сектора 1;
+  на eMMC записан (<code>make flash-emmc</code>, Vol+ при включении показывает eMMC как
+  USB-диск — патч U-Boot 0012). Экран зажигает уже U-Boot (патчи 0003–0010: DSI,
+  панель ST7701). 17 патчей U-Boot всего. Шаги загрузки печатаются на экран.</li>
+<li><strong>Диски.</strong> eMMC: система + <code>/data</code> до конца; все игры — SD exFAT <code>GAMES</code>.</li>
+<li><strong>Быстрая загрузка</strong> ~3,7 с до меню: кэши в <code>arch_cpu_init</code>, таблица phandle,
+  <code>BOOTDELAY=0</code>, ядро без чужих платформ (<code>Image</code> 22 МБ), <code>quiet</code>, панель не
+  переинициализируется (ядро 0026), coldplug параллельно.</li>
+<li><strong>Гибернация.</strong> Короткое нажатие питания → экран гаснет → через 10 с
+  <code>pm-hibernate</code> в <code>/data/hibernate.swap</code> (1,5 ГиБ). Ядро 0028 уносит GPU-буферы в
+  swap (DOOM 3 помещается), 0029 возвращает клоки модулей после реального
+  выключения. Без места — <code>pm-suspend</code> (s2idle). Пробуждение из deep sleep по
+  кнопке питания через BL30 — не решено (BL301 нужно пересобирать).</li>
+<li><strong>Питание.</strong> Два PMIC: RK818 (батарея, USB-C) и RK817 (загрузочный кластер,
+  звук, кнопка питания). Выключение как у Hardkernel (ядро 0016): плата сама
+  включается от USB, U-Boot (патч 0001) ждёт кнопку при зарядке. Покой 889 мА с
+  подсветкой / 682 мА без — аппаратный пол; cpuidle вешает загрузку (BL31).</li>
+<li><strong>Часы.</strong> RK817 отстаёт на 14 %, время — из RK818 (<code>rtc-clock</code>, <code>S31clock</code>);
+  зон нет, хранится UTC. Батарея после сброса PMIC — ядро 0031.</li>
+<li><strong>Перезагрузка.</strong> <code>DEV_OFF_RST</code> RK818 перед reboot (ядро 0017) и SD на 50 МГц в
+  U-Boot (0002) — иначе U-Boot минутами не видел карту.</li>
+<li><strong>Аппаратный H.264</strong> — свой V4L2-драйвер <code>meson-venc</code> (HCODEC, внешний модуль) для
+  трансляции.</li>
+<li><strong>Bit-42.</strong> Под нагрузкой GPU чтение иногда отдаёт бит 42 неверно (кэш врёт,
+  DRAM права) — аппаратная особенность этого экземпляра. Ядро 0025 ограничивает
+  GPU 666 МГц: на стенде 0 ошибок, на 800 МГц — ошибки и паника DOOM 3. Стенд —
+  круглая кнопка «Стресс-тест» в меню (фур-донат + детекторы MEM/GPU/CPU/TEX).</li>
+<li><strong>USB-A — хост</strong>: клавиатура, мышь, Wi-Fi-адаптеры (Realtek, MediaTek, Atheros,
+  Ralink модулями), датчик движения на Pico (ICM-20948) как гироскоп.</li>
+<li><strong>Звук</strong> — <code>S30audio</code> ставит маршрут DPCM; <code>axg-sound-card</code> не выгружать.</li>
+</ul>
+<h2 id="odroid-go-advance-oga">ODROID-GO Advance (<code>oga</code>)</h2>
+<ul>
+<li><strong>Гибридный образ</strong>: SPI miniloader (Black Edition) или открытая цепочка TPL/SPL/TF-A.
+  Ревизия платы — по SARADC, три dtb (<code>go2</code>, <code>go2-v11</code>, <code>go3</code>).</li>
+<li><strong>Ядро</strong>: 3 патча — делители I2S (без них звук вдвое медленнее), перезагрузка
+  через RK817, опрос стика раз в 10 мс со снап-бэком.</li>
+<li><strong>Быстрая загрузка</strong> ~5 с: <code>BOOTDELAY=0</code>, ядро без лишнего, <code>quiet</code>, mdev в
+  фоне, bare_app <code>S06</code> сразу после <code>/data</code>.</li>
+<li><strong>Аппаратный H.264</strong> — свой драйвер <code>rk-vepu-h264</code> (VEPU2 PX30; Hantro в ядре
+  выключен): 960×640 за 8–9 мс, стрим Героев 30 fps при ~10 % CPU.</li>
+<li><strong>Диски</strong>: всё на SD — p3 <code>data</code> 1 ГБ, p4 <code>GAMES</code> FAT32 до конца; образ с играми —
+  <code>games-image.py</code> без <code>--card</code>.</li>
+<li><strong>Wi-Fi</strong> ESP8089 (внешний модуль). Доступ — UART (<code>oga-serial.py</code>) или ssh.</li>
+<li><strong>Игры</strong>: Герои (VCMI, окно 960×640 вдвое больше экрана, лупа), Doom, Half-Life
+  (программный рендер). Wine нет — процессор слабый.</li>
+</ul>
+<h2 id="beaglebone-black-raspberry-pi">BeagleBone Black, Raspberry Pi</h2>
+<p>Опорные платы без экрана и геймпада: проверяют общность SDK. BBB грузится
+сначала с eMMC (S2 при включении — с SD). RPi не читает raw-секторы: прошивка
+GPU → <code>config.txt</code> → <code>u-boot.bin</code>; dtb лежат и под именами прошивки, и mainline.
+На всех — DHCP на <code>eth0</code> и dropbear (пароль root задать <code>passwd</code>).</p>
+<h2 id="_1">Добавить плату</h2>
+<p>Чек-лист — <a href="../../adding-a-board.md">docs/adding-a-board.md</a>: <code>configs/&lt;fw&gt;_defconfig</code>,
+<code>board/&lt;плата&gt;/</code> (defconfig Buildroot, фрагменты ядра и U-Boot, патчи, boot/),
+блобы через <code>BOOTFW_*</code>/<code>AML_FIP_*</code> с хешами, и если есть экран с кнопками —
+платформа в bare_app (<code>src/platforms/&lt;плата&gt;.c</code>, <code>PLATFORM_&lt;ПЛАТА&gt;</code> в Kconfig,
+<code>configs/&lt;плата&gt;_defconfig</code> приложения). Оценка RG552 (RK3399) есть в памяти
+проекта: mainline почти полный, нужны панель, плата U-Boot и мультиплексор джойстика.</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

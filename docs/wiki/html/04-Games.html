@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4. Игры: как устроены — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="current">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Три пути</a>
+<a href="#_2">Где что лежит на плате</a>
+<a href="#a-windows-wine">Путь A: Windows-игра под Wine</a>
+<a href="#b-sdl2-">Путь B: SDL2-игра</a>
+<a href="#c">Путь C: свой движок</a>
+<a href="#_3">Обложки</a>
+<a href="#_4">Управление: одни имена везде</a>
+</div>
+</nav>
+<main>
+<h1 id="4">4. Игры: как устроены</h1>
+<h2 id="_1">Три пути</h2>
+<p>Игры запускает bare_app; каждая — отдельный процесс, который отдаёт кадры и
+получает геймпад по <code>game_ipc.h</code> (<a href="03-bare_app.html">3. bare_app</a>). Как именно
+игра добирается до этого протокола, зависит от того, на чём она написана:</p>
+<table>
+<thead>
+<tr>
+<th>Путь</th>
+<th>Для чего</th>
+<th>Что связывает с bare_app</th>
+<th>Код bare_app</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A. Windows-игра под Wine</strong> (<code>wine.ini</code>)</td>
+<td>x86-32 игры 1998–2010: D3D8/D3D9/DirectDraw, GDI</td>
+<td><code>bare_app_wine</code> (ports/wine) + драйвер <code>winebare.drv</code> внутри Wine</td>
+<td>не меняется</td>
+</tr>
+<tr>
+<td><strong>B. SDL2-игра</strong> (<code>game.ini</code>)</td>
+<td>Linux-порты на SDL2: RBDOOM-3-BFG, iortcw, Chocolate Doom, своя программа</td>
+<td>SDL2 SDK с драйверами <code>bareapp</code> (video + joystick)</td>
+<td>не меняется</td>
+</tr>
+<tr>
+<td><strong>C. Свой движок</strong> (<code>struct game_def</code>)</td>
+<td>движок без SDL или с особым выводом: VCMI (лупа), Xash3D, Doom (doomgeneric)</td>
+<td>патч движка с <code>game_ipc_client.h</code> + <code>src/games/&lt;игра&gt;.c</code></td>
+<td>один файл + строки</td>
+</tr>
+</tbody>
+</table>
+<p>Пути A и B — без единой строки кода в лаунчере. Текущие игры:</p>
+<table>
+<thead>
+<tr>
+<th>Игра</th>
+<th>Путь</th>
+<th>Движок / пакет</th>
+<th>Файлы на <code>/games</code></th>
+<th>Данные на <code>/data</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Герои III (heroes3)</td>
+<td>C</td>
+<td>VCMI 1.7.5, <code>vcmi</code></td>
+<td><code>heroes3/Data Maps Mp3 Mods</code></td>
+<td><code>vcmi/Saves</code>, <code>config/vcmi</code></td>
+</tr>
+<tr>
+<td>Half-Life</td>
+<td>C</td>
+<td>Xash3D FWGS + hlsdk-portable</td>
+<td><code>halflife/valve, valve_russian</code></td>
+<td><code>halflife/</code></td>
+</tr>
+<tr>
+<td>Doom</td>
+<td>C</td>
+<td>doomgeneric (<code>bare_app_doom</code>)</td>
+<td><code>doom/*.wad</code> (иначе shareware из образа)</td>
+<td><code>doom/</code></td>
+</tr>
+<tr>
+<td>DOOM 3 BFG</td>
+<td>B</td>
+<td>RBDOOM-3-BFG, <code>rbdoom3-bfg</code></td>
+<td><code>doom3/base</code></td>
+<td><code>doom3/</code></td>
+</tr>
+<tr>
+<td>RTCW</td>
+<td>B</td>
+<td>iortcw, <code>iortcw</code></td>
+<td><code>rtcw/main/*.pk3</code></td>
+<td><code>rtcw/</code></td>
+</tr>
+<tr>
+<td>Chocolate Doom</td>
+<td>B</td>
+<td>пакет Buildroot (в ogu выключен)</td>
+<td>—</td>
+<td><code>chocolate-doom/</code></td>
+</tr>
+<tr>
+<td>HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT</td>
+<td>A</td>
+<td>Wine 11.0 WoW64 + Box64</td>
+<td><code>&lt;id&gt;/</code> с <code>wine.ini</code></td>
+<td><code>wine/prefix</code>, <code>wine/games/&lt;id&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_2">Где что лежит на плате</h2>
+<p><img class="diagram" alt="Где что лежит" src="img/data-locations.svg" /></p>
+<p>Правило трёх каталогов:</p>
+<ul>
+<li><strong><code>/games/&lt;id&gt;</code></strong> — файлы игры, только чтение, с ПК по манифесту;</li>
+<li><strong><code>/data/&lt;id&gt;</code></strong> — HOME игры: сохранения, настройки (Wine: общий префикс
+  <code>/data/wine/prefix</code> и копии «writable» в <code>/data/wine/games/&lt;id&gt;</code>);</li>
+<li><strong><code>cover.png</code></strong> в каталоге игры — обложка 240×240 для плитки.</li>
+</ul>
+<p><code>&lt;id&gt;</code> — имя каталога, оно же имя каталога данных, оно же входит в ключ настроек
+управления. После первого запуска его лучше не менять.</p>
+<h2 id="a-windows-wine">Путь A: Windows-игра под Wine</h2>
+<p><img class="shot" alt="Tales of Monkey Island под Wine" src="img/shots/monkey1-menu.png" />
+<em>Tales of Monkey Island (GOG, по-русски через строку <code>reg</code>) под Wine: режим 800×600, картинка 16:9 на весь экран (<code>rows = 360 60 640x480</code>).</em></p>
+<p><img class="diagram" alt="Стек Wine" src="img/wine-stack.svg" /></p>
+<p>Каждый <code>/games/&lt;id&gt;/wine.ini</code> — плитка меню (<code>src/games/wine.c</code>). По A bare_app
+запускает <code>bare_app_wine &lt;каталог&gt;</code> — мост на C (~2800 строк, <code>ports/wine</code>),
+который:</p>
+<ol>
+<li>читает <code>wine.ini</code> (образец со всеми ключами —
+   <a href="../../../apps/bare_app/ports/wine/wine.ini">apps/bare_app/ports/wine/wine.ini</a>);</li>
+<li>готовит префикс <code>/data/wine/prefix</code> (первый запуск — <code>wineboot</code>, около минуты;
+   префикс один на все игры), диск <code>D:</code> — родитель каталога игры;</li>
+<li>если есть <code>writable</code>, делает копию каталога игры в <code>/data/wine/games/&lt;id&gt;</code>:
+   перечисленные записи — настоящие копии, остальное — ссылки на <code>/games</code>;</li>
+<li>применяет <code>reg</code> (ключи реестра, которые писал бы инсталлятор), <code>profile</code>
+   (файлы в <code>C:\users\&lt;user&gt;</code>, только если их там ещё нет), <code>locale</code>, <code>dlls</code>
+   (<code>WINEDLLOVERRIDES</code>), <code>env</code>;</li>
+<li>запускает Wine с <code>WINEBARE_SOCKET</code>. <code>winebare.drv</code> (патч Wine 0003) в каждом
+   процессе Wine подключается к мосту и отдаёт пиксели окон; мост собирает их в
+   один экран Windows режима <code>mode</code>, рисует курсор, масштабирует в кадр
+   (<code>scale = aspect|fill</code>, <code>rows</code>, <code>gamma</code>) и публикует;</li>
+<li>превращает кнопки и стики в мышь и клавиатуру по <code>[keys]</code>.</li>
+</ol>
+<p>Wine здесь — <strong>WoW64</strong>: Unix-часть и 64-битные DLL native aarch64, 32-битные
+DLL — i386 (их собирает <code>llvm-mingw</code>), x86-код игры исполняет <code>wowbox64.dll</code>
+(Box64). Direct3D идёт через WineD3D → OpenGL → Mesa panfrost → GPU Mali-G52.
+Этот стек — 25 патчей Wine, 3 wowbox64 и 5 Mesa; самые важные для
+производительности:</p>
+<table>
+<thead>
+<tr>
+<th>Патч</th>
+<th>Что</th>
+<th>Зачем</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mesa 0005 <code>PAN_MMAP_WINDOW</code></td>
+<td>буферы GPU в окне 0x80000000–0xffffffff</td>
+<td>WoW64 копировал GL-маппинги выше 4 ГиБ: Knights of the Temple 6 → 60 fps</td>
+</tr>
+<tr>
+<td>Wine 0004/0011/0012/0018 <code>WINE_D3D_CONFIG=HeapMaps,SysmemMaps,GLStateCache</code></td>
+<td>map буферов без ожидания CS-потока, меньше GL-вызовов</td>
+<td>рывки Pirates! на море 170–410 мс → &lt;90 мс</td>
+</tr>
+<tr>
+<td>Wine 0010 <code>WINE_FAST_MUTEX</code></td>
+<td>неименованные мьютексы без syscall</td>
+<td>Pirates! берёт мьютекс на каждое чтение pak-файла</td>
+</tr>
+<tr>
+<td>Wine 0013/0023/0024</td>
+<td>файлы на ro-ФС открываются read-only; поиск имён через <code>stat()</code> на FAT/exFAT</td>
+<td>игры открывают <code>*.lod</code> на запись; каталоги на карте большие</td>
+</tr>
+<tr>
+<td>Wine 0008 <code>WINE_FONT_SCALE</code>, 0007 Uniscribe</td>
+<td>крупнее шрифт, кэш раскладки текста</td>
+<td>текст Daemonica на маленьком экране</td>
+</tr>
+<tr>
+<td>Wine 0025 <code>mouse = relative</code></td>
+<td>движения вместо позиций</td>
+<td>игры с DirectInput (Prince of Persia)</td>
+</tr>
+</tbody>
+</table>
+<p>Box64 ускоряют <code>BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1</code> в <code>env</code> — это
+общие для всех Wine-игр.</p>
+<h3 id="wineini">Ключи <code>wine.ini</code>, которые решают больше всего</h3>
+<table>
+<thead>
+<tr>
+<th>Ключ</th>
+<th>Что</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>exe</code>, <code>args</code></td>
+<td>программа относительно каталога игры</td>
+</tr>
+<tr>
+<td><code>mode</code>, <code>modes</code></td>
+<td>режим рабочего стола Windows и какие ещё режимы игра может выбрать; 800×600 — обычный выбор для 854×480</td>
+</tr>
+<tr>
+<td><code>scale</code></td>
+<td><code>aspect</code> (поля) или <code>fill</code> (каждая ось отдельно: 854×600 → ширина 1:1)</td>
+</tr>
+<tr>
+<td><code>rows = N [TOP [WxH]]</code></td>
+<td>показывать только часть строк (Neighbours: верхние 480 из 600, 1:1)</td>
+</tr>
+<tr>
+<td><code>gamma</code></td>
+<td>&gt; 1 вытягивает тёмные сцены на маленьком экране</td>
+</tr>
+<tr>
+<td><code>locale</code></td>
+<td><code>ru_RU</code> для русских изданий (кодовая страница)</td>
+</tr>
+<tr>
+<td><code>writable</code></td>
+<td>что игра пишет в своём каталоге → копия в <code>/data/wine/games</code></td>
+</tr>
+<tr>
+<td><code>reg</code>, <code>profile</code>, <code>dlls</code>, <code>env</code></td>
+<td>реестр, профиль пользователя, overrides DLL, окружение</td>
+</tr>
+<tr>
+<td><code>mouse = relative</code></td>
+<td>для игр, читающих мышь через DirectInput</td>
+</tr>
+<tr>
+<td><code>[keys]</code></td>
+<td><code>stick = mouse|arrows|wheel|numpad|turn|scroll</code>, <code>dpad</code>, <code>cursor_speed</code>, <code>edge_zone</code>, кнопки → <code>lbutton</code>, клавиши, <code>magnify</code> (лупа 1:1)</td>
+</tr>
+<tr>
+<td><code>[labels]</code>, <code>[labels.ru]</code></td>
+<td>подписи кнопок для экрана управления</td>
+</tr>
+<tr>
+<td><code>minimize</code>, <code>volume = triggers</code></td>
+<td>своя кнопка сворачивания, L2/R2 — громкость</td>
+</tr>
+</tbody>
+</table>
+<h2 id="b-sdl2-">Путь B: SDL2-игра</h2>
+<p><img class="shot" alt="DOOM 3 BFG" src="img/shots/doom3.png" />
+<em>DOOM 3 BFG Edition (RBDOOM-3-BFG): обычная SDL2-программа, GPU рисует в pbuffer, драйвер <code>bareapp</code> отдаёт кадр bare_app.</em></p>
+<p>SDL2 в образе собран с драйверами <code>bareapp</code> (патч <code>package/bare-app/sdl2/0001</code>,
+опция <code>bare-app.SDL=y</code>):</p>
+<ul>
+<li><strong>video «bareapp»</strong> выбирается сам, когда есть fd 3 и 4. Режим рабочего стола =
+  видеослой; окно любого размера вписывается с сохранением пропорций
+  (<code>scale = fit|stretch|integer</code>, <code>filter = linear|nearest</code>). Поверхности и
+  программный рендер копируются в кадр; OpenGL ES рисует в pbuffer на
+  surfaceless-платформе Mesa и читается после каждого <code>SwapWindow</code>
+  (патч 0003 — асинхронно, <code>SDL_BAREAPP_GL_ASYNC=1</code> у DOOM 3). Кадры не чаще
+  <code>fps</code> (60) как при vsync. Настольного OpenGL нет — только GLES и compat-контекст,
+  что iortcw и устроило.</li>
+<li><strong>joystick «bareapp»</strong> — один <code>SDL_GameController</code> «bare_app gamepad»: кнопки по
+  надписям (A — a), Select/F2 — back, Start/F1 — start, Menu — guide, F3/F4 —
+  misc1/paddle1, L2/R2 — триггеры. <code>gamepad = f3=guide, l2=none</code> меняет
+  раскладку; <code>keys = a=Space, …</code> превращает кнопки в клавиши для игр без
+  поддержки контроллера. Linux-драйвер джойстика выключается, чтобы те же evdev
+  не читались дважды.</li>
+</ul>
+<p>Пункт меню появляется для каждого <code>/usr/share/bare_app/games/&lt;игра&gt;.ini</code> (так
+ставит пакет) и <code>/games/&lt;игра&gt;/game.ini</code> (так приходит игра с ПК). Формат с
+комментариями — <a href="../../../apps/bare_app/docs/game.ini">apps/bare_app/docs/game.ini</a>;
+пример из образа — <code>board/common/buildroot/package/rbdoom3-bfg/doom3.ini</code>:</p>
+<pre><code class="language-ini">name = DOOM 3 BFG Edition
+exe = /usr/bin/rbdoom3bfg
+args = +set fs_basepath /games/doom3 +set fs_savepath {data} +set r_fullscreen 1 +set r_vidMode -1 +set r_customWidth {width} +set r_customHeight {height}
+needs = /games/doom3/base/_common.resources
+cover = /games/doom3/cover.png
+gamepad = f1=start, f2=none, f3=none, f4=back
+keys = f2=F9, f3=F5
+hint.ru = R1  огонь    L1  перезарядка  ...  F5  свернуть    F6 (держать)  выйти
+scale = fit
+fps = 0
+gyro = 9.09
+[env]
+SDL_BAREAPP_GL_ASYNC = 1
+</code></pre>
+<p>Подстановки в <code>args</code>, <code>dir</code>, <code>[env]</code>: <code>{width}</code>, <code>{height}</code>, <code>{lang}</code>, <code>{data}</code>,
+<code>{dir}</code>. <code>needs</code> — файл, без которого плитка пишет «Не найдено: …». SDL2-играм
+bare_app сам ставит <code>PAN_MESA_DEBUG=noafbc</code>.</p>
+<h2 id="c">Путь C: свой движок</h2>
+<p>Игра линкует <code>game_ipc_client.h</code> и ведёт цикл «принять кнопки → нарисовать кадр
+размера слоя → опубликовать». В bare_app — <code>src/games/&lt;игра&gt;.c</code> со <code>struct
+game_def</code> (<code>missing</code>, <code>start</code>, подсказка, громкость), строка в <code>games.c</code>, символ в
+<code>Kconfig</code>, <code>add_if()</code> в CMake, строки <code>i18n</code>. В SDK — пакет движка с патчем
+«платформа bare_app» и опция в <code>package/bare-app/Config.in</code>. Образцы:
+<code>tests/fake_game.c</code> (минимум), <code>ports/doom/doom_main.c</code>, патч <code>vcmi/0001</code>,
+<code>xash3d-fwgs/0001</code>.</p>
+<p>Так сделаны Герои III (VCMI рисует 854×600 и сжимает по высоте, L1 — лупа 1:1
+за курсором, правый стик и крестовина прокручивают карту), Half-Life (рендер
+GLES офскрин на GO Ultra, программный на OGA — Cortex-A35 читает кадры GPU
+медленнее, чем рисует сам) и Doom.</p>
+<p><img class="shot" alt="Doom" src="img/shots/doom.png" />
+<em>Doom (<code>bare_app_doom</code>, doomgeneric): кадр 320×200, растянутый до 4:3 по высоте экрана, по бокам поля.</em></p>
+<p><img class="shot" alt="Герои III" src="img/shots/heroes3.png" />
+<em>Герои III под VCMI (<code>homm3.view=fit</code>): окно 854×600 сжато по высоте до 480, по ширине 1:1.</em></p>
+<h2 id="_3">Обложки</h2>
+<p><code>cover.png</code> делает <code>scripts/games-image.py</code> по ключу <code>cover</code> манифеста из
+картинки, записи <code>.lod</code>/<code>.wad</code> (<code>H3bitmap.lod:gamselb1.pcx</code>, <code>doom1.wad:TITLEPIC</code>),
+значка exe (<code>Game.exe:icon</code>) или кадра ролика (<code>intro.bik:4</code>, через ffmpeg);
+<code>cover_crop</code> режет в квадрат (<code>center|top|bottom|left|right|fit|"X Y SIZE"</code>),
+<code>cover_back</code> подкладывает размытый фон под значок. Делает всё <code>scripts/game_pictures.py</code>
+и PIL.</p>
+<h2 id="_4">Управление: одни имена везде</h2>
+<p>Имена кнопок одни и те же в <code>wine.ini</code>, <code>game.ini</code> и файле настроек:
+<code>up down left right a b x y l1 r1 l2 r2 select start menu f1…f6 stick rstick</code>
+(таблица <code>src/core/gp_names.c</code>). Переназначение пользователем — экран
+«Управление игры» — накладывается поверх ini и действует для любого пути.
+Кнопки, которые остаются у bare_app: питание, громкость, F6 (выход), кнопка
+сворачивания (F5, у Героев на GO Ultra F1), L2/R2 там, где <code>volume = triggers</code>.
+Принцип из практики: <strong>курсор в игре стиком не целят</strong> — для точных кликов в
+тестах есть <code>ogu-ctl.py wfmove:X,Y wclick</code>.</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='980' height='420' viewBox='0 0 980 420' font-family='Segoe UI, Noto Sans, DejaVu Sans, Arial, sans-serif'>
+<title>Разметка дисков</title>
+<defs>
+<marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto-start-reverse'><path d='M 0 0 L 10 5 L 0 10 z' fill='#444'/></marker>
+<marker id='dot' viewBox='0 0 10 10' refX='5' refY='5' markerWidth='6' markerHeight='6'><circle cx='5' cy='5' r='4' fill='#444'/></marker>
+</defs>
+<rect width='980' height='420' fill='white'/>
+<text x='20' y='30' font-size='13' text-anchor='start' font-weight='bold' fill='#333'>Один диск (GO Advance, SD): образ несёт только p1 и p2, p3 и p4 создаёт первая загрузка (S05data)</text>
+<rect x='20' y='50' width='60' height='80' rx='2' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='50.0' y='94.2' font-size='12' text-anchor='middle' fill='#222'>MBR</text>
+<rect x='80' y='50' width='110' height='80' rx='2' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='135.0' y='85.7' font-size='12' text-anchor='middle' fill='#222'>raw-блобы</text>
+<text x='135.0' y='102.7' font-size='12' text-anchor='middle' fill='#222'>(U-Boot) &lt;16M</text>
+<rect x='190' y='50' width='130' height='80' rx='2' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='255.0' y='77.2' font-size='12' text-anchor='middle' fill='#222'>p1 BOOT FAT32</text>
+<text x='255.0' y='94.2' font-size='12' text-anchor='middle' fill='#222'>Image, dtb,</text>
+<text x='255.0' y='111.2' font-size='12' text-anchor='middle' fill='#222'>extlinux.conf</text>
+<rect x='320' y='50' width='260' height='80' rx='2' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='450.0' y='77.2' font-size='12' text-anchor='middle' fill='#222'>p2 rootfs ext4</text>
+<text x='450.0' y='94.2' font-size='12' text-anchor='middle' fill='#222'>Buildroot + bare_app + движки</text>
+<text x='450.0' y='111.2' font-size='12' text-anchor='middle' fill='#222'>(rootfs.tar + свободно 256M)</text>
+<rect x='580' y='50' width='130' height='80' rx='2' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='645.0' y='77.2' font-size='12' text-anchor='middle' fill='#222'>p3 data ext4</text>
+<text x='645.0' y='94.2' font-size='12' text-anchor='middle' fill='#222'>/data: сохранения,</text>
+<text x='645.0' y='111.2' font-size='12' text-anchor='middle' fill='#222'>настройки</text>
+<rect x='710' y='50' width='250' height='80' rx='2' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='835.0' y='77.2' font-size='12' text-anchor='middle' fill='#222'>p4 GAMES FAT32 (до конца карты)</text>
+<text x='835.0' y='94.2' font-size='12' text-anchor='middle' fill='#222'>/games: файлы игр с ПК</text>
+<text x='835.0' y='111.2' font-size='12' text-anchor='middle' fill='#222'>(только чтение)</text>
+<text x='580' y='150' font-size='11' text-anchor='start' font-family='DejaVu Sans Mono, Consolas, monospace' fill='#333'>IMAGE_DATA_START_MB</text>
+<text x='770' y='150' font-size='11' text-anchor='start' font-family='DejaVu Sans Mono, Consolas, monospace' fill='#333'>+ IMAGE_DATA_SIZE_MB</text>
+<text x='190' y='150' font-size='11' text-anchor='start' font-family='DejaVu Sans Mono, Consolas, monospace' fill='#333'>16M</text>
+<text x='20' y='205' font-size='13' text-anchor='start' font-weight='bold' fill='#333'>GO Ultra: система на eMMC, все игры на отдельной SD-карте с одним разделом exFAT GAMES</text>
+<rect x='20' y='225' width='60' height='80' rx='2' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='50.0' y='260.7' font-size='12' text-anchor='middle' fill='#222'>MBR +</text>
+<text x='50.0' y='277.7' font-size='12' text-anchor='middle' fill='#222'>код FIP</text>
+<rect x='80' y='225' width='110' height='80' rx='2' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='135.0' y='252.2' font-size='12' text-anchor='middle' fill='#222'>FIP @ сектор 1</text>
+<text x='135.0' y='269.2' font-size='12' text-anchor='middle' fill='#222'>BL2/BL30/BL31</text>
+<text x='135.0' y='286.2' font-size='12' text-anchor='middle' fill='#222'>+ U-Boot</text>
+<rect x='190' y='225' width='130' height='80' rx='2' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='255.0' y='252.2' font-size='12' text-anchor='middle' fill='#222'>p1 BOOT FAT32</text>
+<text x='255.0' y='269.2' font-size='12' text-anchor='middle' fill='#222'>boot.ini, u-boot.bin,</text>
+<text x='255.0' y='286.2' font-size='12' text-anchor='middle' fill='#222'>Image, dtb, extlinux</text>
+<rect x='320' y='225' width='200' height='80' rx='2' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='420.0' y='260.7' font-size='12' text-anchor='middle' fill='#222'>p2 rootfs ext4</text>
+<text x='420.0' y='277.7' font-size='12' text-anchor='middle' fill='#222'>(до 2 ГиБ: Wine)</text>
+<rect x='520' y='225' width='240' height='80' rx='2' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='640.0' y='252.2' font-size='12' text-anchor='middle' fill='#222'>p3 data ext4 — до конца eMMC</text>
+<text x='640.0' y='269.2' font-size='12' text-anchor='middle' fill='#222'>/data: сохранения, префикс Wine,</text>
+<text x='640.0' y='286.2' font-size='12' text-anchor='middle' fill='#222'>hibernate.swap 1,5 ГиБ</text>
+<text x='20' y='330' font-size='12' text-anchor='start' font-weight='bold' fill='#333'>eMMC</text>
+<rect x='790' y='225' width='170' height='80' rx='2' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='875.0' y='252.2' font-size='12' text-anchor='middle' fill='#222'>SD-карта: p1 exFAT GAMES</text>
+<text x='875.0' y='269.2' font-size='12' text-anchor='middle' fill='#222'>/games/&lt;игра&gt;/…</text>
+<text x='875.0' y='286.2' font-size='12' text-anchor='middle' fill='#222'>нет extlinux → не загрузочная</text>
+<text x='790' y='330' font-size='12' text-anchor='start' font-weight='bold' fill='#333'>SD (карта игр)</text>
+<text x='20' y='365' font-size='12' text-anchor='start' fill='#333'>root=PARTUUID=&lt;disk id&gt;-02; /boot по UUID раздела BOOT; у eMMC свой disk id (4f475545), у SD — 4f475531,</text>
+<text x='20' y='385' font-size='12' text-anchor='start' fill='#333'>иначе при вставленной загрузочной карте оба диска подошли бы под root=. /games монтируется ro: питание можно просто выключить.</text>
+</svg>

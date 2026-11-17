@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7. Инструменты — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="current">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#games-imagepy">Игры на карту: games-image.py</a>
+<a href="#go-ultra-ogu-ctlpy">GO Ultra по сети: ogu-ctl.py</a>
+<a href="#go-advance-uart-oga-serialpy">GO Advance по UART: oga-serial.py</a>
+<a href="#_1">Прошивка и диски</a>
+<a href="#_2">Симулятор на ПК</a>
+<a href="#_3">Что смотреть при проблемах</a>
+</div>
+</nav>
+<main>
+<h1 id="7">7. Инструменты</h1>
+<p>Все скрипты лежат в <code>scripts/</code>; общее для них — <code>scripts/devlib.py</code> (пути
+<code>output/</code>, коды кнопок обеих плат, события evdev, PNG).</p>
+<h2 id="games-imagepy">Игры на карту: <code>games-image.py</code></h2>
+<pre><code class="language-sh">scripts/games-image.py --card /media/$USER/GAMES --board root@192.168.7.2   # все игры манифеста
+scripts/games-image.py --card /media/$USER/GAMES --reuse --games pop        # одну заново
+scripts/games-image.py --card /media/$USER/GAMES --reuse                    # только сверить
+scripts/games-image.py --card … --delete                                     # убрать лишнее в каталогах игр
+scripts/games-image.py -m МАНИФЕСТ [--only sd|emmc]                          # полный образ (GO Advance)
+</code></pre>
+<p>Что делает — <a href="05-Adding-a-Game.html#манифест-и-карта-как-это-работает">5. Добавление игры</a>.
+Нужны <code>rsync</code>, Python 3 с PIL, для обложек из роликов — <code>ffmpeg</code>, для <code>prepare.sh</code>
+отдельных игр — <code>unrar</code>, <code>llvm-mingw</code> из <code>output/ogu/buildroot/host</code>.
+Сопутствующие: <code>game_pictures.py</code> (картинки из <code>.lod</code>/<code>.wad</code>/<code>.exe</code>/<code>.bik</code>),
+<code>homm3-install.sh</code>, <code>halflife-install.sh</code> (только нужные движку файлы, на карту
+или по ssh).</p>
+<h2 id="go-ultra-ogu-ctlpy">GO Ultra по сети: <code>ogu-ctl.py</code></h2>
+<p>Работает по USB-сети (<code>192.168.7.2</code>, <code>OGU_HOST</code> меняет). Шаги выполняются по
+порядку одним заходом на плате:</p>
+<pre><code class="language-sh">scripts/ogu-ctl.py shot:screen.png              # снимок всех слоёв (SIGUSR1 bare_app)
+scripts/ogu-ctl.py a wait:2000 down a           # кнопки: up down left right a b x y l r l2 r2 f1..f6; NAME:MS — удержание
+scripts/ogu-ctl.py stick:1,0.5,800 shot:s.png   # левый стик X,Y (−1..1) на 800 мс; rstick: — правый
+scripts/ogu-ctl.py launch:monkey2 wait:30000 shot:m.png   # игра без меню: имя каталога, название или ключ
+scripts/ogu-ctl.py wfmove:238,188 wclick        # курсор Windows-игры в пиксель снимка, клик (wclick:right)
+scripts/ogu-ctl.py wkey:ctrl+s wkey:esc         # клавиша Windows-игре именами из [keys]
+scripts/ogu-ctl.py quit-game                    # закрыть игру (в т. ч. свёрнутую)
+</code></pre>
+<p>Имя для <code>launch:</code> — имя каталога игры на <code>/games</code> (Wine-игры: <code>monkey2</code>, <code>pop</code>),
+её название (<code>'launch:DOOM 3 BFG Edition'</code>, одним аргументом) или id из
+<code>game_def</code> для игр со своим движком: Герои III — <code>homm3</code>, не <code>heroes3</code>
+(так называется их каталог данных); Doom — <code>doom</code>, Half-Life — <code>halflife</code>.
+Неверное имя — строка <code>ctl: launch …: no such game</code> в журнале.</p>
+<p>Кнопки пишутся в evdev <code>gpio-keys</code>, так что bare_app и игра видят их как
+настоящие; стики требуют <code>scripts/ogu-hold.c</code> на плате (скрипт сам собирает и
+копирует в <code>/tmp</code>). <code>launch</code>, <code>quit-game</code> и <code>w…</code> — строки в FIFO
+<code>/tmp/bare_app.ctl</code> и <code>/tmp/bare_app_wine.ctl</code>: курсор встаёт точно, без стика.
+Удержание кнопки программно на GO Ultra ограничено (монитор системы открывают
+<code>BARE_APP_SYSMON=full</code> в окружении).</p>
+<p>Автоматический прогон DOOM 3 — <code>scripts/doom3-test.py</code> (suite 9/9 PASS в последнем
+состоянии).</p>
+<h2 id="go-advance-uart-oga-serialpy">GO Advance по UART: <code>oga-serial.py</code></h2>
+<p>Сеть и пакеты на плате не нужны: консоль <code>/dev/ttyUSB0</code>, 115200 (<code>-p</code> или
+<code>OGA_PORT</code>), файлы идут gzip+base64 на 7–10 КБ/с с проверкой md5. Нужен только
+pyserial. Порт открывается эксклюзивно — закройте <code>screen</code>/<code>picocom</code>.</p>
+<pre><code class="language-sh">scripts/oga-serial.py sh 'uname -a'
+scripts/oga-serial.py push app /usr/bin/app
+scripts/oga-serial.py pull /var/log/bare_app.log log
+scripts/oga-serial.py run --bg apps/oga-pad/oga-pad
+scripts/oga-serial.py shot screen.png
+scripts/oga-serial.py key right right a f6
+</code></pre>
+<p><code>apps/bare_app/tools/oga.sh run|key|shot|stop</code> — обёртка для разработки
+лаунчера: собирает кросс-тулчейном, копирует изменившиеся бинарники в <code>/tmp</code>
+платы, запускает. <code>/tmp</code> на плате — tmpfs.</p>
+<h2 id="_1">Прошивка и диски</h2>
+<table>
+<thead>
+<tr>
+<th>Команда</th>
+<th>Что</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>make flash DEV=/dev/sdX</code></td>
+<td>весь образ выбранной прошивки (<code>make info</code>!)</td>
+</tr>
+<tr>
+<td><code>make flash-boot DEV=…</code></td>
+<td>только загрузчик и BOOT, rootfs и данные остаются</td>
+</tr>
+<tr>
+<td><code>make flash-emmc</code> / <code>flash-emmc-boot</code></td>
+<td>eMMC GO Ultra через USB (Vol+ при включении); диск находится по USB-id гаджета U-Boot</td>
+</tr>
+<tr>
+<td><code>make FW=oga flash IMAGE_FILE=lab/images/oga-games.img DEV=…</code></td>
+<td>образ с играми</td>
+</tr>
+<tr>
+<td><code>usb-disk start|status|stop</code> (на плате)</td>
+<td>раздел игр компьютеру по USB</td>
+</tr>
+<tr>
+<td><code>games-mount rw|ro|devices|stop</code> (на плате)</td>
+<td>запись на карту с платы</td>
+</tr>
+</tbody>
+</table>
+<p>Перед записью загрузчика — бэкап: первые 16 МиБ eMMC (заводской загрузчик GO
+Ultra возвращается из них), FIP, <code>/data</code>. Всё это уже лежит в <code>lab/backups/ogu/</code>.</p>
+<h2 id="_2">Симулятор на ПК</h2>
+<pre><code class="language-sh">cd apps/bare_app &amp;&amp; cmake -S . -B build-host &amp;&amp; cmake --build build-host -j
+cd build-host &amp;&amp; ctest                      # юнит-тесты, game_smoke с tests/fake_game.c
+./bare_app                                  # окно SDL
+echo &quot;wait:800 down a wait:3000 f6&quot; | BARE_APP_SHOT=/tmp/s.ppm ./bare_app -p pc-mem
+BARE_APP_SIZE=854x480 BARE_APP_SIM_BATTERY=/tmp/bat BARE_APP_SIM_DEVICES=7 ./bare_app -p pc-mem
+tools/ppm2png.py /tmp/s.ppm /tmp/s.png
+</code></pre>
+<p>Для SDL2-игр на ПК нужен SDL2 2.32 с патчем SDK (<code>configure --enable-bareapp</code>) и
+<code>BARE_APP_NATIVE_DIRS</code>; для Doom — <code>BARE_APP_DOOM_WAD</code>; для Half-Life — движок с
+<code>--enable-bare-app</code> и <code>BARE_APP_HALFLIFE_*</code>.</p>
+<h2 id="_3">Что смотреть при проблемах</h2>
+<table>
+<thead>
+<tr>
+<th>Признак</th>
+<th>Где искать</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>игры нет в меню</td>
+<td>ini не там, нет <code>exe</code>; журнал: <code>native: …: no exe</code></td>
+</tr>
+<tr>
+<td>«Не найдено: путь»</td>
+<td><code>needs</code>/<code>missing()</code></td>
+</tr>
+<tr>
+<td>стартует и закрывается</td>
+<td><code>/var/log/bare_app.log</code> — туда идёт stdout/stderr игры и Wine</td>
+</tr>
+<tr>
+<td>чёрный экран, «Загрузка…»</td>
+<td>другой видеодрайвер; <code>SDL_LOGGING = video=debug</code></td>
+</tr>
+<tr>
+<td>рывки</td>
+<td>монитор F5 (удерживать): график времени кадра, CPU по кластерам, диск; <code>BARE_APP_FRAME_STATS=1</code> в лог</td>
+</tr>
+<tr>
+<td>Wine</td>
+<td><code>WINEBARE_FPS=1</code> — fps и стопы; <code>WINEDEBUG</code> как обычно</td>
+</tr>
+<tr>
+<td>что реально на панели</td>
+<td><code>/sys/kernel/debug/dri/0/state</code> (снимок — буферы приложения, не панель)</td>
+</tr>
+<tr>
+<td>U-Boot встал</td>
+<td>шаги печатаются на экран и UART (<code>Boot 1: mmc0 …</code>); сторожевой таймер сбросит через 60 с</td>
+</tr>
+</tbody>
+</table>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

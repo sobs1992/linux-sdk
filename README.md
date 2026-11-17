@@ -134,6 +134,7 @@ output/<fw>/                   результаты сборки прошивк�
 | [docs/boards/ogu.md](docs/boards/ogu.md) | ODROID-GO Ultra: FIP, eMMC, карта игр exFAT, быстрая загрузка, гибернация, часы, USB-сеть, Half-Life, RTCW |
 | [docs/boards/bbb-rpi.md](docs/boards/bbb-rpi.md) | BeagleBone Black, Raspberry Pi 1 и 4 |
 | [docs/architecture-review-2026-11-16.md](docs/architecture-review-2026-11-16.md) | обзор архитектуры и журнал переделок ноября 2026 |
+| [docs/wiki/Home.md](docs/wiki/Home.md) | вики: устройство проекта со схемами и снимками экрана, как добавить игру, нюансы, инструменты; HTML — `docs/wiki/build-html.py` → `docs/wiki/html/` |
 | [apps/bare_app/README.md](apps/bare_app/README.md), [docs/ARCHITECTURE.md](apps/bare_app/docs/ARCHITECTURE.md), [docs/GAMES.md](apps/bare_app/docs/GAMES.md) | bare_app: что умеет, как устроено, как добавить игру в приложение |
 | [games/README.md](games/README.md) | карта игр GO Ultra, манифест, данные проекта в `lab/` |
 | `docs/book`, `docs/dev-book`, `docs/check-book` | книги: как SDK устроен, разработка на нём, проверка плат (`docs/book/build.py` собирает PDF) |

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6. Нюансы — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="current">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Сборка</a>
+<a href="#_2">Диски и карта игр</a>
+<a href="#wine-">Wine-игры</a>
+<a href="#sdl2-">SDL2-игры</a>
+<a href="#_3">Игры с движком</a>
+<a href="#_4">Плата</a>
+<a href="#_5">Процесс работы</a>
+</div>
+</nav>
+<main>
+<h1 id="6">6. Нюансы и подводные камни</h1>
+<p>Всё ниже — не теория, а то, на что уже наступали. Сгруппировано по месту.</p>
+<h2 id="_1">Сборка</h2>
+<ul>
+<li><strong>Один тяжёлый компонент за раз.</strong> Машина с 14 ГБ: <code>make</code> без <code>-j</code> сверху,
+  VCMI в 4 потока по ~1 ГБ (<code>VCMI_JOBS</code>). Ad-hoc скрипты ограничивать
+  (<code>ulimit</code>/<code>MemoryMax</code>): OOM-kill внутри VS Code закрывает VS Code.</li>
+<li><strong><code>-dirclean</code>, не <code>-rebuild</code></strong> после правки патча пакета: Buildroot
+  накладывает патчи только при распаковке. <code>rebuild</code> — для проверки правки
+  прямо в <code>output/&lt;fw&gt;/buildroot/build/&lt;pkg&gt;-&lt;версия&gt;</code>, в образ попадает патч.</li>
+<li><strong>SDL2 не пересобирается сам</strong>, когда меняется <code>bare-app.SDL</code> или его патчи:
+  <code>make rootfs-make BR=sdl2-dirclean</code>, потом <code>make rootfs</code>.</li>
+<li><strong>Каждая правка патча ядра — копия дерева заново</strong> (~1,8 ГБ, часы на пересборку
+  затронутых файлов). Патчи ядра и U-Boot не правят «ради красоты».</li>
+<li><strong><code>.config</code> компонента пересоздаётся</strong>, когда меняется defconfig или фрагмент;
+  правки из <code>menuconfig</code> живут до этого момента — <code>*-savedefconfig</code> или во
+  фрагмент. <code>scripts/kconfig-check.sh</code> скажет, какие строки фрагмента не
+  попали в <code>.config</code>.</li>
+<li><strong><code>make &lt;fw&gt;_defconfig</code> — отдельной командой.</strong> <code>make oga_defconfig all</code> в одной
+  строке — ошибка (конфиг ещё не загружен).</li>
+<li><strong><code>make flash</code> пишет образ выбранной прошивки.</strong> <code>make info</code> перед записью.</li>
+<li><strong><code>make linux</code> стирает <code>linux-install/</code></strong> и ставит модули заново.</li>
+<li><strong>Выключенный пакет остаётся в <code>target/</code></strong> у чистого Buildroot. SDK это
+  чинит (<code>apps-config.sh dropped</code>), но пакет, пересобранный вручную
+  (<code>X-rebuild</code>), до следующего <code>configure</code> имеет пустой список файлов, и purge
+  его не увидит.</li>
+<li><strong>Buildroot <code>target/</code> помнит выключенные пакеты</strong> иначе: после реконфигурации
+  проверяйте <code>ls output/&lt;fw&gt;/buildroot/target/usr/share/bare_app/games/</code>.</li>
+<li><strong>Патчи Mesa</strong> (<code>mesa-panfrost-dirclean</code>): зависящие от неё пакеты пересобирать
+  не нужно.</li>
+<li><strong>Нумерация патчей</strong> сплошная по каталогу; при слиянии веток с патчами
+  (gothic 0025–0027 поверх pop 0025) номера приходится переставлять.</li>
+</ul>
+<h2 id="_2">Диски и карта игр</h2>
+<ul>
+<li><strong><code>/games</code> только для чтения.</strong> Всегда. Игра, которая пишет в свой каталог,
+  получит ошибку — Wine-игре нужен <code>writable</code>, SDL-игре — <code>{data}</code>. Проверять
+  финально нужно именно так: карта в <code>rw</code> скрыла запись <code>MSSSOFT.M3D</code>, из-за
+  которой Gothic не запускался у пользователя.</li>
+<li><strong>exFAT и FAT не знают регистра.</strong> <code>DOOM3</code> и <code>doom3</code> — один каталог; Wine ищет
+  имена через <code>stat()</code> (патчи 0023/0024), иначе каждый открываемый файл стоил бы
+  чтения каталога.</li>
+<li><strong>Кластер 32 КиБ</strong> при форматировании exFAT: по умолчанию 128, мелких файлов тысячи.</li>
+<li><strong>FAT32 — файлы до 4 ГБ.</strong> Ресурсы DOOM 3 BFG больше.</li>
+<li><strong>Карта подключается только при загрузке.</strong> Вставили позже — перезагрузка.</li>
+<li><strong>Карта с <code>extlinux.conf</code> — загрузочная</strong>: U-Boot загрузит систему с неё, и к
+  eMMC она уже не добавится. Карта игр не должна нести файлы загрузки.</li>
+<li><strong>Запись образа стирает <code>/data</code> и <code>/games</code> на том диске</strong> (у <code>games-image.py</code>
+  без <code>--card</code>). Сохранения снимать заранее: <code>ssh root@… 'tar -cf - -C /data .' &gt; data.tar</code>.</li>
+<li><strong>Старая разметка (p4 на eMMC GO Ultra).</strong> Пока p4 есть, p3 не растёт.
+  Удалять: <code>games-mount stop; dd … p4 count=4; sfdisk --delete … 4; reboot</code>.</li>
+<li><strong>USB-диск ~11 МБ/с</strong>, картридер быстрее. «Выключить» в GNOME убивает и сеть.</li>
+<li><strong>Ключ хоста dropbear меняется с каждым образом</strong> — <code>ogu-ctl.py</code> его не проверяет.</li>
+</ul>
+<h2 id="wine-">Wine-игры</h2>
+<ul>
+<li><strong>Первый запуск после пересборки Wine падает один раз</strong> и может сбросить
+  настройки игры (prefs). Запустить ещё раз.</li>
+<li><strong>Один префикс на все игры</strong> (<code>/data/wine/prefix</code>): шрифты, реестр, Documents
+  общие. Строки <code>reg</code> в <code>wine.ini</code> ставятся при каждом старте (0,1–0,8 с), так
+  что они и переживают пересоздание префикса.</li>
+<li><strong><code>profile</code> копирует только то, чего ещё нет</strong>: правки пользователя не
+  затираются. Файл с последним сохранением (<code>prefs.prop</code> Telltale) в
+  <code>overlay/profile</code> класть нельзя — он назовёт чужое сохранение.</li>
+<li><strong><code>writable</code> — только настоящие записи.</strong> Остальное — ссылки на <code>/games</code>; запись
+  глубже (<code>Sbz1/Save</code>) делает родителей настоящими каталогами копии.</li>
+<li><strong>DirectInput-мышь.</strong> Wine держит курсор на месте, и каждая присланная позиция
+  становится сдвигом: курсор «ползёт». <code>mouse = relative</code>.</li>
+<li><strong>Игра открывает файлы на запись, хотя не пишет</strong> (<code>*.lod</code> у Героев): патч Wine
+  0013 отдаёт read-only на ro-ФС без ошибки, копия не нужна.</li>
+<li><strong><code>scale = fill</code> допустим только когда ширина 1:1</strong> (854×600 → 854×480), иначе
+  текст плывёт.</li>
+<li><strong>Никогда не уменьшать буфер самой игры</strong> (Neighbours from Hell): heap
+  corruption. Перекладывать интерфейс, не экран.</li>
+<li><strong>Тёмные игры</strong> — <code>gamma = 1.6</code> (Templar), не трогать настройки игры.</li>
+<li><strong>Мелкий текст</strong> — <code>WINE_FONT_SCALE=1.25</code> + <code>FREETYPE_PROPERTIES=truetype:interpreter-version=35</code>
+  (v35 — хинтинг как в Windows, без него «c» слипается с соседом). Больше 1.25 —
+  строки с фиксированным шагом налезают.</li>
+<li><strong>D3DX, OpenAL, шрифты из Windows</strong> — не в git, в <code>lab/redist/</code>.</li>
+<li><strong><code>NoMultisample=1</code></strong> (Wine 0021) — сглаживание выключено: 19 → 39 fps у Monkey Island.</li>
+<li><strong>Launcher'ы GOG</strong> (<code>gpp.exe</code>, <code>Launcher.exe</code>) под Wine не работают — запускать
+  сам exe (PoP: свой <code>poplaunch.exe</code> держит мьютекс, которого ждёт <code>POP.EXE</code>).</li>
+<li><strong><code>WINE_FAST_MUTEX</code></strong> только для игр, ждущих мьютексы <code>WaitForSingle/MultipleObjects</code>.</li>
+<li><strong><code>HeapMaps=2</code> роняет Pirates!</strong> — <code>HeapMaps=1</code>.</li>
+<li><strong>Рендер OpenGL старых игр</strong> (RndrGL у Templar) написан под расширения NVIDIA и
+  падает в Mesa: оставлять Direct3D.</li>
+<li><strong>Монитор зависимости:</strong> CS-поток WineD3D на 100 % ядра — обычный потолок (PoP ~30 fps).</li>
+</ul>
+<h2 id="sdl2-">SDL2-игры</h2>
+<ul>
+<li><strong>Не ставить <code>SDL_VIDEODRIVER</code></strong> в <code>[env]</code>: драйвер <code>bareapp</code> выбирается сам;
+  чужой даст чёрный экран и вечную «Загрузку…».</li>
+<li><strong>Игра не видит контроллер</strong> — читает <code>/dev/input</code> сама или знает только
+  клавиатуру: <code>keys</code>.</li>
+<li><strong>Медленно на OGA</strong> — <code>SDL_RENDER_DRIVER = software</code>: A35 читает кадры GPU
+  дольше, чем рисует.</li>
+<li><strong><code>vid_restart</code></strong> (смена режима) в движках Quake-семейства: драйвер брал
+  функции GL из выгруженной библиотеки (SDL 0005).</li>
+<li><strong>Настольного OpenGL нет</strong> — GLES 2/3 и compat-контекст 3.1 через Mesa.</li>
+<li><strong>Mesa 25.0 <code>pan_cast_and_pack</code></strong> ломала DOOM 3 (DATA_INVALID, падение preload):
+  Mesa 0004. Утечки Bink и файлов ресурсов — engine 0018.</li>
+</ul>
+<h2 id="_3">Игры с движком</h2>
+<ul>
+<li><strong>Имя игры = каталог данных = ключ настроек.</strong> Переименовали — потеряли
+  сохранения в меню и порядок плиток.</li>
+<li><strong><code>GAME_FRAME_SAME</code></strong>: движок, который не шлёт «кадр тот же», выглядит как
+  зависший (монитор пишет «still»), а его простой не отличить от фриза.</li>
+<li><strong>VCMI под bare_app включает все моды из <code>Mods</code></strong> (патч 0006): выключить мод —
+  удалить каталог. Загрузка с HotA ~10 с.</li>
+<li><strong>Языки</strong>: язык игры = язык bare_app, действует со следующего запуска; тексты
+  карт остаются, какими записаны.</li>
+<li><strong>Half-Life на OGA — программный рендер</strong>; выбор в меню игры хранится в
+  <code>video.cfg</code> и переживает всё.</li>
+</ul>
+<h2 id="_4">Плата</h2>
+<ul>
+<li><strong>Reboot на GO Advance зависал</strong> — PMIC RK817 (ядро 0002); на GO Ultra U-Boot не
+  видел SD после тёплой перезагрузки — <code>DEV_OFF_RST</code> RK818 (ядро 0017) + SD 50 МГц
+  (U-Boot 0002). Когда сомневаетесь — <code>poweroff</code>, не <code>reboot</code>.</li>
+<li><strong>Никогда не трогать регистры PMIC живьём</strong> и не ставить governor <code>performance</code>
+  обоим кластерам (плата повисала).</li>
+<li><strong>Не выгружать <code>axg-sound-card</code>.</strong></li>
+<li><strong>Не печатать в UART, пока U-Boot ждёт</strong> (<code>BOOTDELAY=0</code>): остановить его —
+  держать Enter с самого включения.</li>
+<li><strong>Bit-42 чтения под нагрузкой GPU на GO Ultra</strong>: ошибка аппаратная (кэш врёт, DRAM
+  права); частота 666 МГц в ядре 0025 даёт 0 ошибок на стенде, 800 — ошибки и
+  панику DOOM 3. Стенд — круглая кнопка «Стресс-тест» в меню.</li>
+<li><strong>Гибернация и GPU-буферы</strong>: без патчей 0028/0029 DOOM 3 не помещался в образ, а
+  первое задание GPU после пробуждения падало (<code>SError</code>).</li>
+<li><strong>Батарея после сброса PMIC</strong> переоценивалась по OCV («86 %») — ядро 0031.</li>
+<li><strong>Часы RK817 отстают на 14 %</strong> — время берётся из RK818 (<code>rtc-clock</code>).</li>
+<li><strong>Wi-Fi дома</strong>: точка в состоянии CSA не даёт mac80211 аутентификацию (OGA).</li>
+<li><strong>CP2102 не читает 1,5 Мбод</strong> заводского miniloader OGA — это нормально, U-Boot
+  уже на 115200.</li>
+<li><strong>Hardkernel-напряжения</strong>: <code>vcc_lcd</code> 3,0 В, при 3,3 В полосы и тусклая картинка.</li>
+</ul>
+<h2 id="_5">Процесс работы</h2>
+<ul>
+<li><strong>Сначала модель и инварианты, потом правки</strong>: матрица сценариев через
+  настоящую точку входа и мутация каждого исправления. Локальные латки стоили
+  шесть раундов ревью.</li>
+<li><strong>Проверять на обеих платах</strong>, если правка в общем коде (<code>display_drm</code>, SDL-драйвер).</li>
+<li><strong>Снимки и журналы в <code>logs/</code></strong>, бэкапы eMMC/FIP/<code>/data</code> — в <code>lab/backups/&lt;плата&gt;/</code>
+  перед любой записью загрузчика.</li>
+<li><strong>Карта игр и <code>/data</code> — пользовательские</strong>: <code>games-image.py</code> без <code>--delete</code>,
+  сохранения не трогать без просьбы.</li>
+</ul>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

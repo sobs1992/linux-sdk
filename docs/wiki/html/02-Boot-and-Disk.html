@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2. Загрузка и диски — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="current">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Цепочки загрузки</a>
+<a href="#_2">Разметка дисков</a>
+<a href="#usb-">USB-диск</a>
+<a href="#usb-c-go-ultra">Сеть по USB-C (GO Ultra)</a>
+<a href="#_5">Первая загрузка</a>
+</div>
+</nav>
+<main>
+<h1 id="2">2. Загрузка и разметка дисков</h1>
+<h2 id="_1">Цепочки загрузки</h2>
+<p><img class="diagram" alt="Цепочки загрузки" src="img/boot-chains.svg" /></p>
+<p>Общее для всех плат: U-Boot определяет модель, выбирает dtb и читает
+<code>extlinux/extlinux.conf</code> с раздела BOOT, а ядро монтирует корень по
+<code>root=PARTUUID=&lt;disk id&gt;-02</code>. Отличается только то, как до U-Boot добирается
+BootROM:</p>
+<ul>
+<li><strong>GO Advance (RK3326).</strong> BootROM сначала смотрит в SPI-флеш. У Black Edition
+  там с завода recovery-загрузчик Hardkernel (DDR-блоб + miniloader, лог на 1,5 Мбод,
+  который CP2102 не читает), поэтому образ <strong>гибридный</strong> (<code>RK_LEGACY := y</code>): тот
+  же mainline U-Boot упакован и как <code>u-boot.itb</code> для открытой цепочки TPL → SPL →
+  TF-A, и как <code>uboot.img</code> + <code>trust.img</code> (BL31 из rkbin) для miniloader. Грузится
+  и так, и так. Таблица разделов — MBR: GPT пересеклась бы с окружением U-Boot на 16K.</li>
+<li><strong>GO Ultra (S922X).</strong> BootROM берёт загрузчик с сектора 1 сначала eMMC, потом
+  SD. Образ несёт свой FIP: BL2/BL30/BL31 Amlogic (блобы LibreELEC, скачиваются при
+  сборке — лицензия запрещает их класть в git) + mainline U-Boot как BL33. Пока на
+  eMMC заводской загрузчик, он выполняет <code>boot.ini</code> с карты и чейнлоадит наш
+  <code>u-boot.bin</code>. После записи нашего FIP на eMMC (<code>make flash-emmc</code>) U-Boot всегда
+  идёт с eMMC, а Linux — с SD, если на ней есть <code>extlinux.conf</code>, иначе с eMMC.</li>
+<li><strong>Raspberry Pi</strong> — прошивка GPU читает <code>config.txt</code> и запускает <code>u-boot.bin</code>.</li>
+<li><strong>BeagleBone Black</strong> — ROM → <code>MLO</code> → <code>u-boot.img</code> с FAT.</li>
+</ul>
+<p>Подробности каждой платы — <a href="08-Boards.html">8. Платы</a>.</p>
+<h2 id="_2">Разметка дисков</h2>
+<p><img class="diagram" alt="Разметка" src="img/sd-layout.svg" /></p>
+<p>Образ (<code>make image</code>) содержит только MBR, raw-блобы загрузчика, <strong>p1 BOOT</strong>
+(FAT32: ядро, dtb, extlinux) и <strong>p2 rootfs</strong> (ext4). Разделов данных в образе
+нет — их создаёт при первой загрузке <code>/etc/init.d/S05data</code>
+(<code>board/common/buildroot/rootfs-overlay</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Раздел</th>
+<th>Метка</th>
+<th>Где</th>
+<th>Для чего</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>p3 ext4</td>
+<td><code>data</code></td>
+<td><code>/data</code></td>
+<td>всё, что пишется на плате: сохранения, настройки, префикс Wine, журналы, файл гибернации</td>
+</tr>
+<tr>
+<td>p4 FAT32</td>
+<td><code>GAMES</code></td>
+<td><code>/games</code></td>
+<td>файлы игр, скопированные с ПК; только если задан <code>IMAGE_DATA_SIZE_MB</code></td>
+</tr>
+</tbody>
+</table>
+<p>Начало p3 задаёт <code>IMAGE_DATA_START_MB</code>, конец — <code>IMAGE_DATA_SIZE_MB</code> (или конец
+диска). rootfs должен кончаться раньше — это проверяет <code>mkimage.sh</code>. После
+<code>make flash</code> в таблице снова только p1 и p2, но скрипт находит на прежних местах
+файловые системы <code>data</code> и <code>GAMES</code> и подключает их без форматирования: <strong>оба
+раздела переживают перепрошивку</strong>. Раздел с другой ФС скрипт не трогает.</p>
+<h3 id="_3">Две схемы</h3>
+<ul>
+<li><strong>GO Advance</strong> — всё на одной SD: p3 <code>data</code> 1 ГБ с 4096 МиБ, p4 <code>GAMES</code> до конца.</li>
+<li><strong>GO Ultra</strong> — система и <code>/data</code> на eMMC (p3 до конца eMMC, раздела игр нет),
+  <strong>все игры на отдельной SD-карте с одним разделом exFAT <code>GAMES</code></strong>. На карте нет
+  <code>extlinux.conf</code>, поэтому U-Boot её пропускает и грузит систему с eMMC, а
+  <code>S05data</code> монтирует её на <code>/games</code>. Карту можно менять; вставленная после
+  загрузки подключится после перезагрузки.</li>
+</ul>
+<p>Форматирование карты игр (Linux): <code>sudo mkfs.exfat -c 32K -L GAMES /dev/sdX1</code> —
+кластер 32 КиБ вместо 128 по умолчанию, мелких файлов у игр много. Windows и
+macOS: обычный exFAT с меткой <code>GAMES</code>. FAT32 тоже подходит, но файлы больше 4 ГБ
+туда не лягут (у DOOM 3 BFG ресурсы большие).</p>
+<h3 id="_4">Когда разделов игр два</h3>
+<p>Если у платы есть и свой p4, и карта, их объединяет <code>/usr/sbin/games-mount</code>:
+разделы монтируются в <code>/run/games/0</code> и <code>/run/games/1</code>, а <code>/games</code> — tmpfs из
+символических ссылок. Каталог, который есть в обоих, становится настоящим
+каталогом с файлами обоих (так карта может добавить <code>base/maps</code> к DOOM 3 на
+eMMC); при совпадении имён берётся файл первого. overlayfs не подходит: он не
+принимает FAT и exFAT. Имена сравниваются без регистра, как на FAT.</p>
+<h3 id="games"><code>/games</code> только для чтения</h3>
+<p><code>/games</code> всегда монтируется ro, чтобы выключение питания не оставляло FAT
+«грязной». Писать с платы: <code>games-mount rw</code>, потом <code>games-mount ro</code>
+(карту — <code>mount -o remount,rw /run/games/1</code>). Игры этого не знают: сохранения у
+них идут в <code>/data</code>, а Wine-игры, пишущие в свой каталог, получают копию
+(<code>writable</code> в <code>wine.ini</code>, см. <a href="04-Games.html">4. Игры</a>).</p>
+<h2 id="usb-">USB-диск</h2>
+<p>Без извлечения карты раздел игр можно открыть компьютеру по USB-C:
+<code>/usr/sbin/usb-disk start</code> отмонтирует <code>/games</code> и добавляет к работающему
+USB-гаджету (<code>S42usbnet</code>, сеть остаётся) функцию mass storage; компьютер видит
+съёмный диск <code>GAMES</code>. <code>usb-disk status</code> замечает, что компьютер извлёк диск,
+<code>usb-disk stop</code> проверяет ФС (<code>fsck.exfat -p</code> / <code>fsck.fat -a</code>) и монтирует обратно.
+В bare_app это экран «USB-диск» (GO Ultra): раздел открыт, пока открыт экран, и
+возвращается сам после извлечения на компьютере. Запись ~11 МБ/с, поэтому для
+больших игр быстрее картридер. «Выключить» в «Дисках» GNOME отключает всё
+USB-устройство вместе с сетью — тогда B дважды на приставке.</p>
+<h2 id="usb-c-go-ultra">Сеть по USB-C (GO Ultra)</h2>
+<p><code>S42usbnet</code> делает из порта сетевую карту (NCM): приставка — <code>192.168.7.2</code>,
+компьютер получает <code>192.168.7.1</code> по DHCP без шлюза. Дальше <code>ssh root@192.168.7.2</code>
+по ключу из <code>board/common/buildroot/authorized_keys</code> (файл не в git: положите
+свой открытый ключ до <code>make rootfs</code>; у root нет пароля, и dropbear без ключа не
+пустит). Ключ хоста dropbear создаётся заново после каждой записи образа.
+<code>scripts/ogu-ctl.py</code> ходит по этой сети.</p>
+<h2 id="_5">Первая загрузка</h2>
+<ol>
+<li><code>S05data</code> создаёт <code>/data</code> (и <code>/games</code> там, где он на том же диске), находит карту игр.</li>
+<li><code>S03mdev</code> в фоне грузит модули; <code>S30audio</code> (GO Ultra) ставит маршрут DPCM звуковой карты;
+   <code>S31clock</code> берёт время из RTC RK818; <code>S06hibernate</code> готовит файл гибернации.</li>
+<li><code>S&lt;INIT_ORDER&gt;bare-app</code> запускает лаунчер: на GO Advance <code>S06</code> — сразу после
+   данных, до сети (Wi-Fi подхватится позже); на GO Ultra <code>S90</code>.</li>
+</ol>
+<p>До меню bare_app: ~3,7 с на GO Ultra, ~5 с на GO Advance (раздел «Быстрая загрузка»
+в <a href="08-Boards.html">8. Платы</a>).</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

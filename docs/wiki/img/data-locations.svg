@@ -1,0 +1,40 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='980' height='300' viewBox='0 0 980 300' font-family='Segoe UI, Noto Sans, DejaVu Sans, Arial, sans-serif'>
+<title>Где что лежит на плате</title>
+<defs>
+<marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto-start-reverse'><path d='M 0 0 L 10 5 L 0 10 z' fill='#444'/></marker>
+<marker id='dot' viewBox='0 0 10 10' refX='5' refY='5' markerWidth='6' markerHeight='6'><circle cx='5' cy='5' r='4' fill='#444'/></marker>
+</defs>
+<rect width='980' height='300' fill='white'/>
+<rect x='20' y='25' width='225' height='240' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='132.5' y='98.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>/usr (rootfs, в образе)</text>
+<text x='132.5' y='115.2' font-size='12' text-anchor='middle' fill='#222'>bare_app, bare_app_wine, bare_app_doom</text>
+<text x='132.5' y='132.2' font-size='12' text-anchor='middle' fill='#222'>движки: vcmi, xash3d, rbdoom3bfg,</text>
+<text x='132.5' y='149.2' font-size='12' text-anchor='middle' fill='#222'>iowolfsp, wine, chocolate-doom</text>
+<text x='132.5' y='166.2' font-size='12' text-anchor='middle' fill='#222'>/usr/share/bare_app/games/*.ini</text>
+<text x='132.5' y='183.2' font-size='12' text-anchor='middle' fill='#222'>doom1.wad (shareware)</text>
+<text x='132.5' y='200.2' font-size='12' text-anchor='middle' fill='#222'>перепрошивка заменяет</text>
+<rect x='260' y='25' width='225' height='240' rx='6' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='372.5' y='98.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>/games (карта exFAT, ro)</text>
+<text x='372.5' y='115.2' font-size='12' text-anchor='middle' fill='#222'>heroes3/ Data Maps Mp3 Mods</text>
+<text x='372.5' y='132.2' font-size='12' text-anchor='middle' fill='#222'>halflife/ valve valve_russian</text>
+<text x='372.5' y='149.2' font-size='12' text-anchor='middle' fill='#222'>doom3/base, rtcw/main</text>
+<text x='372.5' y='166.2' font-size='12' text-anchor='middle' fill='#222'>&lt;wine-игра&gt;/ *.exe wine.ini</text>
+<text x='372.5' y='183.2' font-size='12' text-anchor='middle' fill='#222'>&lt;sdl-игра&gt;/game.ini</text>
+<text x='372.5' y='200.2' font-size='12' text-anchor='middle' fill='#222'>cover.png в каждой</text>
+<rect x='500' y='25' width='225' height='240' rx='6' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='612.5' y='98.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>/data (ext4, переживает прошивку)</text>
+<text x='612.5' y='115.2' font-size='12' text-anchor='middle' fill='#222'>vcmi/Saves, config/vcmi, cache/vcmi</text>
+<text x='612.5' y='132.2' font-size='12' text-anchor='middle' fill='#222'>halflife/, doom/, doom3/, rtcw/</text>
+<text x='612.5' y='149.2' font-size='12' text-anchor='middle' fill='#222'>wine/prefix, wine/games/&lt;dir&gt;</text>
+<text x='612.5' y='166.2' font-size='12' text-anchor='middle' fill='#222'>bare_app.conf: recent, controls.&lt;key&gt;</text>
+<text x='612.5' y='183.2' font-size='12' text-anchor='middle' fill='#222'>hibernate.swap</text>
+<text x='612.5' y='200.2' font-size='12' text-anchor='middle' fill='#222'>boottime.sh (OGA)</text>
+<rect x='740' y='25' width='225' height='240' rx='6' fill='#fffbe6' stroke='#b5a642' stroke-width='1.5'/>
+<text x='852.5' y='106.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>/tmp, /run, /var/log</text>
+<text x='852.5' y='123.7' font-size='12' text-anchor='middle' fill='#222'>bare_app.ctl, bare_app_wine.ctl (FIFO)</text>
+<text x='852.5' y='140.7' font-size='12' text-anchor='middle' fill='#222'>/run/games/N — разделы игр</text>
+<text x='852.5' y='157.7' font-size='12' text-anchor='middle' fill='#222'>/run/usb-disk, /run/hibernate.ready</text>
+<text x='852.5' y='174.7' font-size='12' text-anchor='middle' fill='#222'>/var/log/bare_app.log —</text>
+<text x='852.5' y='191.7' font-size='12' text-anchor='middle' fill='#222'>stdout/stderr игр тоже сюда</text>
+<text x='20' y='288' font-size='12' text-anchor='start' fill='#333'>Имя игры (id) = имя каталога на /games = имя каталога данных в /data: после первого запуска его лучше не менять.</text>
+</svg>

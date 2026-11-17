@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вики проекта — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="current">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Страницы</a>
+<a href="#_2">С чего начать</a>
+<a href="#_3">Где лежат подробности</a>
+</div>
+</nav>
+<main>
+<h1 id="odroidlinux">OdroidLinux — вики проекта</h1>
+<p>OdroidLinux — это SDK для сборки собственной прошивки портативных приставок
+ODROID-GO Advance и ODROID-GO Ultra (а также BeagleBone Black и Raspberry Pi) из
+mainline-компонентов: TF-A, U-Boot, Linux, Buildroot. Поверх системы работает
+собственный лаунчер <strong>bare_app</strong> (LVGL), который запускает игры: Героев III (VCMI),
+Half-Life (Xash3D), Doom, DOOM 3 BFG, Return to Castle Wolfenstein, SDL2-порты и
+Windows-игры под Wine (WoW64 + Box64) — все на одной приставке, с геймпада, с
+обложками на главном экране, сохранениями на <code>/data</code> и играми на карте <code>GAMES</code>.</p>
+<p><img class="diagram" alt="Устройство проекта" src="img/overview.svg" /></p>
+<p><img class="shot" alt="Главный экран GO Ultra" src="img/shots/home.png" />
+<em>Главный экран bare_app на ODROID-GO Ultra (снимок <code>ogu-ctl.py shot</code>, 854×480).</em></p>
+<h2 id="_1">Страницы</h2>
+<table>
+<thead>
+<tr>
+<th>Страница</th>
+<th>О чём</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="01-SDK.html">1. Устройство SDK</a></td>
+<td>репозиторий, сабмодули, Makefile-оркестратор, конфиг прошивки, патчи, пакеты Buildroot, сборка и перепрошивка</td>
+</tr>
+<tr>
+<td><a href="02-Boot-and-Disk.html">2. Загрузка и разметка дисков</a></td>
+<td>цепочки загрузки плат, разметка SD/eMMC, разделы <code>/data</code> и <code>/games</code>, карта игр exFAT, USB-диск</td>
+</tr>
+<tr>
+<td><a href="03-bare_app.html">3. bare_app — лаунчер</a></td>
+<td>слои и потоки приложения, главный экран, игры как отдельные процессы, протокол <code>game_ipc.h</code>, экран управления, монитор, трансляция</td>
+</tr>
+<tr>
+<td><a href="04-Games.html">4. Игры: как устроены</a></td>
+<td>три пути запуска игр, реестр <code>game_def</code>, стек Wine, драйверы SDL2 <code>bareapp</code>, движки и их патчи, где что лежит на плате</td>
+</tr>
+<tr>
+<td><a href="05-Adding-a-Game.html">5. Добавление новой игры</a></td>
+<td>пошагово: Windows-игра под Wine, SDL2-игра из пакета, игра со своим движком; манифест и обложки; проверка на приставке</td>
+</tr>
+<tr>
+<td><a href="06-Pitfalls.html">6. Нюансы и подводные камни</a></td>
+<td>всё, на что уже наступали: только чтение <code>/games</code>, exFAT, префикс Wine, патчи и <code>-dirclean</code>, память при сборке, DirectInput и мышь, шрифты</td>
+</tr>
+<tr>
+<td><a href="07-Tools.html">7. Инструменты</a></td>
+<td><code>games-image.py</code>, <code>ogu-ctl.py</code>, <code>oga-serial.py</code>, <code>doom3-test.py</code>, симулятор на ПК, снимки экрана</td>
+</tr>
+<tr>
+<td><a href="08-Boards.html">8. Платы</a></td>
+<td>особенности GO Advance, GO Ultra, BBB, RPi: консоль, прошивка eMMC, быстрая загрузка, гибернация, часы, питание</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_2">С чего начать</h2>
+<pre><code class="language-sh">sudo apt install mtools gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+git submodule update --init --recursive
+make ogu_defconfig          # или oga_defconfig
+make                        # TF-A/U-Boot + ядро + rootfs + образ, по очереди
+make info                   # какая прошивка выбрана, пути, версии
+make flash DEV=/dev/sdX     # SD-карта; GO Ultra с eMMC: make flash-emmc (Vol+ при включении)
+</code></pre>
+<p>Первая сборка занимает часы (тулчейн, ядро, VCMI, Wine) и около 21 ГБ в <code>output/</code>.
+Игры в образ не входят: их раскладывает по карте <code>scripts/games-image.py</code> по
+манифесту <code>games/games.manifest</code> (см. <a href="05-Adding-a-Game.html">страницу 5</a>).</p>
+<h2 id="_3">Где лежат подробности</h2>
+<p>Эта вики — карта проекта и объяснение «почему так». Точные справочники остаются
+в репозитории и в вики на них есть ссылки:</p>
+<ul>
+<li><a href="../../config.md">docs/config.md</a> — все переменные конфига прошивки;</li>
+<li><a href="../../sd-layout.md">docs/sd-layout.md</a> — разметка карты до сектора;</li>
+<li><a href="../../patches.md">docs/patches.md</a> — где лежат патчи и что пересобирается;</li>
+<li><a href="../../adding-a-game.md">docs/adding-a-game.md</a> и
+  <a href="../../../apps/bare_app/docs/GAMES.md">apps/bare_app/docs/GAMES.md</a> — добавление игры с примерами кода;</li>
+<li><a href="../../../apps/bare_app/docs/ARCHITECTURE.md">apps/bare_app/docs/ARCHITECTURE.md</a> — архитектура лаунчера до уровня файлов;</li>
+<li><a href="../../../apps/bare_app/README.md">apps/bare_app/README.md</a> — что умеет лаунчер, кнопки каждой игры;</li>
+<li><a href="../../../games/README.md">games/README.md</a> — манифест и список игр;</li>
+<li><a href="../../boards/">docs/boards/</a> — страницы плат;</li>
+<li>книги <code>docs/book</code>, <code>docs/dev-book</code>, <code>docs/check-book</code> — как устроен SDK, разработка на нём, проверка плат.</li>
+</ul>
+<p>Картинки вики лежат в <code>docs/wiki/img/</code>: схемы рисует скрипт
+<code>docs/wiki/img/mkdiagrams.py</code> (чистый Python, без библиотек), снимки экрана
+приставки в <code>img/shots/</code> сняты <code>scripts/ogu-ctl.py shot:</code>. Менять схему —
+значит править скрипт и запускать заново.</p>
+<p><strong>HTML-версия</strong>: <code>python3 docs/wiki/build-html.py</code> собирает те же страницы в
+<code>docs/wiki/html/</code> (открывать <code>index.html</code>; каталог самодостаточен — картинки и
+стиль внутри, ссылки на файлы репозитория ведут относительно него).</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

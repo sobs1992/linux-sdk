@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5. Добавление игры — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="current">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#a-windows-wine-go-ultra">Путь A: Windows-игра под Wine (GO Ultra)</a>
+<a href="#b-sdl2-">Путь B: SDL2-игра</a>
+<a href="#c">Путь C: игра со своим движком</a>
+<a href="#_1">Манифест и карта: как это работает</a>
+<a href="#-">Чек-лист перед коммитом</a>
+</div>
+</nav>
+<main>
+<h1 id="5">5. Добавление новой игры</h1>
+<p><img class="diagram" alt="Какой путь выбрать" src="img/game-paths.svg" /></p>
+<p>Сначала ответьте на три вопроса: <strong>на чём написана игра</strong> (путь A/B/C), <strong>где
+её файлы на ПК</strong> (<code>lab/games/&lt;Игра&gt;</code> или библиотека Steam) и <strong>что она пишет</strong>
+(сохранения, настройки — они должны попасть на <code>/data</code>). Дальше — по пути.</p>
+<h2 id="a-windows-wine-go-ultra">Путь A: Windows-игра под Wine (GO Ultra)</h2>
+<p>Ничего не собирается. Нужны: каталог игры на карте, <code>wine.ini</code>, секция в
+манифесте, обложка.</p>
+<h3 id="1-lab">1. Положить игру в <code>lab/</code></h3>
+<p><code>lab/games/&lt;Игра&gt;/</code> — установленная на Windows (или распакованная <code>innoextract</code>)
+игра как есть. Инсталляторы и переводы остаются в <code>/media/D/Games/Install</code>
+(<code>${installers}</code> в манифесте), игры Steam — в библиотеке Steam (<code>${steam}</code>).</p>
+<h3 id="2-gamesidoverlaywineini">2. Написать <code>games/&lt;id&gt;/overlay/wine.ini</code></h3>
+<p>Возьмите за основу ближайшую игру (<code>games/templar/overlay/wine.ini</code> — простая
+D3D8-игра, <code>games/pop/overlay/wine.ini</code> — стики как WASD и мышь,
+<code>games/hota/overlay/wine.ini</code> — курсор и прокрутка карты) и образец со всеми
+ключами <code>apps/bare_app/ports/wine/wine.ini</code>. Минимум:</p>
+<pre><code class="language-ini">name = Моя игра
+hint = A  клик    B  Esc    F5  свернуть    F6 (держать)  выйти
+hint.ru = A  клик    B  Esc    F5  свернуть    F6 (держать)  выйти
+exe = Game.exe
+mode = 800x600
+scale = aspect
+locale = ru_RU
+writable = Save, config.ini
+env = BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1
+
+[keys]
+stick = mouse
+rstick = wheel
+dpad = arrows
+cursor_speed = 0.8
+a = lbutton
+b = esc
+x = enter
+y = rbutton
+f1 = esc
+
+[labels.ru]
+stick = курсор
+a = клик
+</code></pre>
+<p>Что решить на этом шаге:</p>
+<ul>
+<li><strong><code>mode</code>.</strong> Начните с 800×600: на 854×480 это почти ширина 1:1 при <code>scale =
+  fill</code> или аккуратные поля при <code>aspect</code>. 1024×768 обычно медленнее и мельче.
+  Если игра знает только 800×600 и интерфейс внизу — смотрите <code>rows</code> и
+  пример Neighbours from Hell (<code>games/neighbours/prepare.sh</code> перекладывает
+  интерфейс в верхние 480 строк, сам буфер игры не трогая).</li>
+<li><strong><code>writable</code>.</strong> Всё, что игра пишет в свой каталог (<code>Save</code>, <code>*.cfg</code>, профили).
+  Проверяется только запуском с <code>/games</code> <strong>только для чтения</strong> — так, как у
+  пользователя. Карта в режиме <code>rw</code> однажды скрыла запись <code>MSSSOFT.M3D</code>,
+  ломавшую Gothic.</li>
+<li><strong>Мышь.</strong> Если курсор в меню «ползёт» или клик промахивается — игра читает мышь
+  через DirectInput: <code>mouse = relative</code>.</li>
+<li><strong>Шрифты и DLL из Windows.</strong> Если игре нужны <code>d3dx9_41.dll</code>, OpenAL из
+  <code>SysWOW64</code> или шрифты Arial/Palatino — они берутся из <code>lab/redist/</code> строками
+  <code>file</code> (в каталог игры, <code>dlls = x=n,b</code>) и <code>data</code> (шрифты в префикс на <code>/data</code>).</li>
+</ul>
+<h3 id="3-gamesidpreparesh">3. При необходимости — <code>games/&lt;id&gt;/prepare.sh</code></h3>
+<p>Запускается <code>games-image.py</code> после копирования с переменными <code>GAME_DIR</code>,
+<code>SOURCE</code>, <code>SDK_DIR</code>, <code>DATA_DIR</code> и <code>env</code> из манифеста. Правит файлы игры под
+приставку: разрешение в её настройках (HotA), русификация дельтами (PoP),
+перекладка интерфейса (Neighbours), сборка лаунчера <code>poplaunch.exe</code>
+кросс-компилятором <code>llvm-mingw</code> из <code>output/ogu/buildroot/host</code>. Скрипт должен
+быть идемпотентным: <code>rsync</code> переносит на карту только изменившиеся файлы, и
+повторный запуск не должен переписывать всё заново (<code>touch -r</code> оригинала у PoP —
+именно для этого).</p>
+<h3 id="4-gamesgamesmanifest">4. Секция в <code>games/games.manifest</code></h3>
+<pre><code class="language-ini">[mygame]
+; Моя игра (2004), русское издание 1С, Wine. Что исключено и почему
+source = lab/games/MyGame
+exclude = unins000.*
+exclude = *.url
+exclude = Manual.pdf
+file = lab/redist/SysWOW64/D3DX9_41.dll
+overlay = games/mygame/overlay
+run = games/mygame/prepare.sh
+env = SOMETHING=${installers}/MyGame/patch.exe
+data = lab/redist/Fonts/arial*.ttf -&gt; wine/prefix/drive_c/windows/Fonts/
+cover = lab/games/MyGame/Game.exe:icon
+cover_crop = fit
+</code></pre>
+<p>Ключи — <a href="../../../games/README.md">games/README.md</a>. Пути без <code>/</code> — от корня SDK;
+<code>${steam}</code>, <code>${installers}</code> — из <code>[image]</code>. Исключайте деинсталляторы, логи,
+остатки GOG, <code>*.lnk</code>, сохранения с ПК и дубли (RTCW: только нужные <code>pk3</code>, 0,95 ГБ
+вместо всего).</p>
+<h3 id="5_1">5. Залить и проверить</h3>
+<pre><code class="language-sh">scripts/games-image.py --card /media/$USER/GAMES --reuse --games mygame --board root@192.168.7.2
+scripts/ogu-ctl.py launch:mygame wait:30000 shot:/tmp/m.png
+scripts/ogu-ctl.py wfmove:400,240 wclick wkey:esc quit-game
+</code></pre>
+<p><code>--reuse</code> не пересобирает остальные игры, <code>--board</code> кладёт строки <code>data</code> на
+<code>/data</code> по ssh. Карта — в картридере или через экран «USB-диск». Смотрите
+<code>/var/log/bare_app.log</code> на плате: туда идёт вывод Wine. Первый запуск после
+пересборки Wine падает один раз и может сбросить настройки — это известно.</p>
+<h3 id="6">6. Записать</h3>
+<p>Строка в списке игр <code>games/README.md</code>, <code>games/&lt;id&gt;/README.md</code> с тем, что
+пришлось выяснить (у Monkey Island, Templar, PoP такие есть), при необходимости —
+абзац в <code>apps/bare_app/README.md</code>. Коммит — SDK (<code>games/</code>) и, если трогали
+мост, <code>apps/bare_app</code>.</p>
+<h2 id="b-sdl2-">Путь B: SDL2-игра</h2>
+<h3 id="b1-buildroot-chocolate-doom">B1. Движок есть в Buildroot (Chocolate Doom)</h3>
+<p>Четыре правки, ни одной строки кода:</p>
+<ol>
+<li><code>board/common/buildroot/package/bare-app/games/&lt;игра&gt;.ini</code> — описание;</li>
+<li>опция в <code>package/bare-app/Config.in</code>:
+   <code>kconfig
+   config BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM
+    bool "Chocolate Doom (an SDL2 game by its game.ini)"
+    depends on BR2_PACKAGE_BARE_APP_SDL
+    select BR2_PACKAGE_CHOCOLATE_DOOM
+    select BR2_PACKAGE_SDL2_MIXER
+    select BR2_PACKAGE_DOOM1_WAD</code></li>
+<li>строка в <code>bare-app.mk</code>: <code>BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM) += chocolate-doom.ini</code>;</li>
+<li><code>APPS_CONFIG += bare-app.CHOCOLATE_DOOM=y</code> в конфиге прошивки.</li>
+</ol>
+<h3 id="b2-doom-3-bfg-rtcw">B2. Свой пакет движка (DOOM 3 BFG, RTCW, новая игра)</h3>
+<ol>
+<li>Пакет <code>board/common/buildroot/package/&lt;pkg&gt;/</code>: <code>Config.in</code>, <code>&lt;pkg&gt;.mk</code>,
+   <code>&lt;pkg&gt;.hash</code>, патчи; <code>source</code> в <code>board/common/buildroot/Config.in</code>. Зависимости
+   от Mesa объявлять в самом пакете (<code>iortcw</code> когда-то полагался на <code>bare-app.mk</code>).</li>
+<li><code>&lt;pkg&gt;.ini</code> рядом с пакетом, его ставит сам пакет хуком:
+   <code>make
+   define MYGAME_POST_INSTALL_TARGET_INI
+    $(INSTALL) -D -m 0644 $(MYGAME_PKGDIR)/mygame.ini \
+        $(TARGET_DIR)/usr/share/bare_app/games/mygame.ini
+   endef
+   MYGAME_POST_INSTALL_TARGET_HOOKS += MYGAME_POST_INSTALL_TARGET_INI</code></li>
+<li>Опция <code>BR2_PACKAGE_BARE_APP_&lt;GAME&gt;</code> в <code>package/bare-app/Config.in</code> с
+   <code>depends on BR2_PACKAGE_BARE_APP_SDL</code> и <code>select BR2_PACKAGE_&lt;PKG&gt;</code>.</li>
+<li><code>APPS_CONFIG += bare-app.&lt;GAME&gt;=y</code>, <code>make rootfs</code>.</li>
+<li>Секция в манифесте с файлами игры (<code>install = none</code> + <code>file = … -&gt; main/</code>,
+   как у <code>[rtcw]</code>), <code>needs</code> в ini указывает на них, <code>cover = /games/&lt;id&gt;/cover.png</code>.</li>
+</ol>
+<p>В <code>game.ini</code>: <code>keys</code> — для игр без контроллера SDL; <code>gamepad</code> — если движок ждёт
+другую раскладку (<code>f1=start, f4=back</code>); <code>scale = fit</code>; <code>fps = 0</code>, если движок
+сам держит темп; <code>gyro</code> — для шутеров. В <code>[env]</code> можно <code>SDL_RENDER_DRIVER =
+software</code> (на OGA чтение кадров GPU медленнее, чем программный рендер) и
+<code>SDL_LOGGING = video=debug</code> для отладки драйвера. <strong>Не ставьте</strong> <code>SDL_VIDEODRIVER</code>.</p>
+<p>Проверка без перепрошивки:</p>
+<pre><code class="language-sh">T=output/ogu/buildroot/target
+tar -C $T -cf - usr/bin/mygame usr/share/bare_app/games/mygame.ini | ssh root@192.168.7.2 'tar -C / -xf -'
+scripts/ogu-ctl.py launch:&quot;My Game&quot; wait:20000 shot:/tmp/s.png
+</code></pre>
+<h3 id="b3">B3. Готовая программа на карте, без пакета</h3>
+<pre><code>/games/mygame/
+    game.ini        exe = mygame, dir = {dir}, needs = data
+    mygame          собрана тулчейном SDK (output/ogu/buildroot/host/bin/aarch64-…-gcc)
+    data/
+</code></pre>
+<p>Писать в свой каталог программа не сможет: HOME — <code>/data/mygame</code>.</p>
+<h2 id="c">Путь C: игра со своим движком</h2>
+<p>Кратко; полный пример с кодом — <a href="../../../apps/bare_app/docs/GAMES.md">GAMES.md</a>.</p>
+<p><strong>Сторона игры.</strong> Включить <code>games/game_ipc_client.h</code> и <code>core/input.h</code>
+(в Buildroot — <code>$(STAGING_DIR)/usr/include/bare_app/</code>, пакет зависит от
+<code>bare-app</code>). Цикл: <code>game_link_open()</code> → <code>poll</code> на fd 3 → <code>game_link_recv()</code>
+кнопки и оси → нарисовать в <code>game_link_frame()</code> (размер <code>app.shm-&gt;width ×
+height</code>, строка <code>stride</code>) → <code>game_link_publish()</code>. Кадры, которые не изменились,
+не публиковать (или слать <code>GAME_FRAME_SAME</code>). Выход с кодом 0 — нормальный;
+<code>SIGTERM</code> — закрыть.</p>
+<p><strong>Сторона bare_app</strong> (<code>apps/bare_app</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Где</th>
+<th>Что</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/games/mygame.c</code></td>
+<td><code>struct game_def game_mygame</code> с <code>missing()</code> (проверить программу и данные) и <code>start()</code> (окружение через <code>game_vars_add</code>, <code>game_proc_start(&amp;spawn)</code>)</td>
+</tr>
+<tr>
+<td><code>src/games/games.c</code></td>
+<td><code>extern</code> + <code>&amp;game_mygame,</code> под <code>#ifdef CONFIG_GAME_MYGAME</code> в порядке меню</td>
+</tr>
+<tr>
+<td><code>Kconfig</code></td>
+<td><code>GAME_MYGAME</code> с <code>select GAMES</code>, <code>GAME_MYGAME_PROGRAM</code> и пути данных</td>
+</tr>
+<tr>
+<td><code>CMakeLists.txt</code></td>
+<td><code>add_if(CONFIG_GAME_MYGAME src/games/mygame.c)</code></td>
+</tr>
+<tr>
+<td><code>src/gui/view/core/i18n.h</code>, <code>i18n.c</code></td>
+<td><code>S_MYGAME</code>, <code>S_MYGAME_HINT</code> на английском и русском</td>
+</tr>
+<tr>
+<td><code>configs/ogu_defconfig</code>, <code>oga_defconfig</code></td>
+<td><code>CONFIG_GAME_MYGAME=y</code> для сборки без Buildroot</td>
+</tr>
+<tr>
+<td><code>src/platforms/*.c</code></td>
+<td>при необходимости <code>"mygame.ключ=значение"</code> в <code>game_opts</code> (как <code>homm3.view=fit</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Сторона SDK:</strong> пакет движка; <code>CONFIG_GAME_MYGAME=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_MYGAME))</code>
+в <code>BARE_APP_KCONFIG</code> файла <code>bare-app.mk</code>; опция в <code>package/bare-app/Config.in</code>;
+<code>APPS_CONFIG += bare-app.MYGAME=y</code>. Пересборка: <code>make rootfs-make BR=bare-app-rebuild &amp;&amp; make</code>.</p>
+<p>На ПК протокол гоняет <code>ctest</code> (<code>game_smoke</code> с <code>tests/fake_game.c</code>); игру можно
+запустить в симуляторе <code>-p pc-mem</code> с <code>BARE_APP_NATIVE_DIRS</code>.</p>
+<h2 id="_1">Манифест и карта: как это работает</h2>
+<p><img class="diagram" alt="games-image.py" src="img/games-image-flow.svg" /></p>
+<p><code>scripts/games-image.py --card</code> собирает игры в <code>lab/images/work/games/&lt;id&gt;</code>
+(<code>install</code> → <code>exclude</code> → <code>file</code> → <code>overlay</code> → <code>run</code> → <code>cover</code>), проверяет место и
+<code>rsync -rt</code> переносит на карту то, что изменилось по размеру или времени.
+Каталоги на карте, которых нет в манифесте, не трогаются; <code>--delete</code> чистит
+лишнее внутри каталога игры. Без <code>--card</code> получается <strong>полный образ</strong> для
+прошивок с разделом игр на том же диске (GO Advance): p3 и p4 дописываются в
+<code>&lt;fw&gt;.img</code> там, где их ищет <code>S05data</code>, без root и loop-устройств.</p>
+<p>Данные игр с ПК для Героев и Half-Life копируют не целиком, а только то, что
+читает движок: <code>install = homm3</code> и <code>install = halflife</code> вызывают
+<code>scripts/homm3-install.sh</code> (Data, Maps, Mp3 + моды VCMI из <code>dl/hota</code>) и
+<code>scripts/halflife-install.sh</code> (<code>valve</code>, <code>valve_russian</code>).</p>
+<h2 id="-">Чек-лист перед коммитом</h2>
+<ul>
+<li>[ ] игра запускается из меню с <code>/games</code> <strong>только для чтения</strong> и после «холодного» старта (новый префикс Wine, пустой <code>/data/&lt;id&gt;</code>)</li>
+<li>[ ] сохранение и загрузка работают, файлы оказались на <code>/data</code></li>
+<li>[ ] F5 сворачивает и возвращает, F6 закрывает, выход через меню игры — код 0</li>
+<li>[ ] <code>hint.ru</code> и <code>[labels.ru]</code> заполнены, экран «Управление» показывает подписи</li>
+<li>[ ] <code>cover.png</code> квадратная и не «мыльная» (240×240 из картинки не меньше)</li>
+<li>[ ] FPS посмотрен монитором (F5 удерживать) и записан в README игры</li>
+<li>[ ] <code>games/README.md</code>, манифест, <code>games/&lt;id&gt;/README.md</code> обновлены</li>
+<li>[ ] <code>prepare.sh</code> идемпотентен, повторный <code>games-image.py --reuse --games &lt;id&gt;</code> ничего не переписывает</li>
+</ul>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

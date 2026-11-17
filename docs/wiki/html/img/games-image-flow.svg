@@ -1,0 +1,70 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='980' height='400' viewBox='0 0 980 400' font-family='Segoe UI, Noto Sans, DejaVu Sans, Arial, sans-serif'>
+<title>scripts/games-image.py: от манифеста до карты игр</title>
+<defs>
+<marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto-start-reverse'><path d='M 0 0 L 10 5 L 0 10 z' fill='#444'/></marker>
+<marker id='dot' viewBox='0 0 10 10' refX='5' refY='5' markerWidth='6' markerHeight='6'><circle cx='5' cy='5' r='4' fill='#444'/></marker>
+</defs>
+<rect width='980' height='400' fill='white'/>
+<rect x='20' y='30' width='230' height='110' rx='6' fill='#e8f1fb' stroke='#4a79a8' stroke-width='1.5'/>
+<text x='135.0' y='55.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>games/games.manifest</text>
+<text x='135.0' y='72.2' font-size='12' text-anchor='middle' fill='#222'>[image]: fw, work, steam, installers</text>
+<text x='135.0' y='89.2' font-size='12' text-anchor='middle' fill='#222'>[id]: source, exclude, file,</text>
+<text x='135.0' y='106.2' font-size='12' text-anchor='middle' fill='#222'>overlay, run, env, data,</text>
+<text x='135.0' y='123.2' font-size='12' text-anchor='middle' fill='#222'>cover, cover_crop, cover_back</text>
+<rect x='20' y='170' width='230' height='90' rx='6' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='135.0' y='193.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Источники на ПК</text>
+<text x='135.0' y='210.7' font-size='12' text-anchor='middle' fill='#222'>lab/games/&lt;Игра&gt; (вне git)</text>
+<text x='135.0' y='227.7' font-size='12' text-anchor='middle' fill='#222'>${steam}/steamapps/common/…</text>
+<text x='135.0' y='244.7' font-size='12' text-anchor='middle' fill='#222'>lab/redist: DLL и шрифты Windows</text>
+<rect x='20' y='290' width='230' height='80' rx='6' fill='#e8f1fb' stroke='#4a79a8' stroke-width='1.5'/>
+<text x='135.0' y='308.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>games/&lt;id&gt;/</text>
+<text x='135.0' y='325.7' font-size='12' text-anchor='middle' fill='#222'>overlay/ (wine.ini, profile)</text>
+<text x='135.0' y='342.7' font-size='12' text-anchor='middle' fill='#222'>prepare.sh + python-помощники</text>
+<text x='135.0' y='359.7' font-size='12' text-anchor='middle' fill='#222'>README.md игры</text>
+<rect x='300' y='30' width='250' height='340' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='310' y='102.2' font-size='12' text-anchor='start' font-weight='bold' fill='#222'>games-image.py</text>
+<text x='310' y='119.2' font-size='12' text-anchor='start' fill='#222'></text>
+<text x='310' y='136.2' font-size='12' text-anchor='start' fill='#222'>1. install: copy / homm3 / halflife / none</text>
+<text x='310' y='153.2' font-size='12' text-anchor='start' fill='#222'>   минус exclude</text>
+<text x='310' y='170.2' font-size='12' text-anchor='start' fill='#222'>2. file → в каталог игры</text>
+<text x='310' y='187.2' font-size='12' text-anchor='start' fill='#222'>3. overlay поверх</text>
+<text x='310' y='204.2' font-size='12' text-anchor='start' fill='#222'>4. run prepare.sh</text>
+<text x='310' y='221.2' font-size='12' text-anchor='start' fill='#222'>   (GAME_DIR, SOURCE, SDK_DIR, DATA_DIR, env)</text>
+<text x='310' y='238.2' font-size='12' text-anchor='start' fill='#222'>5. cover → cover.png 240×240</text>
+<text x='310' y='255.2' font-size='12' text-anchor='start' fill='#222'>   из png / .lod / .wad / .exe:icon / .bik:сек</text>
+<text x='310' y='272.2' font-size='12' text-anchor='start' fill='#222'>6. проверка места</text>
+<text x='310' y='289.2' font-size='12' text-anchor='start' fill='#222'>7. rsync -rt на карту (только изменившееся)</text>
+<text x='310' y='306.2' font-size='12' text-anchor='start' fill='#222'>8. data → /data платы по ssh (--board)</text>
+<line x1='250' y1='85' x2='300' y2='85' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<line x1='250' y1='215' x2='300' y2='215' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<line x1='250' y1='330' x2='300' y2='330' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='600' y='30' width='170' height='90' rx='6' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='685.0' y='53.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>&lt;work&gt;/games/&lt;id&gt;</text>
+<text x='685.0' y='70.7' font-size='12' text-anchor='middle' fill='#222'>lab/images/work</text>
+<text x='685.0' y='87.7' font-size='12' text-anchor='middle' fill='#222'>промежуточная сборка</text>
+<text x='685.0' y='104.7' font-size='12' text-anchor='middle' fill='#222'>(--reuse: не трогать)</text>
+<rect x='600' y='150' width='170' height='90' rx='6' fill='#f3f3f3' stroke='#7a7a7a' stroke-width='1.5'/>
+<text x='685.0' y='182.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>&lt;work&gt;/data</text>
+<text x='685.0' y='199.2' font-size='12' text-anchor='middle' fill='#222'>строки data:</text>
+<text x='685.0' y='216.2' font-size='12' text-anchor='middle' fill='#222'>шрифты в префикс Wine</text>
+<line x1='550' y1='75' x2='600' y2='75' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<line x1='550' y1='195' x2='600' y2='195' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='810' y='30' width='150' height='90' rx='6' fill='#fbe9e7' stroke='#c0564a' stroke-width='1.5'/>
+<text x='885.0' y='53.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Карта exFAT GAMES</text>
+<text x='885.0' y='70.7' font-size='12' text-anchor='middle' fill='#222'>/media/$USER/GAMES</text>
+<text x='885.0' y='87.7' font-size='12' text-anchor='middle' fill='#222'>в картридере или</text>
+<text x='885.0' y='104.7' font-size='12' text-anchor='middle' fill='#222'>«USB-диск» приставки</text>
+<rect x='810' y='150' width='150' height='90' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='885.0' y='182.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Плата: /data</text>
+<text x='885.0' y='199.2' font-size='12' text-anchor='middle' fill='#222'>root@192.168.7.2</text>
+<text x='885.0' y='216.2' font-size='12' text-anchor='middle' fill='#222'>tar по ssh</text>
+<line x1='770' y1='75' x2='810' y2='75' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<text x='790.0' y='69.0' font-size='12' text-anchor='middle' fill='#333'>rsync</text>
+<line x1='770' y1='195' x2='810' y2='195' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<text x='790.0' y='189.0' font-size='12' text-anchor='middle' fill='#333'>ssh</text>
+<rect x='600' y='270' width='360' height='100' rx='6' fill='#fffbe6' stroke='#b5a642' stroke-width='1.5'/>
+<text x='780.0' y='298.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Без --card: полный образ (GO Advance)</text>
+<text x='780.0' y='315.7' font-size='12' text-anchor='middle' fill='#222'>p3 data и p4 GAMES дописываются в &lt;fw&gt;.img там,</text>
+<text x='780.0' y='332.7' font-size='12' text-anchor='middle' fill='#222'>где их ищет S05data; mke2fs -d + mkfs.vfat/mcopy,</text>
+<text x='780.0' y='349.7' font-size='12' text-anchor='middle' fill='#222'>без root и loop; запись: make flash IMAGE_FILE=…</text>
+</svg>

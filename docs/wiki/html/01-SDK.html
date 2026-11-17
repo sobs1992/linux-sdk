@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1. Устройство SDK — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="current">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Идея</a>
+<a href="#_2">Дерево репозитория</a>
+<a href="#_3">Поток сборки</a>
+<a href="#_4">Конфиг прошивки</a>
+<a href="#buildroot-sdk">Пакеты Buildroot SDK</a>
+<a href="#_5">Патчи: где и как</a>
+<a href="#apps">Приложения в apps/</a>
+<a href="#_6">Что где пересобирать (шпаргалка)</a>
+</div>
+</nav>
+<main>
+<h1 id="1-sdk">1. Устройство SDK</h1>
+<h2 id="_1">Идея</h2>
+<p>Один репозиторий собирает прошивки пяти плат из <strong>одних и тех же исходников</strong>:
+различаются только конфиги. Исходники компонентов — git-сабмодули в <code>src/</code>, и
+они никогда не правятся на месте: ядро и U-Boot собираются из <strong>копии</strong>
+закоммиченного дерева с наложенными патчами платы, Buildroot накладывает патчи
+пакетов при распаковке. Всё, что получилось, лежит в <code>output/&lt;прошивка&gt;/</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Компонент</th>
+<th>Каталог</th>
+<th>Версия</th>
+<th>Роль</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TF-A (BL31)</td>
+<td><code>src/tf-a</code></td>
+<td>v2.15.0</td>
+<td>монитор EL3 на Rockchip (GO Advance)</td>
+</tr>
+<tr>
+<td>U-Boot</td>
+<td><code>src/u-boot</code></td>
+<td>v2026.07</td>
+<td>загрузчик всех плат, читает <code>extlinux.conf</code></td>
+</tr>
+<tr>
+<td>Linux</td>
+<td><code>src/linux</code></td>
+<td>v7.2.9</td>
+<td>ядро, arm64 и arm</td>
+</tr>
+<tr>
+<td>Buildroot</td>
+<td><code>src/buildroot</code></td>
+<td>2026.08</td>
+<td>корневая ФС, тулчейн, пакеты</td>
+</tr>
+<tr>
+<td>bare_app</td>
+<td><code>apps/bare_app</code></td>
+<td>свой репозиторий</td>
+<td>лаунчер (сабмодуль с LVGL и doomgeneric внутри)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_2">Дерево репозитория</h2>
+<pre><code>Makefile                        оркестратор: цели сборки, умолчания, склейка образа
+configs/&lt;fw&gt;_defconfig          конфиг прошивки (плоский список make-переменных)
+board/&lt;плата&gt;/                  всё, что отличает плату:
+   u-boot/*.config, patches/       фрагмент поверх defconfig U-Boot, патчи
+   linux/*.config, patches/        фрагмент ядра, патчи (GO Ultra — 31, GO Advance — 3)
+   linux/&lt;модуль&gt;/                 внешние модули ядра (esp8089, rk-vepu-h264, meson-venc)
+   buildroot/defconfig, overlay    defconfig Buildroot платы, её rootfs-overlay, post-build.sh
+   boot/                           файлы раздела BOOT (boot.ini у GO Ultra, config.txt у RPi)
+   fip/, rkbin/                    хеши блобов Amlogic; блобы и утилиты Rockchip
+board/common/buildroot/         BR2_EXTERNAL «SDK»: общий overlay (S05data, games-mount,
+                                usb-disk), post-build, пакеты package/&lt;pkg&gt;/
+apps/bare_app/                  лаунчер; apps/oga-pad — пример приложения
+games/                          манифест игр, wine.ini и prepare.sh каждой Windows-игры
+scripts/                        склейка образа, прошивка, игры на карту, управление платой
+docs/                           документация и книги; docs/wiki — эта вики
+dl/                             кэш загрузок (общий для всех прошивок)
+lab/ -&gt; /media/D/OdroidLab      данные вне git: игры, образы, бэкапы, wip
+output/&lt;fw&gt;/                    результаты сборки прошивки
+</code></pre>
+<p>Правило: <strong>плата описывается в <code>board/</code> и <code>configs/</code>, код живёт в сабмодулях,
+результат только в <code>output/</code>.</strong> Руками в <code>output/</code> ничего не правят.</p>
+<h2 id="_3">Поток сборки</h2>
+<p><img class="diagram" alt="Поток сборки" src="img/build-flow.svg" /></p>
+<p><code>make &lt;fw&gt;_defconfig</code> только записывает имя прошивки в <code>output/.fw</code>; все
+следующие команды без <code>FW=</code> берут её оттуда и включают
+<code>configs/&lt;fw&gt;_defconfig</code> прямо в Makefile. <code>FW=ogu make linux</code> действует разово
+и выбор не меняет. Компоненты собираются <strong>по очереди</strong> (<code>.NOTPARALLEL</code>), каждый
+со своим <code>-j$(JOBS)</code>: верхний <code>make -j</code> запустил бы U-Boot, ядро и Buildroot
+одновременно — втрое больше памяти.</p>
+<table>
+<thead>
+<tr>
+<th>Цель</th>
+<th>Что делает</th>
+<th>Куда</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>make uboot</code></td>
+<td>копия <code>src/u-boot</code> + <code>UBOOT_PATCHES</code> + фрагмент; на Rockchip ещё TF-A и упаковка <code>uboot.img</code>/<code>trust.img</code> (<code>RK_LEGACY</code>), на Amlogic — FIP из скачанных блобов (<code>scripts/amlogic-fip.sh</code>)</td>
+<td><code>images/u-boot*.bin</code>, <code>u-boot-fip.bin</code></td>
+</tr>
+<tr>
+<td><code>make linux</code></td>
+<td><code>git archive</code> из <code>src/linux</code> в <code>output/&lt;fw&gt;/linux-src</code>, патчи, фрагмент <code>.config</code>, dtb, внешние модули</td>
+<td><code>linux-install/</code>: <code>Image</code>, dtb, модули</td>
+</tr>
+<tr>
+<td><code>make rootfs</code></td>
+<td>Buildroot с <code>BR2_EXTERNAL=board/common/buildroot</code>, defconfig платы + приложения из <code>APPS</code></td>
+<td><code>images/rootfs.tar</code></td>
+</tr>
+<tr>
+<td><code>make bootfw</code></td>
+<td>блобы прошивки RPi (проверка sha256)</td>
+<td><code>images/</code></td>
+</tr>
+<tr>
+<td><code>make image</code></td>
+<td><code>scripts/mkimage.sh</code>: без root (fakeroot, <code>mke2fs -d</code>, mtools)</td>
+<td><code>images/&lt;fw&gt;.img</code> (+ <code>&lt;fw&gt;-emmc.img</code>)</td>
+</tr>
+<tr>
+<td><code>make flash DEV=…</code></td>
+<td>запись с проверками (<code>scripts/flash.sh</code>); <code>flash-boot</code> — только загрузчик и BOOT</td>
+<td>карта</td>
+</tr>
+<tr>
+<td><code>make flash-emmc</code></td>
+<td>eMMC GO Ultra, показанная U-Boot как USB-диск (Vol+ при включении)</td>
+<td>eMMC</td>
+</tr>
+</tbody>
+</table>
+<p>У каждого компонента есть <code>-menuconfig</code>, <code>-savedefconfig</code>, <code>-configure</code>, <code>-clean</code>;
+<code>make rootfs-make BR=&lt;цель&gt;</code> вызывает любую цель Buildroot (<code>vcmi-dirclean</code>,
+<code>bare-app-rebuild</code>, <code>busybox-menuconfig</code>). <code>.config</code> компонента пересоздаётся,
+когда меняется его defconfig или фрагмент (<code>.sdk-inputs</code> в каталоге сборки
+помнит, из чего он сделан); правки из <code>menuconfig</code> живут до этого момента.</p>
+<h2 id="_4">Конфиг прошивки</h2>
+<p><code>configs/ogu_defconfig</code> — это просто make-переменные с комментариями. Самые важные:</p>
+<pre><code class="language-make">CROSS_COMPILE   := aarch64-linux-gnu-
+UBOOT_DEFCONFIG := odroid-go-ultra_defconfig
+UBOOT_PATCHES   := $(BOARD_DIR)/u-boot/patches
+LINUX_FRAGMENTS := $(BOARD_DIR)/linux/ogu.config
+LINUX_PATCHES   := $(BOARD_DIR)/linux/patches
+LINUX_EXT_MODULES := $(BOARD_DIR)/linux/meson-venc
+LINUX_CMDLINE   := rootwait rw console=ttyAML0,115200n8 console=tty1 fbcon=rotate:3 quiet panic=10
+
+APPS           := bare-app            # приложения из apps/ в rootfs
+APPS_AUTOSTART := bare-app            # init-скрипт S&lt;INIT_ORDER&gt;bare-app
+APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
+                  bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y \
+                  bare-app.SDL=y bare-app.STREAM=y bare-app.DOOM3=y bare-app.RTCW=y
+
+IMAGE_RAW      := $(IMAGES_DIR)/u-boot-fip.bin@1
+IMAGE_DATA_START_MB := 2192          # где начинается /data; без SIZE — до конца диска
+IMAGE_DISK_ID := 0x4f475531           # root=PARTUUID=&lt;id&gt;-02
+</code></pre>
+<p>Полный список переменных и умолчаний — <a href="../../config.md">docs/config.md</a>. Ключевая
+мысль про <code>APPS_CONFIG</code>: <strong>игра или движок включается в одном месте</strong> — строкой
+<code>bare-app.&lt;ИМЯ&gt;=y</code>. Скрипт <code>scripts/apps-config.sh</code> превращает её в опции
+Buildroot (<code>BR2_PACKAGE_BARE_APP_&lt;ИМЯ&gt;</code>), пакет <code>bare-app</code> сам тянет <code>select</code>
+движка и передаёт в Kconfig лаунчера <code>CONFIG_GAME_&lt;ИМЯ&gt;</code>. Если опцию выключили,
+SDK удаляет файлы ушедшего пакета из <code>target/</code> (Buildroot сам этого не делает, и
+выключенный Wine остался бы в инкрементальном образе).</p>
+<h2 id="buildroot-sdk">Пакеты Buildroot SDK</h2>
+<p><code>board/common/buildroot/package/</code> — BR2_EXTERNAL с именем <code>SDK</code>. Новый пакет
+подхватывается <code>.mk</code>-файлом сам, а его <code>Config.in</code> надо вписать в
+<code>board/common/buildroot/Config.in</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Пакет</th>
+<th>Что</th>
+<th>Патчей</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bare-app</code></td>
+<td>лаунчер из <code>apps/bare_app</code> (<code>SITE_METHOD = local</code>), его опции-игры, init-скрипт, <code>chocolate-doom.ini</code>, патчи SDL2 с драйверами <code>bareapp</code></td>
+<td>SDL2: 5</td>
+</tr>
+<tr>
+<td><code>vcmi</code></td>
+<td>движок Героев III с мостом в bare_app, свои патчи SDL2_mixer</td>
+<td>13 (+2)</td>
+</tr>
+<tr>
+<td><code>xash3d-fwgs</code>, <code>hlsdk-portable</code></td>
+<td>Half-Life: движок с платформой bare_app, код игры, русские строки</td>
+<td>10</td>
+</tr>
+<tr>
+<td><code>wine-wow64</code>, <code>wowbox64</code></td>
+<td>Wine 11.0 в режиме WoW64 (32-битные DLL собирает <code>llvm-mingw</code>), Box64 как эмулятор x86</td>
+<td>25, 3</td>
+</tr>
+<tr>
+<td><code>mesa-panfrost</code></td>
+<td>Mesa 25.0 только с panfrost и EGL/GLES (Mesa Buildroot для panfrost тянет LLVM)</td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>rbdoom3-bfg</code>, <code>iortcw</code></td>
+<td>DOOM 3 BFG и RTCW как SDL2-игры; каждый ставит свой <code>game.ini</code></td>
+<td>19, 5</td>
+</tr>
+<tr>
+<td><code>doom1-wad</code>, <code>esp8089-firmware</code>, <code>meson-venc-firmware</code>, <code>llvm-mingw</code>, <code>oga-pad</code></td>
+<td>данные и прошивки</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_5">Патчи: где и как</h2>
+<table>
+<thead>
+<tr>
+<th>Что</th>
+<th>Где</th>
+<th>Как пересобрать после правки</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ядро платы</td>
+<td><code>board/&lt;плата&gt;/linux/patches/*.patch</code></td>
+<td><code>make linux</code> (копия дерева заново; ~1,8 ГБ на копию)</td>
+</tr>
+<tr>
+<td>U-Boot платы</td>
+<td><code>board/&lt;плата&gt;/u-boot/patches/</code></td>
+<td><code>make uboot</code></td>
+</tr>
+<tr>
+<td>пакет Buildroot</td>
+<td><code>package/&lt;pkg&gt;/*.patch</code></td>
+<td><code>make rootfs-make BR=&lt;pkg&gt;-dirclean &amp;&amp; make rootfs</code> — именно <code>dirclean</code>, не <code>rebuild</code>: патчи ложатся только на свежераспакованный архив</td>
+</tr>
+<tr>
+<td>SDL2 для игр</td>
+<td><code>package/bare-app/sdl2/</code></td>
+<td><code>sdl2-dirclean</code></td>
+</tr>
+<tr>
+<td>SDL2_mixer для VCMI</td>
+<td><code>package/vcmi/sdl2_mixer/</code></td>
+<td><code>sdl2_mixer-dirclean</code></td>
+</tr>
+</tbody>
+</table>
+<p>Патч — обычный <code>git format-patch</code> из рабочего дерева сабмодуля или из
+распакованного пакета в <code>output/&lt;fw&gt;/buildroot/build/&lt;pkg&gt;-&lt;версия&gt;</code>. Первая
+строка темы — что меняет, в теле — зачем и как измерено. Нумерация сплошная.
+Подробнее — <a href="../../patches.md">docs/patches.md</a>.</p>
+<h2 id="apps">Приложения в <code>apps/</code></h2>
+<p>Каталог <code>apps/&lt;имя&gt;/</code> с пакетом в <code>board/common/buildroot/package/&lt;имя&gt;/</code> —
+это «приложение», которое включается только через <code>APPS</code>. SDK накладывает его на
+defconfig Buildroot платы (<code>output/&lt;fw&gt;/buildroot/defconfig.sdk</code>); в defconfig
+платы приложения не пишут. <code>make apps-list</code> показывает, что есть.</p>
+<h2 id="_6">Что где пересобирать (шпаргалка)</h2>
+<table>
+<thead>
+<tr>
+<th>После правки</th>
+<th>Команда</th>
+<th>Время</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>apps/bare_app</code></td>
+<td><code>make rootfs-make BR=bare-app-rebuild &amp;&amp; make</code></td>
+<td>минуты; без прошивки — <code>tools/oga.sh run</code> или <code>tar | ssh</code></td>
+</tr>
+<tr>
+<td>патча VCMI / Wine / Mesa</td>
+<td><code>make rootfs-make BR=&lt;pkg&gt;-dirclean &amp;&amp; make</code></td>
+<td>VCMI и Wine — самые долгие (часы)</td>
+</tr>
+<tr>
+<td>патча ядра</td>
+<td><code>make linux &amp;&amp; make</code></td>
+<td>от минут</td>
+</tr>
+<tr>
+<td>конфига прошивки</td>
+<td>зависит от переменной; <code>make image</code> всегда</td>
+<td>секунды</td>
+</tr>
+<tr>
+<td><code>games/*</code> или манифеста</td>
+<td>ничего: <code>scripts/games-image.py --card … --reuse --games &lt;id&gt;</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>На машине сборки 14 ГБ памяти: один тяжёлый компонент за раз, VCMI собирается
+в 4 потока по ~1 ГБ (<code>VCMI_JOBS</code>). Это одна из причин <code>.NOTPARALLEL</code>.</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

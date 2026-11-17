@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3. bare_app — OdroidLinux</title>
+<link rel="stylesheet" href="wiki.css">
+</head>
+<body>
+<div class="wrap">
+<nav>
+<h2>OdroidLinux</h2>
+<a href="index.html" class="">Вики проекта</a>
+<a href="01-SDK.html" class="">1. Устройство SDK</a>
+<a href="02-Boot-and-Disk.html" class="">2. Загрузка и диски</a>
+<a href="03-bare_app.html" class="current">3. bare_app</a>
+<a href="04-Games.html" class="">4. Игры: как устроены</a>
+<a href="05-Adding-a-Game.html" class="">5. Добавление игры</a>
+<a href="06-Pitfalls.html" class="">6. Нюансы</a>
+<a href="07-Tools.html" class="">7. Инструменты</a>
+<a href="08-Boards.html" class="">8. Платы</a>
+<div class="toc">
+<a href="#_1">Цели и границы</a>
+<a href="#_2">Потоки</a>
+<a href="#_3">Главный экран</a>
+<a href="#_5">Игры как отдельные процессы</a>
+<a href="#_7">Реестр игр</a>
+<a href="#kconfig">Состав сборки (Kconfig)</a>
+<a href="#_8">Остальные экраны и сервисы</a>
+</div>
+</nav>
+<main>
+<h1 id="3-bare_app">3. bare_app — лаунчер</h1>
+<p><code>apps/bare_app</code> — отдельный репозиторий (сабмодуль SDK), GUI-приложение на LVGL
+9.6 с DRM-слоями, кнопками, стиками, батареей, подсветкой, Wi-Fi, трансляцией
+экрана. Оно берёт экран сразу после загрузки и не закрывается: выключение —
+удержание кнопки питания, короткое нажатие — сон или гибернация.</p>
+<h2 id="_1">Цели и границы</h2>
+<ol>
+<li>Новая плата или новое оборудование добавляются без переделки остального кода.</li>
+<li>LVGL отвечает только за отрисовку и может быть заменён.</li>
+<li>Игры — отдельные процессы со своими лицензиями; в <code>bare_app</code> не линкуется ничего GPL.</li>
+</ol>
+<p><img class="diagram" alt="Слои bare_app" src="img/bare_app-layers.svg" /></p>
+<p>Границу с тулкитом держит сборка: путь к заголовкам LVGL подключён только к цели
+<code>bare_app_view_lvgl</code>; бэкенд <code>headless</code> собирается вообще без тулкита и служит
+проверкой. Платформа (<code>src/platforms/oga.c</code>, <code>ogu.c</code>, <code>pc.c</code>) выбирается во время
+работы по <code>compatible</code> device tree, так что одна сборка может нести обе приставки.</p>
+<h2 id="_2">Потоки</h2>
+<table>
+<thead>
+<tr>
+<th>Поток</th>
+<th>Владеет</th>
+<th>Ждёт</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>control (main)</td>
+<td>сервисы, шина, control-модули, запись в контекст</td>
+<td>signalfd, очередь шины, очередь действий, таймеры</td>
+</tr>
+<tr>
+<td>view</td>
+<td>LVGL, драйверы экрана и ввода, видеослой</td>
+<td>eventfd контекста, очередь notify, evdev, DRM, ящик кадров</td>
+</tr>
+<tr>
+<td>звук интерфейса</td>
+<td>PCM, пока звучит</td>
+<td>очередь запросов</td>
+</tr>
+<tr>
+<td>сеть трансляции</td>
+<td>RTSP-сервер, кодер, зрители</td>
+<td>сокеты, ящик кадров, RTCP</td>
+</tr>
+<tr>
+<td>звук трансляции</td>
+<td>захват loopback и вывод на устройство</td>
+<td>PCM по 10 мс</td>
+</tr>
+<tr>
+<td>процесс игры</td>
+<td>движок, буфер в общей памяти</td>
+<td>свой цикл</td>
+</tr>
+</tbody>
+</table>
+<p>Между потоками пять общих объектов: контекст <code>gui_ctx</code> (view читает только
+снимки), очередь действий view → control, очередь уведомлений control → view,
+шина событий сервисы → control, ящик кадров источник → view. Сигналы
+принимаются через <code>signalfd</code> в control.</p>
+<h2 id="_3">Главный экран</h2>
+<p>Как у Switch: ряд крупных квадратных плиток — 10 игр по порядку последних
+запусков, последняя плитка «Все игры» открывает библиотеку (сетка 5 в ряд на GO
+Ultra, вертикальная прокрутка). Над рядом — название выбранной игры, под ним —
+круглые кнопки экранов (тест ввода, USB-диск, настройки, слои или стенд-тест),
+внизу — что сделают X и A. Сверху: часы (если выставлены), громкость, Wi-Fi,
+батарея с процентом (жёлтая с 20 %, красные цифры с 10 %, зелёная с молнией на зарядке).</p>
+<p><img class="shot" alt="Главный экран GO Ultra" src="img/shots/home.png" />
+<em>Главный экран: ряд плиток по последним запускам, круглые кнопки экранов, подсказка кнопок внизу.</em></p>
+<p><img class="shot" alt="Плитка «Все игры»" src="img/shots/home-last.png" />
+<em>Конец ряда — плитка «Все игры»…</em></p>
+<p><img class="shot" alt="Библиотека" src="img/shots/library.png" />
+<em>…и библиотека: все игры сеткой 5 в ряд с вертикальной прокруткой.</em></p>
+<ul>
+<li><strong>Плитка</strong> показывает <code>cover.png</code> из каталога игры (квадрат любого размера,
+  обрезается по плитке 210×210 на GO Ultra, 140×140 на OGA); без обложки —
+  название на цветном фоне. Игра без нужных файлов затемнена с пометкой «не
+  установлена», свёрнутая — со значком паузы.</li>
+<li><strong>A</strong> запускает, <strong>X</strong> открывает «Управление игры», <strong>B</strong> в библиотеке возвращает на главный.</li>
+<li>Порядок хранится в файле настроек (<code>recent=</code> до 16 ключей игр). Ключ игры —
+  8 hex-цифр от её id и имени каталога, поэтому переименование каталога игры
+  теряет её порядок и настройки управления.</li>
+</ul>
+<h3 id="_4">Экран «Управление игры»</h3>
+<p><img class="shot" alt="Управление игры" src="img/shots/controls.png" />
+<em>X на плитке Героев III: сверху подсказка игры, ниже строка на каждую кнопку и во что она превращается.</em></p>
+<p>Строка на каждую кнопку устройства, которую получает игра, справа — какой кнопкой
+она будет для игры; слева/справа перебирают, X возвращает, последняя строка —
+всё как было. Сверху — подсказка игры (<code>hint</code>), в строках — что кнопка делает в
+игре (<code>[labels]</code> / <code>[labels.ru]</code> из ini). Ниже — инверсия осей стиков, а с
+датчиком движения — «Прицел гироскопом» и чувствительность. Хранится по игре:
+<code>controls.&lt;ключ&gt;=a=b,x=-,ly=invert,gyro=on</code>. Кнопки, которые bare_app оставляет
+себе (питание, громкость, F6, кнопка сворачивания, L2/R2 там, где они —
+громкость), в списке нет. Изменения действуют со следующего нажатия, даже в
+свёрнутой игре.</p>
+<h2 id="_5">Игры как отдельные процессы</h2>
+<p><img class="diagram" alt="Протокол game_ipc" src="img/game-ipc.svg" /></p>
+<p>Каждая игра — программа, которую bare_app запускает на сеанс
+(<code>src/games/game_proc.c</code>): <code>fork</code> + <code>exec</code> с двумя унаследованными дескрипторами.</p>
+<ul>
+<li><strong>fd 3</strong> — сокет <code>SOCK_SEQPACKET</code>, по пакету <code>struct game_msg</code>: игра → приложение
+  <code>GAME_MSG_FRAME</code> (с флагом <code>GAME_FRAME_SAME</code>, если кадр не изменился: так
+  неподвижная картинка не принимается за зависание); приложение → игра
+  <code>GAME_MSG_BUTTON</code>, <code>GAME_MSG_AXIS</code>, а играм с клавиатурой и мышью USB —
+  <code>GAME_MSG_KEY</code>, <code>GAME_MSG_MOUSE_*</code>. EOF — другая сторона умерла.</li>
+<li><strong>fd 4</strong> — memfd: <code>struct game_shm</code> и три кадра XRGB8888 размером с видеослой.
+  Тройной буфер без блокировок: у каждого по буферу, третий «в середине»; игра,
+  упавшая посреди кадра, не блокирует приложение. Для трансляции игра может
+  отдавать ещё и «свою картинку» большего размера (VCMI 854×600 → поток).</li>
+</ul>
+<p>Протокол — <code>src/games/game_ipc.h</code>, сторона игры — <code>game_ipc_client.h</code>, оба под
+MIT, чтобы включаться в игры с любой лицензией; Buildroot кладёт их в
+<code>staging/usr/include/bare_app/</code>. Кадр уже должен быть размера слоя:
+масштабирует игра (или драйвер SDL2 / мост Wine).</p>
+<p>Что получает процесс игры: размер слоя (854×480 на GO Ultra, 480×320 на OGA),
+ALSA-устройство платы (при включённой трансляции — сторона loopback), язык
+(<code>en</code>/<code>ru</code>), каталог данных. Вывод игры попадает в <code>/var/log/bare_app.log</code>.</p>
+<h3 id="_6">Жизненный цикл</h3>
+<table>
+<thead>
+<tr>
+<th>Событие</th>
+<th>Что делает bare_app</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>запуск</td>
+<td>экран «Загрузка…» до первого кадра, потом подсказка <code>hint</code> на пару секунд</td>
+</tr>
+<tr>
+<td>F5 (у Героев на GO Ultra — F1)</td>
+<td>сворачивает: процессу SIGSTOP, в меню значок паузы; та же кнопка или плитка разворачивают с того же места</td>
+</tr>
+<tr>
+<td>F5 удерживать 0,6 с</td>
+<td>монитор системы поверх игры (CPU по кластерам, GPU, память, температуры, батарея, диски, FPS и график времени кадра)</td>
+</tr>
+<tr>
+<td>F6 удерживать 2 с</td>
+<td>SIGTERM (SDL превращает в <code>SDL_QUIT</code>), через секунду SIGKILL, назад в меню</td>
+</tr>
+<tr>
+<td>L2/R2</td>
+<td>громкость у игр с <code>trigger_volume</code> / <code>volume = triggers</code>, иначе уходят в игру</td>
+</tr>
+<tr>
+<td>выход с кодом 0</td>
+<td>экран закрывается; другой код или сигнал — экран показывает причину</td>
+</tr>
+<tr>
+<td>пункт другой игры при свёрнутой</td>
+<td>вопрос: закрыть свёрнутую или отменить</td>
+</tr>
+<tr>
+<td>заряд ≤ 15 % без зарядки</td>
+<td>красное предупреждение на 6 с, с 5 % — батарея в углу</td>
+</tr>
+</tbody>
+</table>
+<p><img class="shot" alt="Свёрнутая игра" src="img/shots/home-minimized.png" />
+<em>Doom свёрнут по F5: процесс остановлен, на плитке значок паузы, A продолжает с того же места.</em></p>
+<h2 id="_7">Реестр игр</h2>
+<p>Меню, экран игры и ядро view знают игры только через таблицу <code>games[]</code> в
+<code>src/games/games.c</code> — по одному <code>struct game_def</code> на тип игры
+(<code>homm3.c</code>, <code>halflife.c</code>, <code>doom.c</code>, <code>native.c</code>, <code>wine.c</code>; <code>bench.c</code> — стенд-тест
+отдельной круглой кнопкой). Поля: <code>id</code>, <code>title</code>, <code>hint</code>, <code>missing()</code> (что не
+найдено), <code>start()</code> (запуск), <code>entries()</code>/<code>info()</code> для игр, найденных во время
+работы (каждый <code>wine.ini</code> и <code>game.ini</code> — отдельный пункт), <code>label()</code> для экрана
+управления, <code>trigger_volume</code>, <code>gyro_on</code>, <code>hint_for()</code>/<code>minimize_for()</code> по
+платформе. <code>switch</code> по играм в коде нет.</p>
+<h2 id="kconfig">Состав сборки (Kconfig)</h2>
+<p>Что входит в бинарник — платформы, драйверы, экраны, шрифты, языки, игры —
+задаёт собственный <code>Kconfig</code> (Kconfiglib в <code>tools/kconfig</code>): <code>configs/pc_defconfig</code>
+(симулятор SDL, тесты), <code>oga_defconfig</code>, <code>ogu_defconfig</code>, <code>oga_minimal_defconfig</code>.
+В образе символы игр ставит пакет <code>bare-app</code> из <code>APPS_CONFIG</code>
+(<code>CONFIG_GAME_HOMM3=$(…BR2_PACKAGE_BARE_APP_HOMM3)</code> и т. д.), так что игра
+включается в одном месте — конфиге прошивки.</p>
+<pre><code class="language-sh">cmake -S . -B build-host &amp;&amp; cmake --build build-host -j &amp;&amp; (cd build-host &amp;&amp; ctest)
+./build-host/bare_app                                    # симулятор в окне SDL
+echo &quot;down a wait:500 f6&quot; | BARE_APP_SHOT=s.ppm ./build-host/bare_app -p pc-mem   # сценарий + снимок
+BARE_APP_SIZE=854x480 ./build-host/bare_app -p pc-mem    # экран GO Ultra
+</code></pre>
+<h2 id="_8">Остальные экраны и сервисы</h2>
+<p><img class="shot" alt="Настройки" src="img/shots/settings.png" />
+<em>Настройки, категория «Интернет»: Wi-Fi (на GO Ultra — через USB-адаптер) и адрес RTSP-трансляции.</em></p>
+<p><img class="shot" alt="Тест ввода" src="img/shots/input-test.png" />
+<em>Тест ввода: только те кнопки и оси, которые объявили драйверы платы; A×2 — калибровка стиков.</em></p>
+<ul>
+<li><strong>Настройки</strong>: язык (en/ru), яркость, громкость, Wi-Fi (список сетей, ввод ключа
+  <code>lv_keyboard</code>), интернет (RTSP-трансляция), система (гибернация, дата и время),
+  датчик движения.</li>
+<li><strong>Трансляция (RTSP)</strong> — свой сервер без сторонних библиотек: H.264 (аппаратный
+  кодер через V4L2 — <code>meson-venc</code> на GO Ultra, <code>rk-vepu-h264</code> на OGA, иначе OpenH264),
+  звук L16 через ALSA loopback, MPEG-TS для VLC без live555.
+  <code>rtsp://&lt;адрес&gt;:8554/live</code>.</li>
+<li><strong>Монитор системы</strong> — <code>services/sysmon.c</code>, читает <code>/proc</code> и <code>/sys</code>, всегда по-английски.</li>
+<li><strong>Снимок экрана</strong> — <code>kill -USR1</code> → слои дисплея в PPM (<code>BARE_APP_SHOT</code>),
+  <code>ogu-ctl.py shot:</code> / <code>oga.sh shot</code>.</li>
+<li><strong>Клавиатура и мышь USB</strong> — захватываются (<code>input_hid</code>), в меню работают как кнопки,
+  в Windows-игры и SDL-игры идут как есть.</li>
+<li><strong>Датчик движения</strong> (ICM-20948 на USB) — гироскоп как мышь: по умолчанию включён у
+  Doom, Half-Life, DOOM 3, RTCW, выключен у игр с курсором.</li>
+</ul>
+<p>Подробности до уровня файлов — <a href="../../../apps/bare_app/docs/ARCHITECTURE.md">ARCHITECTURE.md</a>;
+кнопки каждой игры — <a href="../../../apps/bare_app/README.md">README.md</a>.</p>
+<footer>OdroidLinux SDK — вики. Источник: docs/wiki/*.md; HTML собран build-html.py.</footer>
+</main>
+</div>
+</body>
+</html>

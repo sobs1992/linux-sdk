@@ -1,0 +1,99 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='980' height='330' viewBox='0 0 980 330' font-family='Segoe UI, Noto Sans, DejaVu Sans, Arial, sans-serif'>
+<title>Цепочки загрузки плат</title>
+<defs>
+<marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto-start-reverse'><path d='M 0 0 L 10 5 L 0 10 z' fill='#444'/></marker>
+<marker id='dot' viewBox='0 0 10 10' refX='5' refY='5' markerWidth='6' markerHeight='6'><circle cx='5' cy='5' r='4' fill='#444'/></marker>
+</defs>
+<rect width='980' height='330' fill='white'/>
+<rect x='20' y='25' width='150' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='95.0' y='44.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>GO Advance (RK3326)</text>
+<text x='95.0' y='61.7' font-size='12' text-anchor='middle' fill='#222'>SPI пустой</text>
+<rect x='190' y='25' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='262.5' y='52.9' font-size='11' text-anchor='middle' fill='#222'>BootROM</text>
+<line x1='335' y1='49' x2='347' y2='49' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='347' y='25' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='419.5' y='44.4' font-size='11' text-anchor='middle' fill='#222'>TPL+SPL</text>
+<text x='419.5' y='61.4' font-size='11' text-anchor='middle' fill='#222'>(idbloader @64)</text>
+<line x1='492' y1='49' x2='504' y2='49' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='504' y='25' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='576.5' y='52.9' font-size='11' text-anchor='middle' fill='#222'>BL31 TF-A</text>
+<line x1='649' y1='49' x2='661' y2='49' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='661' y='25' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='733.5' y='44.4' font-size='11' text-anchor='middle' fill='#222'>U-Boot</text>
+<text x='733.5' y='61.4' font-size='11' text-anchor='middle' fill='#222'>(u-boot.itb)</text>
+<line x1='806' y1='49' x2='818' y2='49' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='818' y='25' width='145' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='890.5' y='52.9' font-size='11' text-anchor='middle' fill='#222'>extlinux → Linux</text>
+<rect x='20' y='83' width='150' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='95.0' y='102.7' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>GO Advance</text>
+<text x='95.0' y='119.7' font-size='12' text-anchor='middle' fill='#222'>SPI с заводским</text>
+<rect x='190' y='83' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='262.5' y='110.8' font-size='11' text-anchor='middle' fill='#222'>BootROM</text>
+<line x1='335' y1='107' x2='347' y2='107' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='347' y='83' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='419.5' y='102.3' font-size='11' text-anchor='middle' fill='#222'>SPI miniloader</text>
+<text x='419.5' y='119.3' font-size='11' text-anchor='middle' fill='#222'>(1.5M baud)</text>
+<line x1='492' y1='107' x2='504' y2='107' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='504' y='83' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='576.5' y='102.3' font-size='11' text-anchor='middle' fill='#222'>trust.img</text>
+<text x='576.5' y='119.3' font-size='11' text-anchor='middle' fill='#222'>(BL31 rkbin)</text>
+<line x1='649' y1='107' x2='661' y2='107' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='661' y='83' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='733.5' y='102.3' font-size='11' text-anchor='middle' fill='#222'>uboot.img</text>
+<text x='733.5' y='119.3' font-size='11' text-anchor='middle' fill='#222'>(mainline)</text>
+<line x1='806' y1='107' x2='818' y2='107' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='818' y='83' width='145' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='890.5' y='110.8' font-size='11' text-anchor='middle' fill='#222'>extlinux → Linux</text>
+<rect x='20' y='141' width='150' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='95.0' y='169.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>GO Ultra (S922X)</text>
+<rect x='190' y='141' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='262.5' y='168.8' font-size='11' text-anchor='middle' fill='#222'>BootROM</text>
+<line x1='335' y1='165' x2='347' y2='165' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='347' y='141' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='419.5' y='168.8' font-size='11' text-anchor='middle' fill='#222'>FIP @1: BL2 → BL30/BL31</text>
+<line x1='492' y1='165' x2='504' y2='165' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='504' y='141' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='576.5' y='160.3' font-size='11' text-anchor='middle' fill='#222'>U-Boot</text>
+<text x='576.5' y='177.3' font-size='11' text-anchor='middle' fill='#222'>(BL33) с eMMC</text>
+<line x1='649' y1='165' x2='661' y2='165' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='661' y='141' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='733.5' y='168.8' font-size='11' text-anchor='middle' fill='#222'>SD с extlinux? иначе eMMC</text>
+<line x1='806' y1='165' x2='818' y2='165' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='818' y='141' width='145' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='890.5' y='168.8' font-size='11' text-anchor='middle' fill='#222'>Linux</text>
+<rect x='20' y='199' width='150' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='95.0' y='227.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>Raspberry Pi</text>
+<rect x='190' y='199' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='262.5' y='218.3' font-size='11' text-anchor='middle' fill='#222'>GPU firmware</text>
+<text x='262.5' y='235.3' font-size='11' text-anchor='middle' fill='#222'>(EEPROM)</text>
+<line x1='335' y1='223' x2='347' y2='223' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='347' y='199' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='419.5' y='226.8' font-size='11' text-anchor='middle' fill='#222'>config.txt</text>
+<line x1='492' y1='223' x2='504' y2='223' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='504' y='199' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='576.5' y='226.8' font-size='11' text-anchor='middle' fill='#222'>kernel=u-boot.bin</text>
+<line x1='649' y1='223' x2='661' y2='223' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='661' y='199' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='733.5' y='226.8' font-size='11' text-anchor='middle' fill='#222'>U-Boot</text>
+<line x1='806' y1='223' x2='818' y2='223' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='818' y='199' width='145' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='890.5' y='226.8' font-size='11' text-anchor='middle' fill='#222'>extlinux → Linux</text>
+<rect x='20' y='257' width='150' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='95.0' y='285.2' font-size='12' text-anchor='middle' font-weight='bold' fill='#222'>BeagleBone Black</text>
+<rect x='190' y='257' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='262.5' y='284.9' font-size='11' text-anchor='middle' fill='#222'>ROM AM335x</text>
+<line x1='335' y1='281' x2='347' y2='281' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='347' y='257' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='419.5' y='276.4' font-size='11' text-anchor='middle' fill='#222'>MLO</text>
+<text x='419.5' y='293.4' font-size='11' text-anchor='middle' fill='#222'>(SPL) с FAT</text>
+<line x1='492' y1='281' x2='504' y2='281' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='504' y='257' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='576.5' y='284.9' font-size='11' text-anchor='middle' fill='#222'>u-boot.img</text>
+<line x1='649' y1='281' x2='661' y2='281' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='661' y='257' width='145' height='48' rx='6' fill='#fdf3e0' stroke='#c48a2a' stroke-width='1.5'/>
+<text x='733.5' y='284.9' font-size='11' text-anchor='middle' fill='#222'>U-Boot</text>
+<line x1='806' y1='281' x2='818' y2='281' stroke='#444' stroke-width='1.2' marker-end='url(#arr)'/>
+<rect x='818' y='257' width='145' height='48' rx='6' fill='#e9f6ea' stroke='#4f9a56' stroke-width='1.5'/>
+<text x='890.5' y='284.9' font-size='11' text-anchor='middle' fill='#222'>extlinux → Linux</text>
+<text x='20' y='320' font-size='12' text-anchor='start' fill='#333'>Везде одинаково в конце: U-Boot выбирает dtb по модели платы и читает extlinux/extlinux.conf с раздела BOOT.</text>
+</svg>
