@@ -1,0 +1,15 @@
+config BR2_PACKAGE_SDL12_COMPAT
+	bool "sdl12-compat"
+	depends on !BR2_STATIC_LIBS # it loads SDL 2 at run time
+	depends on !BR2_PACKAGE_SDL # the same libSDL-1.2.so.0
+	select BR2_PACKAGE_SDL2
+	help
+	  SDL 1.2's API over SDL 2 (libSDL-1.2.so.0): old SDL 1.2
+	  programs (and Box64's wrapped libSDL-1.2) get SDL 2's drivers,
+	  here bare_app's. Patched to ask for desktop OpenGL where SDL 2
+	  defaults to OpenGL ES (EGL without GLX).
+
+	  https://github.com/libsdl-org/sdl12-compat
+
+comment "sdl12-compat needs a toolchain w/ dynamic library and no SDL 1.2"
+	depends on BR2_STATIC_LIBS || BR2_PACKAGE_SDL

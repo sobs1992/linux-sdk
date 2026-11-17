@@ -33,15 +33,14 @@ RBDOOM3_BFG_CONF_OPTS = \
 	-DHANDHELD_DEFAULTS=ON
 
 # The engine in /usr/lib/rbdoom3bfg, started by /usr/bin/rbdoom3bfg
-# (rbdoom3bfg.sh: OpenAL's sound device from SDL's AUDIODEV, SDL's libGL);
-# doom3.ini makes it an entry of bare_app's menu (GAME_NATIVE)
+# (rbdoom3bfg.sh: OpenAL's sound device from SDL's AUDIODEV, SDL's libGL).
+# The game.ini that makes it an entry of bare_app's menu (GAME_NATIVE) goes
+# onto the games card with the game (the SDK's games/doom3/overlay)
 define RBDOOM3_BFG_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/neo/RBDoom3BFG \
 		$(TARGET_DIR)/usr/lib/rbdoom3bfg/RBDoom3BFG
 	$(INSTALL) -D -m 0755 $(RBDOOM3_BFG_PKGDIR)/rbdoom3bfg.sh \
 		$(TARGET_DIR)/usr/bin/rbdoom3bfg
-	$(INSTALL) -D -m 0644 $(RBDOOM3_BFG_PKGDIR)/doom3.ini \
-		$(TARGET_DIR)/usr/share/bare_app/games/doom3.ini
 endef
 
 $(eval $(cmake-package))

@@ -1,0 +1,34 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] OpenGL: SDL_GL_LoadLibrary holds the library already loaded
+
+SDL 1.2 holds the OpenGL library from SDL_GL_LoadLibrary until SDL_Quit.
+Here, when SDL 2 has one loaded already (a window made before: an
+SDL_OPENGL one, or one the GL renderer draws, as for a splash screen),
+SDL_GL_LoadLibrary answered "already loaded" and took no reference; the
+program looked its GL functions up, SDL_SetVideoMode destroyed that
+window, SDL 2 unloaded the library with it and loaded it again for the
+new one, at another address. Unreal Tournament 2004's first glGetString
+then called into nothing (SIGSEGV in UOpenGLRenderDevice::SetRes).
+Take a reference to the library loaded instead (SDL_GL_LoadLibrary(NULL)
+of SDL 2 counts one more).
+
+Upstream: not yet
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+--- a/src/SDL12_compat.c
++++ b/src/SDL12_compat.c
+@@ -8390,7 +8390,13 @@
+         char *dup;
+ 
+         if (SDL20_strcmp(err, "OpenGL library already loaded") == 0) {
+-            return 0;
++            /* ...but hold a reference to the one loaded, as SDL 1.2 holds
++               its library until SDL_Quit: it may be the library of a window
++               made before (an SDL_OPENGL window, or one drawn by the GL
++               renderer) that SDL_SetVideoMode destroys, and SDL 2 unloads it
++               with its last window. The program's GL function pointers,
++               looked up in between, would then point into nothing. */
++            return SDL20_GL_LoadLibrary(NULL);
+         }
+         /* reset the actual error. */
+         dup = SDL20_strdup(err);

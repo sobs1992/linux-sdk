@@ -35,6 +35,8 @@ work = lab/images/work
 ;   install    copy (default): "source" copied whole, without "exclude";
 ;              homm3, halflife: the SDK's scripts/<x>-install.sh from "source"
 ;              (only what the engine reads; "options" passed to it);
+;              ut2004: scripts/ut2004-install.py, the DVD (.iso) and the
+;              Linux patch in "source";
 ;              none: only the files below
 ;   source     the game on this PC
 ;   exclude    glob of what not to copy (relative path or name), may repeat
@@ -45,7 +47,8 @@ work = lab/images/work
 ;              DATA_DIR set (patches the game's files)
 ;   env        NAME=VALUE: one more variable for "run", may repeat
 ;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
-;   cover      a picture for bare_app's home screen: a picture file, or
+;   cover      a picture for bare_app's home screen: a picture file (game:PATH:
+;              one of the game as installed), or
 ;              ARCHIVE:ENTRY, a picture inside the game's .lod (Heroes III)
 ;              or .wad (Doom), PROGRAM.exe:icon, its biggest icon, or
 ;              VIDEO.bik:SECONDS, a frame of a video (ffmpeg), see
@@ -146,6 +149,8 @@ exclude = Uninstall
 exclude = base/maps/d3ctf*
 exclude = base/maps/d3dm*
 exclude = base/maps/d3xpdm*
+; game.ini: the entry of bare_app's menu (the engine is in the image)
+overlay = games/doom3/overlay
 cover = lab/games/DOOM 3 BFG Edition/2.ico
 cover_crop = fit
 
@@ -236,6 +241,8 @@ install = none
 file = lab/games/Return to Castle Wolfenstein/Main/pak0.pk3 -> main/
 file = lab/games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
 file = lab/games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
+; game.ini: the entry of bare_app's menu (the engine is in the image)
+overlay = games/rtcw/overlay
 cover = lab/games/Return to Castle Wolfenstein/2.ico
 cover_crop = fit
 
@@ -258,3 +265,17 @@ cover = lab/games/Prince of Persia - The Sands of Time/goggame-1207658747.ico
 cover_crop = fit
 run = games/pop/prepare.sh
 env = POP_RUS=${installers}/Prince of Persia - The Sands of Time/pop1_rus_full.exe
+
+[ut2004]
+; Unreal Tournament 2004, the DVD (.iso) and the Linux patch 3369-2 as
+; downloaded, installed as the DVD's Linux installer would
+; (scripts/ut2004-install.py: English, the x86_64 programs, ~5.3 GB); run
+; by Box64 (bare-app.UT2004=y). game.ini: the entry of bare_app's menu.
+install = ut2004
+source = ${installers}/UT2004
+; the game wants the CD key of the copy: add --cdkey KEY (or a file with it)
+options = --lang int
+overlay = games/ut2004/overlay
+; the logo of the DVD's Linux installer
+cover = game:Help/UT2004Logo.bmp
+cover_crop = fit

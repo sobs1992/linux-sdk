@@ -110,8 +110,9 @@ $(SDL2_TARGET_CONFIGURE): | $(BARE_APP_SDL2_AFTER)
 endif
 
 # The game.ini (bare_app's menu entry) of SDL2 games that are Buildroot's
-# own packages; a package of this tree installs its ini itself (rbdoom3-bfg,
-# iortcw)
+# own packages and all in the image. A game whose files are on the games
+# card brings its game.ini there (the SDK's games/<game>/overlay: DOOM 3,
+# RTCW, UT2004), so the menu follows the card without a new rootfs
 BARE_APP_GAME_INIS-$(BR2_PACKAGE_BARE_APP_CHOCOLATE_DOOM) += chocolate-doom.ini
 ifneq ($(BARE_APP_GAME_INIS-y),)
 define BARE_APP_INSTALL_GAME_INIS

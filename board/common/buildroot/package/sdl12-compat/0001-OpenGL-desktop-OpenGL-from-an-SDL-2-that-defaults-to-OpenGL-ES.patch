@@ -1,0 +1,37 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] OpenGL: desktop OpenGL from an SDL 2 that defaults to OpenGL ES
+
+An SDL 2 built for EGL with OpenGL ES only (no desktop OpenGL of its own,
+as for Mesa without GLX: the ODROID-GO Ultra's panfrost) starts with an
+OpenGL ES profile, and an SDL 1.2 program asking for SDL_OPENGL got a
+context it cannot draw with. Ask for a desktop OpenGL compatibility
+context there; Mesa gives its highest compatibility version (3.1 on
+panfrost). Nothing changes where SDL 2 defaults to desktop OpenGL.
+
+Upstream: not applicable (SDK-specific SDL 2 build)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+--- a/src/SDL12_compat.c
++++ b/src/SDL12_compat.c
+@@ -6650,6 +6650,21 @@
+            ones did (x11, windib, quartz), so we'll just offer it everywhere. */
+         GetEnvironmentWindowPosition(&x, &y);
+ 
++        /* An SDL 2 built for EGL with OpenGL ES only (no desktop OpenGL of
++           its own, as for Mesa without GLX) starts with an OpenGL ES profile,
++           which no SDL 1.2 program can draw with: ask for desktop OpenGL,
++           Mesa gives its highest compatibility version. */
++        if (flags20 & SDL_WINDOW_OPENGL) {
++            int profile = 0;
++
++            if (SDL20_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &profile) == 0 &&
++                profile == SDL_GL_CONTEXT_PROFILE_ES) {
++                SDL20_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
++                SDL20_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
++                SDL20_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
++            }
++        }
++
+         /* If GL scaling is disabled, and a multisampled buffer is requested, do it. */
+         if (!use_gl_scaling && (flags12 & SDL12_OPENGL) && OpenGLLogicalScalingSamples) {
+             SDL20_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);

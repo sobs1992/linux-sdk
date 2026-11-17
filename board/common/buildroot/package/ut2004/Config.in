@@ -1,0 +1,11 @@
+config BR2_PACKAGE_UT2004
+	bool "ut2004"
+	depends on BR2_aarch64 # box64
+	depends on !BR2_STATIC_LIBS # box64, sdl12-compat
+	select BR2_PACKAGE_BOX64
+	select BR2_PACKAGE_SDL12_COMPAT
+	help
+	  The starter of Unreal Tournament 2004's Linux build (x86_64)
+	  under Box64: /usr/bin/ut2004. The game itself is not included:
+	  install a DVD with scripts/ut2004-install.py (it adds the Linux
+	  patch 3369) to ut2004/ of the games partition (/games).

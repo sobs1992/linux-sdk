@@ -41,8 +41,9 @@ endef
 
 # The installation is fs_basepath: the engine, main/ with the game modules
 # and gamepad.cfg; /usr/bin/iowolfsp (iowolfsp.sh) starts it. The game's
-# own files are another search path (rtcw.ini, the entry of bare_app's
-# menu, GAME_NATIVE).
+# own files are another search path, given by the game.ini that goes onto
+# the games card with them (the SDK's games/rtcw/overlay: the entry of
+# bare_app's menu, GAME_NATIVE).
 IORTCW_OUT = $(@D)/SP/build/release-linux-$(IORTCW_ARCH)
 define IORTCW_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(IORTCW_OUT)/iowolfsp.$(IORTCW_ARCH) \
@@ -54,8 +55,6 @@ define IORTCW_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/iortcw/main/gamepad.cfg
 	$(INSTALL) -D -m 0755 $(IORTCW_PKGDIR)/iowolfsp.sh \
 		$(TARGET_DIR)/usr/bin/iowolfsp
-	$(INSTALL) -D -m 0644 $(IORTCW_PKGDIR)/rtcw.ini \
-		$(TARGET_DIR)/usr/share/bare_app/games/rtcw.ini
 endef
 
 $(eval $(generic-package))

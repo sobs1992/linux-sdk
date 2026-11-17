@@ -165,11 +165,12 @@ config BR2_PACKAGE_BARE_APP_DOOM3
 	select BR2_PACKAGE_RBDOOM3_BFG
 	help
 	  The RBDOOM-3-BFG engine (package rbdoom3-bfg, GPLv3) for
-	  DOOM 3 BFG Edition, drawn by the GPU, with the package's
-	  doom3.ini as its entry of the main menu. The game files are not
-	  included: copy base/ of a bought BFG Edition (GOG or Steam)
-	  to doom3/ of the games partition (GAMES, /games). In the
-	  SDK: APPS_CONFIG += bare-app.DOOM3=y
+	  DOOM 3 BFG Edition, drawn by the GPU. The game files are not
+	  included: base/ of a bought BFG Edition (GOG or Steam) goes to
+	  doom3/ of the games partition (GAMES, /games) with the game.ini
+	  that makes it an entry of the main menu (the SDK's
+	  games/doom3/overlay, by scripts/games-image.py). In the SDK:
+	  APPS_CONFIG += bare-app.DOOM3=y
 
 config BR2_PACKAGE_BARE_APP_RTCW
 	bool "Return to Castle Wolfenstein (iortcw, an SDL2 game)"
@@ -182,11 +183,37 @@ config BR2_PACKAGE_BARE_APP_RTCW
 	select BR2_PACKAGE_IORTCW
 	help
 	  The iortcw engine (package iortcw, GPLv3) for Return to Castle
-	  Wolfenstein's single player, drawn by the GPU, with the
-	  package's rtcw.ini as its entry of the main menu. The game files
-	  are not included: copy main/ of a bought copy (pak0.pk3,
-	  sp_pak1-4.pk3 of patch 1.41, a translation's pk3s) to rtcw/main/
-	  of the games partition (GAMES, /games). In the SDK:
-	  APPS_CONFIG += bare-app.RTCW=y
+	  Wolfenstein's single player, drawn by the GPU. The game files
+	  are not included: main/ of a bought copy (pak0.pk3, sp_pak1-4.pk3
+	  of patch 1.41, a translation's pk3s) goes to rtcw/main/ of the
+	  games partition (GAMES, /games), with the game.ini that makes it
+	  an entry of the main menu (the SDK's games/rtcw/overlay, by
+	  scripts/games-image.py). In the SDK: APPS_CONFIG += bare-app.RTCW=y
+
+config BR2_PACKAGE_BARE_APP_UT2004
+	bool "Unreal Tournament 2004 (its Linux x86_64 build under Box64)"
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_aarch64 # box64
+	depends on BR2_INSTALL_LIBSTDCPP # openal
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL # openal
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_7 # openal
+	depends on BR2_PACKAGE_OPENAL_ARCH_SUPPORTS # openal
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # mesa-panfrost
+	depends on !BR2_PACKAGE_MESA3D # mesa-panfrost
+	depends on !BR2_PACKAGE_SDL # sdl12-compat
+	select BR2_PACKAGE_MESA_PANFROST
+	select BR2_PACKAGE_BOX64
+	select BR2_PACKAGE_SDL12_COMPAT
+	select BR2_PACKAGE_OPENAL
+	select BR2_PACKAGE_UT2004
+	help
+	  Unreal Tournament 2004's own Linux build (patch 3369, x86_64)
+	  run by Box64: its SDL 1.2 by sdl12-compat over SDL2's bareapp
+	  driver, OpenGL by the GPU (mesa-panfrost), OpenAL native. The
+	  package ut2004 is only the starter (/usr/bin/ut2004); the game
+	  (a DVD installed by scripts/ut2004-install.py, with the Linux
+	  patch) and its game.ini (the SDK's games/ut2004/overlay) go to
+	  ut2004/ of the games partition (GAMES, /games). In the SDK:
+	  APPS_CONFIG += bare-app.UT2004=y
 
 endif

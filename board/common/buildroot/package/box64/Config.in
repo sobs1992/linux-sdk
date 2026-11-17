@@ -1,0 +1,14 @@
+config BR2_PACKAGE_BOX64
+	bool "box64"
+	depends on BR2_aarch64
+	depends on !BR2_STATIC_LIBS # it loads the native libraries it wraps
+	help
+	  Box64 runs x86_64 Linux programs on arm64: their code through
+	  its dynamic recompiler, the libraries it knows (libc, libm,
+	  libGL, SDL 1.2 and 2, OpenAL...) as the system's native ones.
+	  Built for the Odroid-N2 (S922X: Cortex-A73 + A53) as the GO
+	  Ultra is. Installed as /usr/bin/box64 with the x86_64
+	  libstdc++.so.5/.6 and libgcc_s.so.1 of its x64lib in
+	  /usr/lib/box64-x86_64-linux-gnu (old games' C++ runtime).
+
+	  https://github.com/ptitSeb/box64

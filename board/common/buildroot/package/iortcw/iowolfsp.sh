@@ -3,7 +3,7 @@
 # bare_app (package iortcw).
 #
 # The installation in /usr/lib/iortcw is fs_basepath: the engine, the game
-# modules and gamepad.cfg. bare_app's rtcw.ini adds the game's own files
+# modules and gamepad.cfg. The game.ini on the games card adds the game's own files
 # (another search path), the data directory (fs_homepath) and the screen.
 # The game's first start would run its recommended settings, which set a
 # 640x480 mode and restart the video: the ini gives the mode instead.
