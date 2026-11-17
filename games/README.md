@@ -132,6 +132,13 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
   правый стик — камера), `gamma = 1.6` для тёмных подземелий; нужен Mesa-патч 0005
   (`PAN_MMAP_WINDOW`, 6 → 60 fps). Обложка — кадр ролика `bd_05.bik` (через ffmpeg).
 
+- **pop** — Prince of Persia: The Sands of Time, GOG (Wine), по-русски (текст, речь и
+  ролики русского издания: `prepare.sh` накладывает `pop1_rus_full.exe` из `${installers}`,
+  меню PC-версии английские), `prepare.sh` также собирает
+  `poplaunch.exe` (запуск без лаунчера GOG), в `overlay/` — `wine.ini` (левый стик —
+  W A S D, правый — мышь: камера и кинжал-указатель меню, `mouse = relative`) и
+  готовый профиль «prince»; около 30 fps; подробности — `pop/README.md`.
+
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
   6,4 ГБ.

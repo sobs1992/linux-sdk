@@ -54,7 +54,7 @@ import sys
 
 SDK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COVER = 240		# px: the home screen's tile on the GO Ultra
-MULTI = ("exclude", "file", "data")	# keys that may come more than once
+MULTI = ("exclude", "file", "data", "env")	# keys that may come more than once
 
 
 def die(msg):
@@ -261,6 +261,11 @@ def install_game(name, g, games, data):
                    g.get("cover_back"))
     if g.get("run"):
         env = dict(os.environ, GAME_DIR=dest, SOURCE=src or "", SDK_DIR=SDK, DATA_DIR=data)
+        for spec in g.get("env", []):
+            k, eq, v = spec.partition("=")
+            if not eq or not re.fullmatch(r"[A-Za-z_]\w*", k.strip()):
+                die("[%s] env = %s: NAME=VALUE?" % (name, spec))
+            env[k.strip()] = v.strip()
         run([sdk_path(g["run"])], env=env, cwd=SDK)
     for spec in g.get("data", []):
         s, d = arrow(spec)

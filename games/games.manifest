@@ -18,6 +18,8 @@
 [image]
 ; The Steam library: its games stay there for Steam
 steam = /media/D/Games/Steam
+; Installers and translations as downloaded (kept there, not in lab/)
+installers = /media/D/Games/Install
 ; Firmware: the GO Ultra keeps its games on an SD card (exFAT "GAMES"):
 ;   scripts/games-image.py --card /media/$USER/GAMES --board root@192.168.7.2
 ; The games are put together in <work> first (a disk with room), then
@@ -41,6 +43,7 @@ work = lab/images/work
 ;   overlay    a directory copied over the game (wine.ini, settings)
 ;   run        a program run afterwards with GAME_DIR, SOURCE, SDK_DIR,
 ;              DATA_DIR set (patches the game's files)
+;   env        NAME=VALUE: one more variable for "run", may repeat
 ;   data       SRC -> DST: files onto /data (DST relative to it), may repeat
 ;   cover      a picture for bare_app's home screen: a picture file, or
 ;              ARCHIVE:ENTRY, a picture inside the game's .lod (Heroes III)
@@ -235,3 +238,23 @@ file = lab/games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
 file = lab/games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
 cover = lab/games/Return to Castle Wolfenstein/2.ico
 cover_crop = fit
+
+[pop]
+; Prince of Persia: The Sands of Time (2003), the GOG edition (181 GOG v2,
+; English) as installed. Not the uninstaller, the manual, GOG's leftovers,
+; the logs and the profile of its first start on Windows. prepare.sh
+; puts in the Russian edition's text, voices and videos from POP_RUS (the
+; PC menus stay English; games/pop/README.md)
+source = lab/games/Prince of Persia - The Sands of Time
+exclude = unins000.*
+exclude = manual.pdf
+exclude = webcache.zip
+exclude = *.lnk
+exclude = Detection.*
+exclude = POP.LOG
+exclude = Profiles/fd
+overlay = games/pop/overlay
+cover = lab/games/Prince of Persia - The Sands of Time/goggame-1207658747.ico
+cover_crop = fit
+run = games/pop/prepare.sh
+env = POP_RUS=${installers}/Prince of Persia - The Sands of Time/pop1_rus_full.exe
