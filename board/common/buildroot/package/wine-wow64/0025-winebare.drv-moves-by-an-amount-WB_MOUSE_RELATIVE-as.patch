@@ -1,0 +1,42 @@
+From 7899132a08c68ffb2de5a45da81f8e1328ef8aa1 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Tue, 17 Nov 2026 19:11:15 +0100
+Subject: [PATCH] winebare.drv: moves by an amount (WB_MOUSE_RELATIVE), as
+ bare_app_wine's "mouse = relative" sends them.
+
+A game reading the mouse by DirectInput (raw input) while Wine holds its
+cursor in one place got every place sent as a move from there: the same
+move again with each later one, and a click with it. Prince of Persia: The
+Sands of Time's pointer jumped off the button it was clicked on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/winebare.drv/main.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+index 4a1c132..db5a39a 100644
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -217,10 +217,16 @@ static void send_mouse(const struct wb_msg *msg)
+ 
+     input.mi.dx = msg->mouse.x;
+     input.mi.dy = msg->mouse.y;
+-    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
++    if (msg->mouse.flags & WB_MOUSE_RELATIVE)
++    {
++        /* a move by x, y (or none: the buttons only), from wherever Wine has
++         * its cursor: raw input and DirectInput get it as it is */
++        input.mi.dwFlags = (msg->mouse.flags & WB_MOUSE_MOVE) ? MOUSEEVENTF_MOVE : 0;
++    }
++    else input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+     for (i = 0; i < ARRAY_SIZE(buttons); i++)
+         if (msg->mouse.flags & buttons[i].wb) input.mi.dwFlags |= buttons[i].win;
+-    NtUserSendHardwareInput(0, 0, &input, 0);
++    if (input.mi.dwFlags) NtUserSendHardwareInput(0, 0, &input, 0);
+ 
+     if ((msg->mouse.flags & WB_MOUSE_WHEEL) && msg->mouse.wheel)
+     {
+-- 
+2.53.0
+
