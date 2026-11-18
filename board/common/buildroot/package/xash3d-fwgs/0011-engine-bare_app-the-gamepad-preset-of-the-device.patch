@@ -1,0 +1,33 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] engine: bare_app: the gamepad preset of the device
+
+bare_app names a preset of gamepad_presets/ for the device it runs on in
+XASH3D_GAMEPAD_PRESET (the GO Advance: odroid_go_advance, its one stick
+turns the view and the d-pad walks). The engine applies it once, while
+the gamepad's keys and axes are still the defaults, as it does for the
+known SDL controllers; the menu's Gamepad page picks another one.
+
+--- a/engine/platform/bare_app/bare_app.c
++++ b/engine/platform/bare_app/bare_app.c
+@@ -874,9 +874,20 @@
+ 	ba.mouse_grab = enable;
+ }
+ 
++/*
++==============
++Platform_JoyInit
++
++The gamepad is the device's own: its preset (gamepad_presets/<name>.cfg) is
++what bare_app names in XASH3D_GAMEPAD_PRESET, applied once while nobody
++has changed the gamepad's keys, as with SDL's known controllers
++==============
++*/
+ int Platform_JoyInit( void )
+ {
+-	Joy_SetCapabilities( false, 0, NULL );
++	const char *preset = getenv( "XASH3D_GAMEPAD_PRESET" );
++
++	Joy_SetCapabilities( false, 0, COM_StringEmptyOrNULL( preset ) ? NULL : preset );
+ 	return 1;
+ }
+ 

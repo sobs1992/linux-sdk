@@ -48,4 +48,20 @@ define XASH3D_FWGS_RUSSIAN
 endef
 XASH3D_FWGS_POST_PATCH_HOOKS += XASH3D_FWGS_RUSSIAN
 
+# Gamepad presets of the devices (engine patch 0011: bare_app names one in
+# XASH3D_GAMEPAD_PRESET), into extras.pk3 for the engine and its menu, and
+# as files for bare_app, which shows the buttons' actions before the game
+# has applied one
+define XASH3D_FWGS_GAMEPAD_PRESETS
+	mkdir -p $(@D)/3rdparty/extras/xash-extras/gamepad_presets
+	cp $(XASH3D_FWGS_PKGDIR)/gamepad/*.cfg $(@D)/3rdparty/extras/xash-extras/gamepad_presets/
+endef
+XASH3D_FWGS_POST_PATCH_HOOKS += XASH3D_FWGS_GAMEPAD_PRESETS
+
+define XASH3D_FWGS_INSTALL_GAMEPAD_PRESETS
+	$(INSTALL) -d $(TARGET_DIR)/usr/share/xash3d/gamepad_presets
+	$(INSTALL) -m 0644 $(XASH3D_FWGS_PKGDIR)/gamepad/*.cfg $(TARGET_DIR)/usr/share/xash3d/gamepad_presets/
+endef
+XASH3D_FWGS_POST_INSTALL_TARGET_HOOKS += XASH3D_FWGS_INSTALL_GAMEPAD_PRESETS
+
 $(eval $(waf-package))
