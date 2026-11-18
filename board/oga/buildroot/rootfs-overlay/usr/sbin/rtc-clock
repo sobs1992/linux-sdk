@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# The date and time of the ODROID-GO Advance, kept by the RTC of its RK817
+# PMIC (rk808-rtc, built into the kernel), which runs on the battery while
+# the device is off and keeps time (120 s in 120 s). The kernel takes the
+# time from it at boot (rtc0, hctosys), so "load" is only for after a
+# hibernation or by hand.
+#
+#   rtc-clock load                     system time from the RTC
+#   rtc-clock set "YYYY-MM-DD hh:mm"   system time and the RTC (bare_app's
+#                                      date and time setting)
+#
+# There is no time zone: the time set is the time shown, kept as UTC.
+
+# the RTC of the RK8xx PMIC (rtcN numbers follow probe order)
+rtc_dev() {
+	for r in /sys/class/rtc/rtc*; do
+		case "$(cat "$r/name" 2>/dev/null)" in
+		rk808-rtc*) echo "/dev/${r##*/}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+dev=$(rtc_dev) || { echo "rtc-clock: no RK817 RTC" >&2; exit 1; }
+
+case "$1" in
+load)
+	hwclock -s -u -f "$dev"
+	;;
+set)
+	[ -n "$2" ] || { echo "Usage: $0 set \"YYYY-MM-DD hh:mm\"" >&2; exit 1; }
+	date -u -s "$2" > /dev/null && hwclock -w -u -f "$dev"
+	;;
+*)
+	echo "Usage: $0 load | set \"YYYY-MM-DD hh:mm\"" >&2
+	exit 1
+	;;
+esac
