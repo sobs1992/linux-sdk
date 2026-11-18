@@ -89,6 +89,10 @@
   на eMMC записан (<code>make flash-emmc</code>, Vol+ при включении показывает eMMC как
   USB-диск — патч U-Boot 0012). Экран зажигает уже U-Boot (патчи 0003–0010: DSI,
   панель ST7701). 17 патчей U-Boot всего. Шаги загрузки печатаются на экран.</li>
+<li><strong>Установка на заводскую приставку без UART</strong>: L2 + R2 при включении — режим
+  восстановления Hardkernel отдаёт eMMC как USB-диск (<code>0525:a4a5</code>), дальше бэкап
+  первых 4 ГиБ и <code>make FW=ogu flash-emmc DEV=/dev/sdX</code>; после записи выключить
+  кнопкой (сам не перезагружается). Подробно — <code>docs/boards/ogu.md</code>.</li>
 <li><strong>Диски.</strong> eMMC: система + <code>/data</code> до конца; все игры — SD exFAT <code>GAMES</code>.</li>
 <li><strong>Быстрая загрузка</strong> ~3,7 с до меню: кэши в <code>arch_cpu_init</code>, таблица phandle,
   <code>BOOTDELAY=0</code>, ядро без чужих платформ (<code>Image</code> 22 МБ), <code>quiet</code>, панель не

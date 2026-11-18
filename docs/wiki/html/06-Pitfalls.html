@@ -174,6 +174,16 @@
 <li><strong>Не выгружать <code>axg-sound-card</code>.</strong></li>
 <li><strong>Не печатать в UART, пока U-Boot ждёт</strong> (<code>BOOTDELAY=0</code>): остановить его —
   держать Enter с самого включения.</li>
+<li><strong>init (PID 1) завис на <code>syslog_lock</code>.</strong> busybox init запускает процессы через
+  <code>vfork()</code>, и потомок до <code>exec</code> писал в syslog («starting pid») в общей с init
+  памяти; умерший с захваченной блокировкой потомок оставил init ждать её вечно
+  (GO Ultra, 2026-11-18): зомби не убираются, getty на UART не перезапускается,
+  <code>poweroff</code> из bare_app ничего не делает — экран тёмный, синий светодиод мигает
+  (heartbeat ядра), ssh жив. Исправлено <code># CONFIG_FEATURE_INIT_SYSLOG is not set</code>
+  в <code>board/common/buildroot/busybox.fragment</code> (сообщения init — на консоль). Если
+  такое увидеть: <code>/proc/1/wchan</code> = <code>__futex_wait</code>; выключать по ssh — <code>sync</code>,
+  <code>mount -o remount,ro</code> для <code>/data</code> и <code>/</code>, затем <code>poweroff -f</code> (rcK init уже не
+  запустит), а не удержанием кнопки.</li>
 <li><strong>Bit-42 чтения под нагрузкой GPU на GO Ultra</strong>: ошибка аппаратная, одного
   экземпляра (кэш врёт, DRAM права); на нём 666 МГц даёт 0 ошибок на стенде, 800 —
   ошибки и панику DOOM 3, второй экземпляр на 800 чист. Частота — настройка
