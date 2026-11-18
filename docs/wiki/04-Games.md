@@ -21,7 +21,7 @@
 | Doom | C | doomgeneric (`bare_app_doom`) | `doom/*.wad` (иначе shareware из образа) | `doom/` |
 | DOOM 3 BFG | B | RBDOOM-3-BFG, `rbdoom3-bfg` | `doom3/base` | `doom3/` |
 | RTCW | B | iortcw, `iortcw` | `rtcw/main/*.pk3` | `rtcw/` |
-| Unreal Tournament 2004 | B | своя Linux-сборка x86_64 под Box64, `ut2004` (+ `box64`, `sdl12-compat`) | `ut2004/` (DVD + патч 3369) | `ut2004/.ut2004` |
+| Unreal Tournament 2004 | B | своя Linux-сборка x86_64 под Box64, `ut2004` (+ `box64`, `sdl12-compat`) | `ut2004/` (Linux-установщик DVD) | `ut2004/.ut2004` |
 | Chocolate Doom | B | пакет Buildroot (в ogu выключен) | — | `chocolate-doom/` |
 | HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT | A | Wine 11.0 WoW64 + Box64 | `<id>/` с `wine.ini` | `wine/prefix`, `wine/games/<id>` |
 
@@ -157,10 +157,10 @@ SDL_BAREAPP_GL_ASYNC = 1
 ### Linux-игры x86_64: Unreal Tournament 2004 под Box64
 
 ![UT2004: заставка](img/shots/ut2004-splash.png)
-*Unreal Tournament 2004 (своя Linux-сборка, патч 3369) под Box64: заставка SDL 1.2 через sdl12-compat и драйвер `bareapp`.*
+*Unreal Tournament 2004 (своя Linux-сборка) под Box64: заставка SDL 1.2 через sdl12-compat и драйвер `bareapp`.*
 
-У UT2004 есть родная Linux-версия (DVD + патч 3369-2 с x86_64-бинарником
-`ut2004-bin-linux-amd64`), поэтому Wine не нужен:
+У UT2004 есть родная Linux-версия (Linux-установщик DVD ставит её вместе с
+x86_64-бинарником `System/ut2004-bin`), поэтому Wine не нужен:
 
 - **Box64** (пакет `box64`, тот же коммит, что и wowbox64; сборка `ODROIDN2`) исполняет
   x86_64-код, а libc, libm, SDL 1.2, OpenAL, GL подменяет родными aarch64-библиотеками.
@@ -174,16 +174,16 @@ SDL_BAREAPP_GL_ASYNC = 1
   запуске `UT2004.ini`/`User.ini` из `Default*.ini` игры с наложенными
   `bare_app/UT2004.ini` и `User.ini` с карты (джойстик, оси стиков, клавиши кнопок),
   размер экрана — при каждом запуске, устройство OpenAL Soft — из `AUDIODEV`;
-- **установка** — `scripts/ut2004-install.py`: делает то же, что Linux-установщик
-  DVD (`setup.xml` внутри `linux-installer.sh`, без его запуска): базовые файлы,
-  один язык, распаковка `.uz2`, x86_64-программы, патч; в каталог карты или по ssh
-  потоком tar прямо на плату (5,3 ГБ, на ПК ничего не складывается).
+- **установка** — игра, поставленная на ПК Linux-установщиком DVD
+  (`linux-installer.sh`, версия 3186, CD-ключ в `System/cdkey`), копируется на карту
+  целиком (`[ut2004]` манифеста, `install = copy`) без файлов установщика, исходников
+  SDL/OpenAL, x86_64-библиотек SDL 1.2 и OpenAL игры и `UT2004.exe`.
 
 Стики — джойстик самой игры (левый: JoyX/JoyY — ходьба, правый: JoyZ/JoyR — обзор),
 кнопки — клавиши: R1 огонь, L1 альтернативный огонь, R2/L2 оружие, A прыжок и
 выбор в меню, B меню/назад, X присесть, Y действие. **Игре нужен CD-ключ**: без
 `System/cdkey` она выходит сразу после запуска рендера («Your CD key appears to be
-invalid»); ключ своей копии пишет `ut2004-install.py --cdkey KEY`.
+invalid»); его записывает установщик DVD.
 
 ## Путь C: свой движок
 

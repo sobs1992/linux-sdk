@@ -116,7 +116,7 @@
 <td>Unreal Tournament 2004</td>
 <td>B</td>
 <td>своя Linux-сборка x86_64 под Box64, <code>ut2004</code> (+ <code>box64</code>, <code>sdl12-compat</code>)</td>
-<td><code>ut2004/</code> (DVD + патч 3369)</td>
+<td><code>ut2004/</code> (Linux-установщик DVD)</td>
 <td><code>ut2004/.ut2004</code></td>
 </tr>
 <tr>
@@ -326,9 +326,9 @@ SDL_BAREAPP_GL_ASYNC = 1
 ставит <code>PAN_MESA_DEBUG=noafbc</code>.</p>
 <h3 id="linux-x86_64-unreal-tournament-2004-box64">Linux-игры x86_64: Unreal Tournament 2004 под Box64</h3>
 <p><img class="shot" alt="UT2004: заставка" src="img/shots/ut2004-splash.png" />
-<em>Unreal Tournament 2004 (своя Linux-сборка, патч 3369) под Box64: заставка SDL 1.2 через sdl12-compat и драйвер <code>bareapp</code>.</em></p>
-<p>У UT2004 есть родная Linux-версия (DVD + патч 3369-2 с x86_64-бинарником
-<code>ut2004-bin-linux-amd64</code>), поэтому Wine не нужен:</p>
+<em>Unreal Tournament 2004 (своя Linux-сборка) под Box64: заставка SDL 1.2 через sdl12-compat и драйвер <code>bareapp</code>.</em></p>
+<p>У UT2004 есть родная Linux-версия (Linux-установщик DVD ставит её вместе с
+x86_64-бинарником <code>System/ut2004-bin</code>), поэтому Wine не нужен:</p>
 <ul>
 <li><strong>Box64</strong> (пакет <code>box64</code>, тот же коммит, что и wowbox64; сборка <code>ODROIDN2</code>) исполняет
   x86_64-код, а libc, libm, SDL 1.2, OpenAL, GL подменяет родными aarch64-библиотеками.
@@ -342,16 +342,16 @@ SDL_BAREAPP_GL_ASYNC = 1
   запуске <code>UT2004.ini</code>/<code>User.ini</code> из <code>Default*.ini</code> игры с наложенными
   <code>bare_app/UT2004.ini</code> и <code>User.ini</code> с карты (джойстик, оси стиков, клавиши кнопок),
   размер экрана — при каждом запуске, устройство OpenAL Soft — из <code>AUDIODEV</code>;</li>
-<li><strong>установка</strong> — <code>scripts/ut2004-install.py</code>: делает то же, что Linux-установщик
-  DVD (<code>setup.xml</code> внутри <code>linux-installer.sh</code>, без его запуска): базовые файлы,
-  один язык, распаковка <code>.uz2</code>, x86_64-программы, патч; в каталог карты или по ssh
-  потоком tar прямо на плату (5,3 ГБ, на ПК ничего не складывается).</li>
+<li><strong>установка</strong> — игра, поставленная на ПК Linux-установщиком DVD
+  (<code>linux-installer.sh</code>, версия 3186, CD-ключ в <code>System/cdkey</code>), копируется на карту
+  целиком (<code>[ut2004]</code> манифеста, <code>install = copy</code>) без файлов установщика, исходников
+  SDL/OpenAL, x86_64-библиотек SDL 1.2 и OpenAL игры и <code>UT2004.exe</code>.</li>
 </ul>
 <p>Стики — джойстик самой игры (левый: JoyX/JoyY — ходьба, правый: JoyZ/JoyR — обзор),
 кнопки — клавиши: R1 огонь, L1 альтернативный огонь, R2/L2 оружие, A прыжок и
 выбор в меню, B меню/назад, X присесть, Y действие. <strong>Игре нужен CD-ключ</strong>: без
 <code>System/cdkey</code> она выходит сразу после запуска рендера («Your CD key appears to be
-invalid»); ключ своей копии пишет <code>ut2004-install.py --cdkey KEY</code>.</p>
+invalid»); его записывает установщик DVD.</p>
 <h2 id="c">Путь C: свой движок</h2>
 <p>Игра линкует <code>game_ipc_client.h</code> и ведёт цикл «принять кнопки → нарисовать кадр
 размера слоя → опубликовать». В bare_app — <code>src/games/&lt;игра&gt;.c</code> со <code>struct
