@@ -105,15 +105,18 @@ endef
 #
 # FFmpeg gets only what the game's videos need (Bink and Smacker, the
 # original game's and Horn of the Abyss's), under 2 MB stripped
-# instead of all of it; options added last win, as above.
+# instead of all of it; options added last win, as above. Not with
+# bare_app's media viewer: its list (bare-app.mk) has them and more.
 ifeq ($(BR2_PACKAGE_VCMI),y)
 SDL2_CONF_OPTS += --enable-video-dummy
 SDL2_MIXER_CONF_OPTS += --enable-music-mp3 --enable-music-mp3-drmp3
+ifneq ($(BR2_PACKAGE_BARE_APP_MEDIA),y)
 FFMPEG_CONF_OPTS += \
 	--disable-everything --disable-programs --disable-network \
 	--disable-avdevice --disable-avfilter \
 	--enable-decoder=bink,binkaudio_dct,binkaudio_rdft,smacker,smackaud \
 	--enable-demuxer=bink,smacker
+endif
 
 define VCMI_PATCH_SDL2_MIXER
 	$(APPLY_PATCHES) $(SDL2_MIXER_DIR) $(VCMI_PKGDIR)/sdl2_mixer \*.patch

@@ -86,7 +86,8 @@ APPS           := bare-app            # приложения из apps/ в rootf
 APPS_AUTOSTART := bare-app            # init-скрипт S<INIT_ORDER>bare-app
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y \
-                  bare-app.SDL=y bare-app.STREAM=y bare-app.DOOM3=y bare-app.RTCW=y
+                  bare-app.SDL=y bare-app.STREAM=y bare-app.DOOM3=y bare-app.RTCW=y \
+                  bare-app.UT2004=y bare-app.MEDIA=y   # MEDIA: просмотр в файловом менеджере
 
 IMAGE_RAW      := $(IMAGES_DIR)/u-boot-fip.bin@1
 IMAGE_DATA_START_MB := 2192          # где начинается /data; без SIZE — до конца диска

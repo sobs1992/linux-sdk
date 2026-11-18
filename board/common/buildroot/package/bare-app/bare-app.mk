@@ -8,7 +8,8 @@ BARE_APP_VERSION = 1.0
 # Source lives in the SDK: <sdk>/apps/bare_app (git submodule with LVGL inside)
 BARE_APP_SITE = $(BR2_EXTERNAL_SDK_PATH)/../../../apps/bare_app
 BARE_APP_SITE_METHOD = local
-# bare_app_doom (ports/doom, built with GAME_DOOM) is doomgeneric: GPLv2
+# bare_app_doom (ports/doom, built with GAME_DOOM) is doomgeneric: GPLv2;
+# bare_app_media (MEDIA) links FFmpeg's LGPL libraries as shared ones
 BARE_APP_LICENSE = GPL-2.0+ (bare_app_doom)
 BARE_APP_LICENSE_FILES = ports/doom/LICENSE
 # Host build trees and the parts of LVGL and doomgeneric that are never
@@ -33,9 +34,52 @@ BARE_APP_KCONFIG = \
 	CONFIG_GAME_HOMM3=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_HOMM3)) \
 	CONFIG_GAME_HALFLIFE=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_HALFLIFE)) \
 	CONFIG_GAME_WINE=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_WINE)) \
-	CONFIG_STREAM=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_STREAM))
+	CONFIG_STREAM=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_STREAM)) \
+	CONFIG_SCREEN_MEDIA=$(call BARE_APP_YN,$(BR2_PACKAGE_BARE_APP_MEDIA))
 ifeq ($(BR2_PACKAGE_BARE_APP_STREAM),y)
 BARE_APP_DEPENDENCIES += libopenh264 host-pkgconf
+endif
+# the media viewer's player, bare_app_media: FFmpeg and ALSA
+ifeq ($(BR2_PACKAGE_BARE_APP_MEDIA),y)
+BARE_APP_DEPENDENCIES += ffmpeg alsa-lib host-pkgconf
+endif
+
+# FFmpeg for the viewer: the decoders, demuxers and parsers of the
+# pictures, videos and sound files a PC has (and the Bink and Smacker
+# videos VCMI plays: vcmi.mk leaves FFmpeg to this list then), reading
+# files only, nothing else. Its configure takes the last option given for
+# each part; wine-wow64.mk, read after this file, adds its own on top.
+BARE_APP_FFMPEG_DECODERS = \
+	h264 hevc mpeg4 mpeg1video mpeg2video h263 h263p flv msmpeg4v1 msmpeg4v2 \
+	msmpeg4v3 wmv1 wmv2 wmv3 vc1 vp3 vp5 vp6 vp6a vp6f vp8 vp9 theora cinepak \
+	indeo2 indeo3 indeo4 indeo5 truemotion1 truemotion2 msvideo1 msrle svq1 svq3 \
+	rv10 rv20 rv30 rv40 dvvideo qtrle huffyuv ffvhuff rawvideo mjpeg mjpegb \
+	interplay_video roq bink smacker \
+	png apng bmp gif webp tiff targa pcx ppm pgm pgmyuv pbm pam jpegls \
+	aac aac_latm mp1 mp1float mp2 mp2float mp3 mp3float vorbis opus flac alac \
+	ac3 eac3 dca ape wavpack cook atrac3 amrnb amrwb gsm_ms wmav1 wmav2 wmapro \
+	wmavoice wmalossless pcm_s16le pcm_s16be pcm_u8 pcm_s8 pcm_s24le pcm_s24be \
+	pcm_s32le pcm_f32le pcm_f64le pcm_alaw pcm_mulaw adpcm_ms adpcm_ima_wav \
+	adpcm_ima_qt adpcm_ima_dk3 adpcm_ima_dk4 interplay_dpcm roq_dpcm \
+	binkaudio_dct binkaudio_rdft smackaud
+BARE_APP_FFMPEG_DEMUXERS = \
+	mov matroska avi asf mpegps mpegts mpegvideo m4v h264 hevc flv ogg mp3 aac \
+	flac wav ape wv ac3 eac3 dts aiff au voc amr gif dv rm bink smacker ipmovie \
+	roq image2 image_jpeg_pipe image_png_pipe image_bmp_pipe image_webp_pipe \
+	image_tiff_pipe image_pcx_pipe image_ppm_pipe image_pgm_pipe image_pam_pipe \
+	image_jpegls_pipe
+BARE_APP_FFMPEG_PARSERS = \
+	h264 hevc mpeg4video mpegvideo mpegaudio aac aac_latm ac3 dca vorbis opus \
+	flac vp3 vp8 vp9 vc1 h263 png mjpeg bmp gif webp cook
+BARE_APP_FFMPEG_LIST = $(subst $(space),$(comma),$(strip $(1)))
+ifeq ($(BR2_PACKAGE_BARE_APP_MEDIA),y)
+FFMPEG_CONF_OPTS += \
+	--disable-everything --disable-programs --disable-network \
+	--disable-avdevice --disable-avfilter \
+	--enable-protocol=file,pipe \
+	--enable-decoder=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_DECODERS)) \
+	--enable-demuxer=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_DEMUXERS)) \
+	--enable-parser=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_PARSERS))
 endif
 # SDL2 games come by game.ini; other programs may too, so only "on"
 ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)

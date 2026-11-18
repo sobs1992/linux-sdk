@@ -73,10 +73,11 @@ APPS_AUTOSTART := bare-app
 # saves and settings on /data); HALFLIFE adds Xash3D FWGS + hlsdk-portable
 # + Mesa panfrost (data: /games/halflife); STREAM: the screen over RTSP
 # (rtsp://<address>:8554/live), H.264 by the PX30's encoder (the kernel
-# module rk-vepu-h264 of LINUX_EXT_MODULES), OpenH264 without it
+# module rk-vepu-h264 of LINUX_EXT_MODULES), OpenH264 without it; MEDIA:
+# the file manager's viewer for pictures, video and sound (FFmpeg)
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.INIT_ORDER=06 \
                   bare-app.DOOM_WAD=y bare-app.HOMM3=y bare-app.HALFLIFE=y \
-                  bare-app.STREAM=y
+                  bare-app.STREAM=y bare-app.MEDIA=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]

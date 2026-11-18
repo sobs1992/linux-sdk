@@ -119,6 +119,20 @@ config BR2_PACKAGE_BARE_APP_STREAM
 	  Open rtsp://<device>:8554/live in VLC. Switches bare_app's
 	  STREAM on. In the SDK: APPS_CONFIG += bare-app.STREAM=y
 
+config BR2_PACKAGE_BARE_APP_MEDIA
+	bool "media viewer (pictures, video, sound)"
+	depends on BR2_PACKAGE_FFMPEG_ARCH_SUPPORTS
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	select BR2_PACKAGE_FFMPEG
+	select BR2_PACKAGE_FFMPEG_SWSCALE
+	select BR2_PACKAGE_ALSA_LIB
+	help
+	  The file manager opens pictures, videos and sound files in
+	  bare_app's viewer: /usr/bin/bare_app_media plays them through
+	  FFmpeg's libraries (LGPL, shared) and ALSA. Switches bare_app's
+	  SCREEN_MEDIA on. In the SDK: APPS_CONFIG += bare-app.MEDIA=y
+
 config BR2_PACKAGE_BARE_APP_SDL
 	bool "SDL2 games (SDL's bareapp drivers)"
 	depends on !BR2_STATIC_LIBS # sdl2
