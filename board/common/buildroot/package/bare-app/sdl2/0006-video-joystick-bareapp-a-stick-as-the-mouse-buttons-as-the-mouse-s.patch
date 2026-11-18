@@ -1,0 +1,257 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] video: joystick: bareapp: a stick as the mouse, buttons as
+ the mouse's
+
+Games made for the mouse (Unreal Tournament 2004's menus: a pointer,
+no way back by the keys) could not be pointed at from the gamepad.
+SDL_BAREAPP_MOUSE=stick or rstick makes that stick the mouse: it moves
+the pointer as fast as it is pushed (squared: fine moves near the
+middle), up to SDL_BAREAPP_MOUSE_SPEED window pixels a second (default
+800), and its axes stay at rest for the game controller, so a game does
+not get it twice. SDL_BAREAPP_KEYS takes lbutton, rbutton and mbutton
+as well as keys: that button is the mouse's, pressed where the pointer
+is.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+--- a/src/video/bareapp/SDL_bareapp.h
++++ b/src/video/bareapp/SDL_bareapp.h
+@@ -90,4 +90,9 @@
+  * list such as "a=space, b=escape"; warns about unknown buttons */
+ extern void BAREAPP_ParseMap(const char *list, void (*cb)(int button, const char *value, void *ud), void *ud);
+ 
++/* The stick that is the mouse (SDL_BAREAPP_MOUSE: "stick" the left one,
++ * "rstick" the right one): GP_AXIS_LX or GP_AXIS_RX, its X axis, the next
++ * one its Y; -1 if none. Its axes are not the game controller's then. */
++extern int BAREAPP_MouseStick(void);
++
+ #endif /* SDL_bareapp_h_ */
+--- a/src/video/bareapp/SDL_bareapplink.c
++++ b/src/video/bareapp/SDL_bareapplink.c
+@@ -484,6 +484,22 @@
+     SDL_free(copy);
+ }
+ 
++int BAREAPP_MouseStick(void)
++{
++    const char *v = SDL_getenv("SDL_BAREAPP_MOUSE");
++
++    if (v && SDL_strcasecmp(v, "stick") == 0) {
++        return GP_AXIS_LX;
++    }
++    if (v && SDL_strcasecmp(v, "rstick") == 0) {
++        return GP_AXIS_RX;
++    }
++    if (v && *v && SDL_strcasecmp(v, "none") != 0) {
++        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "bareapp: SDL_BAREAPP_MOUSE \"%s\": stick, rstick or none", v);
++    }
++    return -1;
++}
++
+ #endif /* SDL_VIDEO_DRIVER_BAREAPP */
+ 
+ /* vi: set ts=4 sw=4 expandtab: */
+--- a/src/video/bareapp/SDL_bareappvideo.c
++++ b/src/video/bareapp/SDL_bareappvideo.c
+@@ -32,7 +32,10 @@
+  * the GPU into a pbuffer of the window's size (EGL, Mesa's surfaceless
+  * platform) and read back at each swap. bare_app's buttons are a game
+  * controller (joystick driver "bareapp") and, as SDL_BAREAPP_KEYS says,
+- * keys: "a=space, b=escape, up=up, start=return".
++ * keys: "a=space, b=escape, up=up, start=return", or the mouse's buttons
++ * (lbutton, rbutton, mbutton). SDL_BAREAPP_MOUSE=stick (or rstick) makes
++ * that stick the mouse: it moves the pointer as fast as it is pushed, up
++ * to SDL_BAREAPP_MOUSE_SPEED window pixels a second (default 800).
+  */
+ 
+ #include "../SDL_sysvideo.h"
+@@ -94,6 +97,13 @@
+     SDL_Scancode keys[GP_COUNT];       /* SDL_BAREAPP_KEYS; 0: none */
+     Uint8 down[GP_COUNT];              /* bit 0: D-pad or button, bit 1: stick */
+     Uint8 key_count[SDL_NUM_SCANCODES]; /* buttons holding the key */
++    Uint8 mouse_button[GP_COUNT];      /* SDL_BUTTON_* the button is; 0: none */
++    Uint8 mouse_count[SDL_BUTTON_X2 + 1]; /* buttons holding the mouse's */
++    int mouse_stick;                   /* BAREAPP_MouseStick() */
++    float stick[2];                    /* its X and Y, -1..1 */
++    float speed;                       /* pixels a second at a full push */
++    float rest[2];                     /* the fractions of pixels not sent yet */
++    Uint64 stick_time;                 /* its last move as counted */
+     Uint32 tail;
+     SDL_bool quit_sent;
+ #ifdef SDL_VIDEO_OPENGL_EGL
+@@ -140,20 +150,36 @@
+ 
+ static void KeyMapped(int button, const char *value, void *ud)
+ {
+-    SDL_Scancode code = SDL_GetScancodeFromName(value);
++    static const struct { const char *name; Uint8 button; } mouse[] = {
++        { "lbutton", SDL_BUTTON_LEFT }, { "rbutton", SDL_BUTTON_RIGHT }, { "mbutton", SDL_BUTTON_MIDDLE }
++    };
++    SDL_Scancode code;
++    size_t i;
+ 
+     (void)ud;
++    vd.mouse_button[button] = 0;
++    for (i = 0; i < SDL_arraysize(mouse); i++) {
++        if (SDL_strcasecmp(value, mouse[i].name) == 0) {
++            vd.mouse_button[button] = mouse[i].button;
++            vd.keys[button] = SDL_SCANCODE_UNKNOWN;
++            return;
++        }
++    }
++    code = SDL_GetScancodeFromName(value);
+     if (code == SDL_SCANCODE_UNKNOWN && SDL_strcasecmp(value, "none") != 0) {
+         SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "bareapp: no key \"%s\"", value);
+     }
+     vd.keys[button] = code;
+ }
+ 
+-static void Button(const struct game_msg *m)
++static void MouseMove(int *dx, int *dy);
++
++static void Button(const struct game_msg *m, int *dx, int *dy)
+ {
+     Uint8 bit = (m->flags & GAME_BTN_STICK) ? 2 : 1;
+     SDL_bool was, is;
+     SDL_Scancode key;
++    Uint8 mb;
+ 
+     if (m->code >= GP_COUNT) {
+         return;
+@@ -162,7 +188,23 @@
+     vd.down[m->code] = m->pressed ? (vd.down[m->code] | bit) : (vd.down[m->code] & ~bit);
+     is = vd.down[m->code] != 0;
+     key = vd.keys[m->code];
+-    if (was == is || !key) {
++    mb = vd.mouse_button[m->code];
++    if (was == is) {
++        return;
++    }
++    /* a mouse button: pressed where the pointer is now; several buttons
++     * may make the same one */
++    if (mb) {
++        if (is && vd.mouse_count[mb]++ == 0) {
++            MouseMove(dx, dy);
++            SDL_SendMouseButton(SDL_GetMouseFocus(), 0, SDL_PRESSED, mb);
++        } else if (!is && vd.mouse_count[mb] && --vd.mouse_count[mb] == 0) {
++            MouseMove(dx, dy);
++            SDL_SendMouseButton(SDL_GetMouseFocus(), 0, SDL_RELEASED, mb);
++        }
++        return;
++    }
++    if (!key) {
+         return;
+     }
+     /* several buttons may make the same key */
+@@ -205,6 +247,39 @@
+     }
+ }
+ 
++/* The stick that is the mouse: as far as it is pushed, as fast it moves
++ * (pushed half way, a quarter as fast: fine moves), counted from its last
++ * pump; a pump long after the last one (a game busy loading) moves it as
++ * one of a tenth of a second */
++static void StickMouse(int *dx, int *dy)
++{
++    Uint64 now = SDL_GetPerformanceCounter();
++    float dt = vd.stick_time ? (float)(now - vd.stick_time) / (float)SDL_GetPerformanceFrequency() : 0.0f;
++    int i;
++
++    vd.stick_time = now;
++    if (dt > 0.1f) {
++        dt = 0.1f;
++    }
++    for (i = 0; i < 2; i++) {
++        float v = vd.stick[i];
++        int n;
++
++        if (v == 0.0f) {
++            vd.rest[i] = 0.0f;
++            continue;
++        }
++        vd.rest[i] += v * SDL_fabsf(v) * vd.speed * dt;
++        n = (int)vd.rest[i];
++        vd.rest[i] -= (float)n;
++        if (i == 0) {
++            *dx += n;
++        } else {
++            *dy += n;
++        }
++    }
++}
++
+ /* Relative mode (games that turn by the mouse): the moves are relative
+  * already, there is no pointer to hold in the window */
+ static int BAREAPP_SetRelativeMouseMode(SDL_bool enabled)
+@@ -228,11 +303,17 @@
+     }
+     while ((m = BAREAPP_Next(&vd.tail)) != NULL) {
+         if (m->type == GAME_MSG_BUTTON) {
+-            Button(m);
++            Button(m, &dx, &dy);
+         } else if (m->type == GAME_MSG_MOUSE_BUTTON || m->type == GAME_MSG_MOUSE_MOVE) {
+             Mouse(m, &dx, &dy);
++        } else if (m->type == GAME_MSG_AXIS && vd.mouse_stick >= 0 &&
++                   (m->code == vd.mouse_stick || m->code == vd.mouse_stick + 1)) {
++            vd.stick[m->code - vd.mouse_stick] = (float)m->value / GAME_AXIS_MAX;
+         }
+     }
++    if (vd.mouse_stick >= 0) {
++        StickMouse(&dx, &dy);
++    }
+     MouseMove(&dx, &dy);
+ #ifdef SDL_VIDEO_OPENGL_EGL
+     ShowLateCopy(_this);
+@@ -257,7 +338,13 @@
+         return -1;
+     }
+     SDL_zero(vd.keys);
++    SDL_zero(vd.mouse_button);
+     BAREAPP_ParseMap(SDL_getenv("SDL_BAREAPP_KEYS"), KeyMapped, NULL);
++    vd.mouse_stick = BAREAPP_MouseStick();
++    vd.speed = SDL_getenv("SDL_BAREAPP_MOUSE_SPEED") ? (float)SDL_atof(SDL_getenv("SDL_BAREAPP_MOUSE_SPEED")) : 0.0f;
++    if (vd.speed <= 0.0f) {
++        vd.speed = 800.0f;
++    }
+     SDL_GetMouse()->SetRelativeMouseMode = BAREAPP_SetRelativeMouseMode;
+     return 0;
+ }
+--- a/src/joystick/bareapp/SDL_bareappjoystick.c
++++ b/src/joystick/bareapp/SDL_bareappjoystick.c
+@@ -30,7 +30,8 @@
+  * (A is A), Select back, Start start, F1 start, F2 back, F3 misc1, F4
+  * paddle1 (F5 and F6 are bare_app's); SDL_BAREAPP_GAMEPAD changes it
+  * ("f1=guide, f3=leftstick, l2=none"). The left stick is the
+- * left stick, the triggers L2 and R2 are fully pressed or not. While
++ * left stick, the triggers L2 and R2 are fully pressed or not; a stick
++ * that is the mouse (SDL_BAREAPP_MOUSE) stays at rest here. While
+  * bare_app's link is there the evdev devices are not opened (the Linux
+  * driver honours SDL_JOYSTICK_LINUX=0): they are the same buttons.
+  */
+@@ -52,6 +53,7 @@
+ {
+     SDL_bool there;
+     SDL_JoystickID instance;
++    int mouse_stick; /* BAREAPP_MouseStick() */
+     SDL_Joystick *joystick;
+     int target[GP_COUNT]; /* SDL_GameControllerButton, TRIGGER + axis or NONE */
+     Uint8 held[NBUTTONS + NAXES];
+@@ -112,6 +114,7 @@
+         return 0;
+     }
+     jd.there = SDL_TRUE;
++    jd.mouse_stick = BAREAPP_MouseStick();
+     DefaultMap();
+     BAREAPP_ParseMap(SDL_getenv("SDL_BAREAPP_GAMEPAD"), Mapped, NULL);
+     /* the same buttons are evdev devices too */
+@@ -253,7 +256,8 @@
+                 continue;
+             }
+             Target(joystick, jd.target[m->code], m->pressed ? SDL_TRUE : SDL_FALSE);
+-        } else if (m->type == GAME_MSG_AXIS && m->code < GP_AXIS_COUNT) {
++        } else if (m->type == GAME_MSG_AXIS && m->code < GP_AXIS_COUNT &&
++                   !(jd.mouse_stick >= 0 && (m->code == jd.mouse_stick || m->code == jd.mouse_stick + 1))) {
+             SDL_PrivateJoystickAxis(joystick, axes[m->code], m->value);
+         }
+     }
