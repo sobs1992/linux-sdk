@@ -1,0 +1,23 @@
+From: Sobs <antohasobne@gmail.com>
+Date: Wed, 18 Nov 2026 03:00:00 +0100
+Subject: [PATCH] libc: __ctype_b from the native ctype table
+
+__ctype_b, the old glibc's ctype table (before __ctype_b_loc), was looked
+up in the native libc as data (DATA). An aarch64 glibc has never had it,
+not even as a compat symbol, so a program linked against it got nothing:
+"Global Symbol __ctype_b not found, cannot apply R_X86_64_GLOB_DAT" and a
+SIGSEGV at its first isspace() (Unreal Tournament 2004's Linux build
+3186: KCreateAssetDB). ctSetup() already sets my___ctype_b to
+*__ctype_b_loc(), like my___ctype_tolower/toupper: DATAM gives it.
+
+--- a/src/wrapped/wrappedlibc_private.h	2026-11-18 02:51:52.463289019 +0100
++++ b/src/wrapped/wrappedlibc_private.h	2026-11-18 02:51:52.484005126 +0100
+@@ -216,7 +216,7 @@
+ #ifdef STATICBUILD
+ //DATA(__ctype_b, 8)
+ #else
+-DATA(__ctype_b, 8)
++DATAM(__ctype_b, 8)
+ #endif
+ GO(__ctype_b_loc, pFv)
+ GO(__ctype_get_mb_cur_max, LFv)

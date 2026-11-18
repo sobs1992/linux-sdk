@@ -221,14 +221,12 @@ def install_game(name, g, games, data):
         die("[%s] source %s: not a directory" % (name, src))
     shutil.rmtree(dest, ignore_errors=True)
     log("[%s] %s %s -> /games/%s" % (name, how, src or "", gdir))
-    if how in ("homm3", "halflife", "ut2004"):
-        # the SDK's installers put the game into <games>/heroes3, /halflife,
-        # /ut2004
-        script = os.path.join(SDK, "scripts", how + "-install" +
-                              (".py" if how == "ut2004" else ".sh"))
+    if how in ("homm3", "halflife"):
+        # the SDK's installers put the game into <games>/heroes3, /halflife
+        script = os.path.join(SDK, "scripts", how + "-install.sh")
         opts = g.get("options", "").split()
         run([script] + opts + [src, games])
-        want = {"homm3": "heroes3", "halflife": "halflife", "ut2004": "ut2004"}[how]
+        want = {"homm3": "heroes3", "halflife": "halflife"}[how]
         if gdir != want:
             os.replace(os.path.join(games, want), dest)
     elif how == "copy":
@@ -248,7 +246,7 @@ def install_game(name, g, games, data):
     elif how == "none":
         os.makedirs(dest, exist_ok=True)
     else:
-        die("[%s] install = %s? (copy, homm3, halflife, ut2004, none)" % (name, how))
+        die("[%s] install = %s? (copy, homm3, halflife, none)" % (name, how))
     for spec in g.get("file", []):
         s, d = arrow(spec)
         for f in sources(s):

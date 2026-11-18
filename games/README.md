@@ -151,17 +151,17 @@ bare_app показывает лишь игры, файлы которых ес�
   установки только `pak0.pk3`, `sp_pak*.pk3` патча 1.41 и `z_*.pk3` перевода в
   `rtcw/main/`; движок и `gamepad.cfg` — в rootfs (пакет `iortcw`), пункт меню —
   `rtcw/overlay/game.ini`. Обложка — значок exe.
-- **ut2004** — Unreal Tournament 2004 со своего DVD (`.iso`) и Linux-патча 3369-2 в
-  `${installers}/UT2004`: ставит `scripts/ut2004-install.py` (`install = ut2004`,
-  английский, x86_64-программы, `.uz2` распакованы, ~5,3 ГБ); исполняет Box64
+- **ut2004** — Unreal Tournament 2004, поставленный на ПК Linux-установщиком DVD
+  (`linux-installer.sh`: английский, версия 3186, x86_64 `System/ut2004-bin`, CD-ключ
+  в `System/cdkey`, ~5,3 ГБ) в `/home/sobs/Documents/UT2004`: копируется целиком без
+  файлов установщика, исходников SDL/OpenAL, x86_64 SDL 1.2/OpenAL игры и
+  `UT2004.exe` (`exclude`); исполняет Box64
   (пакеты `box64`, `sdl12-compat`, стартер `ut2004`: `bare-app.UT2004=y`). В
   `ut2004/overlay/` — `game.ini` (стики — джойстик игры, кнопки — клавиши) и
   `bare_app/UT2004.ini`, `User.ini` — настройки, которые стартер накладывает на
   `Default*.ini` при первом запуске. Обложка — логотип установщика
-  (`cover = game:Help/UT2004Logo.bmp`). **Нужен CD-ключ своей копии**: допишите
-  `--cdkey KEY` в `options` (без него игра выходит сразу после запуска рендера).
-  Образ в `/media/D/Games/Install/UT2004` — сцен-рип (каталоги `DEViANCE/Crack`,
-  `Keygen`): ими не пользоваться.
+  (`cover = game:Help/UT2004Logo.bmp`). **Нужен CD-ключ своей копии** в
+  `System/cdkey` (без него игра выходит сразу после запуска рендера).
 - **neighbours**, **neighbours2** — Neighbours from Hell 1 и 2 (Wine): игра 800×600,
   показываются верхние 480 строк 1:1 (`rows = 480` в `wine.ini`), интерфейс
   перекладывает `neighbours*/prepare.sh`; подробности в `apps/bare_app/README.md`.

@@ -35,8 +35,6 @@ work = lab/images/work
 ;   install    copy (default): "source" copied whole, without "exclude";
 ;              homm3, halflife: the SDK's scripts/<x>-install.sh from "source"
 ;              (only what the engine reads; "options" passed to it);
-;              ut2004: scripts/ut2004-install.py, the DVD (.iso) and the
-;              Linux patch in "source";
 ;              none: only the files below
 ;   source     the game on this PC
 ;   exclude    glob of what not to copy (relative path or name), may repeat
@@ -267,15 +265,23 @@ run = games/pop/prepare.sh
 env = POP_RUS=${installers}/Prince of Persia - The Sands of Time/pop1_rus_full.exe
 
 [ut2004]
-; Unreal Tournament 2004, the DVD (.iso) and the Linux patch 3369-2 as
-; downloaded, installed as the DVD's Linux installer would
-; (scripts/ut2004-install.py: English, the x86_64 programs, ~5.3 GB); run
-; by Box64 (bare-app.UT2004=y). game.ini: the entry of bare_app's menu.
-install = ut2004
-source = ${installers}/UT2004
-; the game wants the CD key of the copy: add --cdkey KEY (or a file with it)
-options = --lang int
+; Unreal Tournament 2004 as the DVD's own Linux installer (linux-installer.sh)
+; leaves it: English, version 3186, the x86_64 System/ut2004-bin, the CD key
+; of the copy in System/cdkey (~5.3 GB); run by Box64 (bare-app.UT2004=y).
+; game.ini: the entry of bare_app's menu.
+source = /home/sobs/Documents/UT2004
+; the installer's own: its list, uninstaller and start script, the sources
+; of SDL and OpenAL, the game's x86_64 SDL 1.2 and OpenAL (Box64 runs it
+; with the system's: BOX64_PREFER_WRAPPED), UT2004.exe (Windows)
+exclude = .manifest
+exclude = uninstall
+exclude = ut2004
+exclude = ut2004.xpm
+exclude = *_sources.tar.bz2
+exclude = System/libSDL-1.2.so.0
+exclude = System/openal.so
+exclude = System/UT2004.exe
 overlay = games/ut2004/overlay
-; the logo of the DVD's Linux installer
+; the logo in the game's Help
 cover = game:Help/UT2004Logo.bmp
 cover_crop = fit

@@ -145,6 +145,9 @@
   <code>BOX64_SHOWSEGV=1 BOX64_LOG=1</code> (адрес «prot=0» — выгруженная библиотека).</li>
 <li><strong>Box64 и библиотеки игры по пути</strong> (<code>./libSDL-1.2.so.0</code>): с путём Box64 сначала
   пробует x86_64-файл; <code>BOX64_PREFER_WRAPPED=1</code> и не ставить его — берётся системная.</li>
+<li><strong>Старые x86_64-программы и <code>__ctype_b</code></strong> (glibc до 2.3, UT2004 3186): Box64 искал
+  символ в родной glibc, на aarch64 его нет никогда — «Global Symbol __ctype_b not
+  found» и SIGSEGV при первом <code>isspace()</code>. box64 0001 отдаёт <code>*__ctype_b_loc()</code>.</li>
 <li><strong>UT2004 без CD-ключа</strong> выходит сразу после запуска рендера («Your CD key appears to
   be invalid»): нужен <code>System/cdkey</code> своей копии (его пишет Linux-установщик DVD).</li>
 </ul>

@@ -7,5 +7,6 @@ config BR2_PACKAGE_UT2004
 	help
 	  The starter of Unreal Tournament 2004's Linux build (x86_64)
 	  under Box64: /usr/bin/ut2004. The game itself is not included:
-	  install a DVD with scripts/ut2004-install.py (it adds the Linux
-	  patch 3369) to ut2004/ of the games partition (/games).
+	  the game as the DVD's Linux installer leaves it (x86_64, with
+	  its CD key in System/cdkey) goes to ut2004/ of the games
+	  partition (/games), games/games.manifest [ut2004].

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Unreal Tournament 2004, its Linux x86_64 build (patch 3369) under Box64,
-# as a game of bare_app (package ut2004).
+# Unreal Tournament 2004, its Linux x86_64 build (System/ut2004-bin, as the
+# DVD's Linux installer leaves it) under Box64, as a game of bare_app
+# (package ut2004).
 #
 #   ut2004 [-w WIDTH -h HEIGHT] [GAME ARGUMENTS...]
 #
@@ -25,7 +26,7 @@
 # for libGL for desktop OpenGL, Mesa here has EGL only, and EGL 1.5 gives
 # every GL function. Box64 takes the system's SDL 1.2 and OpenAL for the
 # game's own x86_64 ones (BOX64_PREFER_WRAPPED: the game names
-# ./libSDL-1.2.so.0, which the installer left out).
+# ./libSDL-1.2.so.0, not copied onto the card).
 GAME="${UT2004_DIR:-/games/ut2004}"
 W=
 H=
@@ -118,4 +119,4 @@ if [ -n "$W" ] && [ -n "$H" ]; then
 fi
 
 cd "$GAME/System" || exit 1
-exec box64 ./ut2004-bin-linux-amd64 "$@"
+exec box64 ./ut2004-bin "$@"
