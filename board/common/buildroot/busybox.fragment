@@ -3,3 +3,8 @@
 CONFIG_FEATURE_MOUNT_LABEL=y
 CONFIG_VOLUMEID=y
 CONFIG_FEATURE_VOLUMEID_FAT=y
+# init never logs to syslog: it starts children with vfork() and the child
+# logs "starting pid" before exec, in memory shared with init. A child that
+# dies holding glibc's syslog_lock left init (PID 1) waiting on it for good
+# (OGU, 2026-11-18): no reaping, no respawn, poweroff ignored.
+# CONFIG_FEATURE_INIT_SYSLOG is not set
