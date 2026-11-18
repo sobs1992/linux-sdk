@@ -46,7 +46,8 @@ scripts/games-image.py -m МАНИФЕСТ [--only sd|emmc]                     
 <code>homm3-install.sh</code>, <code>halflife-install.sh</code> (только нужные движку файлы, на карту
 или по ssh).</p>
 <h2 id="go-ultra-ogu-ctlpy">GO Ultra по сети: <code>ogu-ctl.py</code></h2>
-<p>Работает по USB-сети (<code>192.168.7.2</code>, <code>OGU_HOST</code> меняет). Шаги выполняются по
+<p>Работает по USB-сети (<code>192.168.7.2</code>; другая приставка — <code>OGU_HOST=192.168.8.2</code>,
+см. <code>/etc/units</code> в <a href="02-Boot-and-Disk.html">загрузке и диске</a>). Шаги выполняются по
 порядку одним заходом на плате:</p>
 <pre><code class="language-sh">scripts/ogu-ctl.py shot:screen.png              # снимок всех слоёв (SIGUSR1 bare_app)
 scripts/ogu-ctl.py a wait:2000 down a           # кнопки: up down left right a b x y l r l2 r2 f1..f6; NAME:MS — удержание

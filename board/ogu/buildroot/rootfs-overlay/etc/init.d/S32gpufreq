@@ -1,0 +1,20 @@
+#!/bin/sh
+# The GPU's top clock this device keeps (/usr/sbin/gpu-freq): 666 MHz
+# unless 800 was chosen in bare_app's Settings > System. In the background:
+# the GPU's devfreq comes with the module coldplug of S03mdev, and nothing
+# loads the GPU before bare_app's first game.
+
+case "$1" in
+start)
+	(
+		gpu-freq load && msg="OK ($(gpu-freq get) MHz)" || msg=FAIL
+		echo "GPU top clock: $msg" > /dev/console
+	) </dev/null >/dev/null 2>&1 &
+	echo "Setting the GPU top clock: in the background"
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac

@@ -1,0 +1,15 @@
+#!/bin/sh
+# This unit's host name from /etc/units (/usr/sbin/unit): inittab set
+# /etc/hostname's, the same on every unit with this image.
+
+case "$1" in
+start)
+	name=$(unit name)
+	hostname "$name" && echo "Host name: $name"
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac

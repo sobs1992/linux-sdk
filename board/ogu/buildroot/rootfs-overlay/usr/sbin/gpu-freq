@@ -1,0 +1,86 @@
+#!/bin/sh
+#
+# The top clock of the ODROID-GO Ultra's GPU (Mali-G52, panfrost's
+# devfreq), chosen per device: one unit read bit 42 of a word wrong under
+# DOOM 3 with the GPU at 800 MHz (the cache line wrong, the DRAM right),
+# another ran the same test clean. The choice is kept on /data, which a
+# new system image leaves alone, so each device keeps its own.
+#
+#   gpu-freq list      the tops to choose from, MHz, lowest first
+#   gpu-freq get       the top now, MHz
+#   gpu-freq set MHZ   the top now and from the next boot on
+#   gpu-freq load      at boot: the kept one, else DEFAULT
+#
+# bare_app's Settings > System runs list, get and set.
+
+DEV=/sys/class/devfreq/ffe40000.gpu
+KEEP=/data/gpu-max-mhz
+CHOICES="666 800"
+DEFAULT=666	# safe on the unit with the fault
+
+# Hz -> MHz as people name it: 666666656 -> 666, 799999987 -> 800
+mhz() { echo $(( ($1 + 5000) / 1000000 )); }
+
+# the operating point's Hz of MHz, nothing if the GPU has none
+hz_of() {
+	for f in $(cat $DEV/available_frequencies); do
+		[ "$(mhz $f)" = "$1" ] && { echo $f; return 0; }
+	done
+	return 1
+}
+
+# DEV appears once panfrost is bound (module coldplug, S03mdev)
+wait_dev() {
+	i=0
+	while [ ! -e $DEV/max_freq ] && [ $i -lt 100 ]; do
+		sleep 0.05
+		i=$((i + 1))
+	done
+	[ -e $DEV/max_freq ] || { echo "gpu-freq: no GPU devfreq ($DEV)" >&2; exit 1; }
+}
+
+apply() {
+	hz=$(hz_of "$1") || { echo "gpu-freq: the GPU has no $1 MHz" >&2; return 1; }
+	echo "$hz" > $DEV/max_freq
+}
+
+case "$1" in
+list)
+	wait_dev
+	out=
+	for c in $CHOICES; do
+		hz_of $c > /dev/null && out="$out${out:+ }$c"
+	done
+	echo "$out"
+	;;
+get)
+	wait_dev
+	mhz "$(cat $DEV/max_freq)"
+	;;
+set)
+	case " $CHOICES " in
+	*" $2 "*) ;;
+	*) echo "Usage: $0 set {$(echo $CHOICES | tr ' ' '|')}" >&2; exit 1 ;;
+	esac
+	wait_dev
+	apply "$2" || exit 1
+	if mountpoint -q /data; then
+		echo "$2" > $KEEP.new && mv $KEEP.new $KEEP && sync
+	else
+		echo "gpu-freq: /data is not mounted: $2 MHz until the next boot" >&2
+	fi
+	;;
+load)
+	wait_dev
+	want=$(cat $KEEP 2>/dev/null)
+	case " $CHOICES " in
+	*" $want "*) ;;
+	*) want=$DEFAULT ;;
+	esac
+	apply "$want"
+	;;
+*)
+	echo "Usage: $0 list | get | set MHZ | load" >&2
+	exit 1
+	;;
+esac

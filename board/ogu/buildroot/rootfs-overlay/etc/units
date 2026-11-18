@@ -1,0 +1,6 @@
+# ODROID-GO Ultra units told apart by their eMMC's serial number
+# (/sys/bus/mmc/devices/*/serial of the type MMC; /usr/sbin/unit serial).
+# A unit not listed is "odroid-go-ultra" (/etc/hostname) on 192.168.7.
+#
+# serial      host name   USB network: the board .2, the PC .1
+0x717ce239    ogu2        192.168.8
