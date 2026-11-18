@@ -42,8 +42,8 @@ Options:
   --minutes N     soak length (default 30); --resize-secs N (default 120)
   --leave MB      what the memory hog leaves available (default 250)
 
-The board's doom3.ini gets the test arguments (+set com_cmdFile cmd.cfg
-+set logFile 2) if it lacks them; they stay. Helpers aff (CPU affinity) and
+The test's settings (com_cmdFile cmd.cfg, logFile 2) go into autoexec.cfg
+in the save path: the game's ini (on the games card) is left alone. Helpers aff (CPU affinity) and
 memhog are built with the ogu toolchain and copied to /root on first use.
 """
 import argparse
@@ -63,11 +63,11 @@ _spec.loader.exec_module(ogu)
 # a board that hangs mid-command: ssh gives up within 15 s instead of waiting
 ogu.SSH[1:1] = ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
 
-INI = "/usr/share/bare_app/games/doom3.ini"
+# the game's ini: on the games card, else (an older firmware) in bare_app's own
+INI = "/games/doom3/game.ini /usr/share/bare_app/games/doom3.ini"
 BASE = "/data/doom3/base"
 QLOG = BASE + "/qconsole.log"
 BLOG = "/var/log/bare_app.log"
-TEST_ARGS = "+set com_cmdFile cmd.cfg +set logFile 2"
 TARGET = os.path.join(ogu.OUT, "buildroot", "target")
 FILES = {"engine": "/usr/lib/rbdoom3bfg/RBDoom3BFG",
          "sdl2": "/usr/lib/libSDL2-2.0.so.0.3200.10",
@@ -319,7 +319,7 @@ def other_game():
 def doom3_tile():
     """Where DOOM 3's tile is on bare_app's home: the games played, the
     latest first (/etc/bare_app.conf recent=)"""
-    name = re.search(r"^name\s*=\s*(.+?)\s*$", sh("cat %s" % INI), re.M).group(1)
+    name = re.search(r"^name\s*=\s*(.+?)\s*$", sh("cat %s 2>/dev/null | head -n 400; true" % INI), re.M).group(1)
     key = game_key(name)
     recent = re.search(r"^recent=(.*)$", sh("cat /etc/bare_app.conf"), re.M)
     keys = recent.group(1).split(",") if recent else []
@@ -334,7 +334,7 @@ def start_game(extra=()):
     other = other_game()
     if other:
         raise RuntimeError("bare_app runs another game (%s): close it first" % other)
-    autoexec = ["set logFile 2", "set com_speeds 1", "set rs_showResolutionChanges 1"] + list(extra)
+    autoexec = ["set com_cmdFile cmd.cfg", "set logFile 2", "set com_speeds 1", "set rs_showResolutionChanges 1"] + list(extra)
     sh("cat > %s/autoexec.cfg; rm -f %s/cmd.cfg %s/cmd.tmp; pidof bare_app > /dev/null || "
        "(/etc/init.d/S90bare-app start; sleep 5)" % (BASE, BASE, BASE), data=("\n".join(autoexec) + "\n").encode())
     t0 = time.time()
@@ -690,9 +690,6 @@ def main():
     try:
         if a.deploy:
             deploy()
-        if TEST_ARGS not in sh("grep '^args' %s" % INI):
-            sh("sed -i 's|^args = .*|& %s|' %s" % (TEST_ARGS, INI))
-            meta["ini"] = "test arguments added to " + INI
         sums = sh("md5sum %s" % " ".join(FILES.values()))
         meta["board"] = {k: sums.split()[2 * i] for i, k in enumerate(FILES)}
         meta["kernel"] = sh("uname -r").strip()
