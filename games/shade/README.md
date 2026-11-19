@@ -12,24 +12,32 @@ the menu entry.
 - **Mouse.** The engine reads it by DirectInput: `mouse = relative`. Its
   menus take the mouse as if the screen were 800x600, so the pointer moves
   a little faster across than down; the right stick is the pointer there.
-  `prepare.sh` also turns `InvertMouse` off (Kron4ek's copy had it on):
-  the right stick pushed up looks up. bare_app_wine sends the stick's
+  The camera's up and down are inverted (`InvertMouse 1` in `prepare.sh`,
+  the user's choice: the right stick pushed up takes the camera down
+  behind the hero, pushed down raises it over him). The game's
+  setting turns the camera only; inverting the axis in bare_app's controls
+  would turn the menus' pointer upside down as well. bare_app_wine sends the stick's
   moves 250 times a second: at 60, against the game's own 60 frames,
   some frames got two moves and some none, and the camera jerked.
+- **Camera speed.** The scripts (`player.h`) turn the camera by the
+  mouse's counts times `MouseSpeedH` (70: 0.1 degree a count; up and
+  down `MouseSpeedV`, 40: 0.04). `cursor_speed = 6.0` turns it round in
+  2.4 s with the right stick all the way out, about 150 degrees a
+  second; at 2.4 it took 6 s. The game's own slider (100 at most) adds
+  little. The menus' pointer is the scripts' own (`SCRIPTS/menu.h`,
+  `UpdateMouse`, compiled at the game's start): `prepare.sh` moves it by
+  0.6 of the mouse's moves (a USB mouse's too).
 - **Saves.** `save/` and `settings.cfg` are writable copies under
   `/data/wine/games/shade`; its logs (`console.log` and the like) are
   written next to them.
-- **Walking.** The pace is the left stick's tilt, as on a console: the
-  stick is a gamepad's (`stick = pad`, Wine patch 0026) and `prepare.sh`
-  turns the engine's joypad on (`Joypad 1`, also in its settings menu).
-  The game's scripts (`player.h`, `DoControl`) take a light tilt as a
-  walk, more as the run, all the way as the sprint. The keyboard's pace
-  (the wheel, faster and slower) is not needed; the pad's right stick and
-  triggers stay at rest, so the camera is the mouse's.
-- **Controls.** The PC's keys (`Readme.txt`): right stick the camera (the
-  mouse), A attack, R1 block (left and right button), B jump, X use (E),
-  Y crouch, L1 the demon (R), L2 the first person view (left Shift), D-pad
-  the weapons 1-4, F1 menu, F2 inventory (Q), F3 holster (V), F4 the claw
-  (5). The menus take A only when it is held a little (a frame or two).
+- **Controls.** The PC's keys (`Readme.txt`): left stick W A S D, right
+  stick the camera (the mouse), A attack, R1 block (left and right
+  button), B jump, X use (E), Y crouch, L1 the demon (R), L2/R2 slower and
+  faster (the wheel: walk, run, sprint), D-pad the weapons 1-4, F1 menu,
+  F2 inventory (Q), F3 holster (V), F4 the claw (5). The menus take A only
+  when it is held a little (a frame or two). The game's joystick setting
+  (`Joypad` in `settings.cfg`: the pace by the left stick's tilt, a
+  gamepad's through Wine patch 0026) was tried and left off, the user
+  preferring the keys.
 - **Kept out.** The uninstaller, `KillSave.exe`, the links and the logs of
   its last start on the PC.
