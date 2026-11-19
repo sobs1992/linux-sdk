@@ -34,6 +34,7 @@ scale = aspect
 locale = ru_RU
 writable = Save, config.ini
 env = BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1
+fps_limit = 30
 
 [keys]
 stick = mouse
@@ -52,6 +53,11 @@ a = клик
 ```
 
 Что решить на этом шаге:
+
+- **`fps_limit`.** Предел кадров по умолчанию (пользователь меняет его в опциях
+  игры, Y на плитке). Смотрите, сколько игра делает в игре и в меню
+  (`BARE_APP_SYSMON=frames`): скачет между 30 и 50 — ставьте 30; держит 60 —
+  60; меньше 30 не ставьте. Без ключа — без предела.
 
 - **`mode`.** Начните с 800×600: на 854×480 это почти ширина 1:1 при `scale =
   fill` или аккуратные поля при `aspect`. 1024×768 обычно медленнее и мельче.
@@ -161,7 +167,7 @@ scripts/ogu-ctl.py wfmove:400,240 wclick wkey:esc quit-game
 
 В `game.ini`: `keys` — для игр без контроллера SDL; `gamepad` — если движок ждёт
 другую раскладку (`f1=start, f4=back`); `scale = fit`; `fps = 0`, если движок
-сам держит темп; `gyro` — для шутеров. В `[env]` можно `SDL_RENDER_DRIVER =
+сам держит темп; `fps_limit` — предел кадров по умолчанию (как у Windows-игр); `gyro` — для шутеров. В `[env]` можно `SDL_RENDER_DRIVER =
 software` (на OGA чтение кадров GPU медленнее, чем программный рендер) и
 `SDL_LOGGING = video=debug` для отладки драйвера. **Не ставьте** `SDL_VIDEODRIVER`.
 
@@ -215,7 +221,9 @@ OpenAL и GL Box64 берёт системные. Нужно:
 кнопки и оси → нарисовать в `game_link_frame()` (размер `app.shm->width ×
 height`, строка `stride`) → `game_link_publish()`. Кадры, которые не изменились,
 не публиковать (или слать `GAME_FRAME_SAME`). Выход с кодом 0 — нормальный;
-`SIGTERM` — закрыть.
+`SIGTERM` — закрыть. Предел кадров из опций игры `game_link_publish()` соблюдает
+сам; движок со своей публикацией зовёт перед кадром `game_shm_pace()` из
+`game_ipc.h`.
 
 **Сторона bare_app** (`apps/bare_app`):
 

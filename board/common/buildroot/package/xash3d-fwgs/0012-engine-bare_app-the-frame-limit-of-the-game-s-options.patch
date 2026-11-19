@@ -1,0 +1,28 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] engine: bare_app: the frame limit of the game's options
+
+bare_app can hold a game to at most so many frames a second (the Options
+tab of its controls screen, game_ipc.h frame_us). The platform waits for
+it before each frame it publishes: game_shm_pace() of bare_app's
+game_ipc.h. fps_max still counts as well; the lower of the two wins.
+
+--- a/engine/platform/bare_app/bare_app.c
++++ b/engine/platform/bare_app/bare_app.c
+@@ -46,6 +46,7 @@
+ 	struct game_shm *shm;
+ 	size_t size;
+ 	unsigned back; // the frame the renderer draws into
++	struct game_pace pace; // bare_app's frame limit (game_shm_pace)
+ 	qboolean pad_down[GP_COUNT];
+ 	short axes[GP_AXIS_COUNT];
+ 	double repeat_time; // when a held D-pad direction repeats next, 0 - none
+@@ -180,6 +181,9 @@
+ 
+ 	BareApp_DrawCursor( );
+ 
++	// bare_app's frame limit (the game's options): no sooner than that
++	// after the frame before
++	game_shm_pace( ba.shm, &ba.pace );
+ 	ba.back = atomic_exchange( &ba.shm->middle, ba.back | GAME_SHM_FRESH ) & ~GAME_SHM_FRESH;
+ 
+ 	// a full socket already holds a "frame" message, nothing to add

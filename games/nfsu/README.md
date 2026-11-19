@@ -16,6 +16,11 @@ entry.
 - **Screen.** 854x480: the widescreen fix renders at the desktop's size
   and fixes the HUD and the field of view. ~43 fps in a race, 60 in the
   menus. `prepare.sh` sets `SkipIntro = 1` (the EA and THX logos).
+- **Frame rate.** A race takes both busy threads (the game's and
+  WineD3D's) to the CPU's limit: 40-50 fps that come and go. bare_app's
+  frame limit (`fps_limit = 30` in wine.ini, the default; Y on the tile,
+  "Frame limit" changes it) holds it at an even 30.0 with the threads at
+  ~75 and ~65 % instead.
 - **Analog steering.** The left stick is a gamepad's: bare_app_wine's
   `stick = pad` and Wine's winebus patch 0026 make an Xbox 360-like HID
   pad, which the game sees by DirectInput (X axis steering, triggers on

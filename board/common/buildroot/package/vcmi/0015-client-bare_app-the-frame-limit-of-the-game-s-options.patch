@@ -1,0 +1,21 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app: the frame limit of the game's options
+
+bare_app can hold a game to at most so many frames a second (the Options
+tab of its controls screen, game_ipc.h frame_us). The link waits for it
+before each frame it publishes or reports as unchanged: game_shm_pace()
+of bare_app's game_ipc.h.
+
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -684,6 +684,10 @@
+ 	const Point screenSize = std::exchange(captured, Point(0, 0));
+ 	if(screenSize == Point(0, 0))
+ 		return;
++	// bare_app's frame limit (the game's options): no sooner than that
++	// after the frame before, changed or not
++	static game_pace pace;
++	game_shm_pace(shm, &pace);
+ 	auto * frame = static_cast<uint32_t *>(game_shm_frame(shm, back));
+ 	drawCursor(frame, screenSize);
+ 

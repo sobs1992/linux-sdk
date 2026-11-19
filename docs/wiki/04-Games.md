@@ -110,6 +110,7 @@ Box64 ускоряют `BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1` в `en
 | `[keys]` | `stick = mouse|arrows|wheel|numpad|turn|scroll`, `dpad`, `cursor_speed`, `edge_zone`, кнопки → `lbutton`, клавиши, `magnify` (лупа 1:1) |
 | `[labels]`, `[labels.ru]` | подписи кнопок для экрана управления |
 | `minimize`, `volume = triggers` | своя кнопка сворачивания, L2/R2 — громкость |
+| `fps_limit` | предел кадров по умолчанию (FPS, `none` — нет); в опциях игры (Y на плитке) его можно сменить |
 
 ## Путь B: SDL2-игра
 
@@ -151,6 +152,7 @@ keys = f2=F9, f3=F5
 hint.ru = R1  огонь    L1  перезарядка  ...  F5  свернуть    F6 (держать)  выйти
 scale = fit
 fps = 0
+fps_limit = 60
 gyro = 9.09
 [env]
 SDL_BAREAPP_GL_ASYNC = 1

@@ -1,0 +1,140 @@
+From b12157ca631452c2039c96f24549f3286b49a7dc Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Thu, 19 Nov 2026 15:25:19 +0100
+Subject: [PATCH] winebare.drv: the frame limit of bare_app's game options
+ (WB_CONFIG frame_us).
+
+bare_app can hold a game to at most so many frames a second (the Options
+tab of its controls screen). bare_app_wine sends the limit with WB_CONFIG
+(protocol 6) and again when it changes; a GL swap then returns no sooner
+than frame_us after the one before, the frame just swapped going out
+first. The program draws no more frames than that: a steadier pace on the
+handheld's 60 Hz screen, less heat, less battery. A swap late by a whole
+period starts the count over (a game that cannot keep up is never made
+to catch up).
+---
+ dlls/winebare.drv/main.c     |  7 +++++++
+ dlls/winebare.drv/opengl.c   | 40 ++++++++++++++++++++++++++++++++++++
+ dlls/winebare.drv/winebare.h |  2 ++
+ 3 files changed, 49 insertions(+)
+
+diff --git a/dlls/winebare.drv/main.c b/dlls/winebare.drv/main.c
+index db5a39a..436de3a 100644
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -51,6 +51,7 @@ static pthread_mutex_t mode_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static struct wb_mode modes[WB_MAX_MODES];
+ static UINT mode_count;
+ static struct wb_mode current_mode = { 800, 600 };
++static UINT frame_us;   /* WB_CONFIG: the frame limit, 0 none */
+ /* The colour depths every mode is listed with, as winex11.drv's: old
+  * DirectDraw games switch to 8 or 16 bits. The screen stays 32 bits;
+  * WineD3D converts what a game draws at a lower depth. */
+@@ -103,6 +104,11 @@ int bare_shm_create(size_t size, void **map)
+     return fd;
+ }
+ 
++UINT bare_frame_us(void)
++{
++    return __atomic_load_n(&frame_us, __ATOMIC_RELAXED);
++}
++
+ void bare_current_mode(UINT *width, UINT *height)
+ {
+     pthread_mutex_lock(&mode_mutex);
+@@ -118,6 +124,7 @@ static void set_config(const struct wb_msg *msg)
+     memcpy(modes, msg->config.modes, mode_count * sizeof(*modes));
+     current_mode = msg->config.current;
+     pthread_mutex_unlock(&mode_mutex);
++    __atomic_store_n(&frame_us, msg->config.frame_us, __ATOMIC_RELAXED);
+     TRACE("%u modes, current %ux%u\n", mode_count, current_mode.width, current_mode.height);
+ }
+ 
+diff --git a/dlls/winebare.drv/opengl.c b/dlls/winebare.drv/opengl.c
+index 437af18..d9f0ce1 100644
+--- a/dlls/winebare.drv/opengl.c
++++ b/dlls/winebare.drv/opengl.c
+@@ -24,6 +24,7 @@
+ 
+ #include "config.h"
+ 
++#include <errno.h>
+ #include <pthread.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -99,6 +100,9 @@ struct bare_gl_drawable
+     /* $WINEBARE_FPS */
+     unsigned frames;
+     struct timespec fps_start, last_frame;
++    /* the frame limit: the next swap not before */
++    UINT64 pace_next;
++    UINT pace_us;
+ };
+ 
+ static pthread_mutex_t gl_mutex = PTHREAD_MUTEX_INITIALIZER;
+@@ -485,6 +489,41 @@ static void load_read_funcs(void)
+     TRACE("%s read back\n", async_read ? "asynchronous" : "synchronous");
+ }
+ 
++/*
++ * bare_app's frame limit (WB_CONFIG frame_us): a swap returns no sooner
++ * than that much time after the one before, so the program draws no more
++ * frames than that. The frame just swapped goes out first. A swap late by
++ * a whole period or more starts the count over.
++ */
++static void bare_drawable_pace(struct bare_gl_drawable *gl)
++{
++    UINT us = bare_frame_us();
++    struct timespec ts;
++    UINT64 now, period;
++
++    if (!us)
++    {
++        gl->pace_us = 0;
++        return;
++    }
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    now = (UINT64)ts.tv_sec * 1000000000 + ts.tv_nsec;
++    period = (UINT64)us * 1000;
++    if (us != gl->pace_us || now >= gl->pace_next + period)
++    {
++        gl->pace_us = us;
++        gl->pace_next = now + period;
++        return;
++    }
++    if (now < gl->pace_next)
++    {
++        ts.tv_sec = gl->pace_next / 1000000000;
++        ts.tv_nsec = gl->pace_next % 1000000000;
++        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) ;
++    }
++    gl->pace_next += period;
++}
++
+ static BOOL bare_drawable_swap(struct opengl_drawable *base)
+ {
+     static pthread_once_t once = PTHREAD_ONCE_INIT;
+@@ -562,6 +601,7 @@ static BOOL bare_drawable_swap(struct opengl_drawable *base)
+         gl->next_slot = (gl->next_slot + 1) % READ_SLOTS;
+     }
+     else put_frame(gl, gl->read);
++    bare_drawable_pace(gl);
+     return TRUE;
+ }
+ 
+diff --git a/dlls/winebare.drv/winebare.h b/dlls/winebare.drv/winebare.h
+index 030c64b..6f2e5bf 100644
+--- a/dlls/winebare.drv/winebare.h
++++ b/dlls/winebare.drv/winebare.h
+@@ -38,6 +38,8 @@
+ void bare_send(const struct wb_msg *msg, int fd);
+ uint32_t bare_new_id(void);
+ void bare_current_mode(UINT *width, UINT *height);
++/* The frame limit bare_app gives the game (WB_CONFIG), 0 none */
++UINT bare_frame_us(void);
+ 
+ /* an anonymous shared memory of SIZE bytes for pixels; -1 on failure */
+ int bare_shm_create(size_t size, void **map);
+-- 
+2.53.0
+

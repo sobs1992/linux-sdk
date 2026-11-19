@@ -54,6 +54,7 @@ scale = aspect
 locale = ru_RU
 writable = Save, config.ini
 env = BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1
+fps_limit = 30
 
 [keys]
 stick = mouse
@@ -72,11 +73,19 @@ a = клик
 </code></pre>
 <p>Что решить на этом шаге:</p>
 <ul>
-<li><strong><code>mode</code>.</strong> Начните с 800×600: на 854×480 это почти ширина 1:1 при <code>scale =
+<li>
+<p><strong><code>fps_limit</code>.</strong> Предел кадров по умолчанию (пользователь меняет его в опциях
+  игры, Y на плитке). Смотрите, сколько игра делает в игре и в меню
+  (<code>BARE_APP_SYSMON=frames</code>): скачет между 30 и 50 — ставьте 30; держит 60 —
+  60; меньше 30 не ставьте. Без ключа — без предела.</p>
+</li>
+<li>
+<p><strong><code>mode</code>.</strong> Начните с 800×600: на 854×480 это почти ширина 1:1 при <code>scale =
   fill</code> или аккуратные поля при <code>aspect</code>. 1024×768 обычно медленнее и мельче.
   Если игра знает только 800×600 и интерфейс внизу — смотрите <code>rows</code> и
   пример Neighbours from Hell (<code>games/neighbours/prepare.sh</code> перекладывает
-  интерфейс в верхние 480 строк, сам буфер игры не трогая).</li>
+  интерфейс в верхние 480 строк, сам буфер игры не трогая).</p>
+</li>
 <li><strong><code>writable</code>.</strong> Всё, что игра пишет в свой каталог (<code>Save</code>, <code>*.cfg</code>, профили).
   Проверяется только запуском с <code>/games</code> <strong>только для чтения</strong> — так, как у
   пользователя. Карта в режиме <code>rw</code> однажды скрыла запись <code>MSSSOFT.M3D</code>,
@@ -165,7 +174,7 @@ scripts/ogu-ctl.py wfmove:400,240 wclick wkey:esc quit-game
 </ol>
 <p>В <code>game.ini</code>: <code>keys</code> — для игр без контроллера SDL; <code>gamepad</code> — если движок ждёт
 другую раскладку (<code>f1=start, f4=back</code>); <code>scale = fit</code>; <code>fps = 0</code>, если движок
-сам держит темп; <code>gyro</code> — для шутеров. В <code>[env]</code> можно <code>SDL_RENDER_DRIVER =
+сам держит темп; <code>fps_limit</code> — предел кадров по умолчанию (как у Windows-игр); <code>gyro</code> — для шутеров. В <code>[env]</code> можно <code>SDL_RENDER_DRIVER =
 software</code> (на OGA чтение кадров GPU медленнее, чем программный рендер) и
 <code>SDL_LOGGING = video=debug</code> для отладки драйвера. <strong>Не ставьте</strong> <code>SDL_VIDEODRIVER</code>.</p>
 <p>Проверка без перепрошивки:</p>
@@ -207,7 +216,9 @@ OpenAL и GL Box64 берёт системные. Нужно:</p>
 кнопки и оси → нарисовать в <code>game_link_frame()</code> (размер <code>app.shm-&gt;width ×
 height</code>, строка <code>stride</code>) → <code>game_link_publish()</code>. Кадры, которые не изменились,
 не публиковать (или слать <code>GAME_FRAME_SAME</code>). Выход с кодом 0 — нормальный;
-<code>SIGTERM</code> — закрыть.</p>
+<code>SIGTERM</code> — закрыть. Предел кадров из опций игры <code>game_link_publish()</code> соблюдает
+сам; движок со своей публикацией зовёт перед кадром <code>game_shm_pace()</code> из
+<code>game_ipc.h</code>.</p>
 <p><strong>Сторона bare_app</strong> (<code>apps/bare_app</code>):</p>
 <table>
 <thead>

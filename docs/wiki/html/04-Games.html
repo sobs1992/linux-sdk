@@ -292,6 +292,10 @@ DLL — i386 (их собирает <code>llvm-mingw</code>), x86-код игр�
 <td><code>minimize</code>, <code>volume = triggers</code></td>
 <td>своя кнопка сворачивания, L2/R2 — громкость</td>
 </tr>
+<tr>
+<td><code>fps_limit</code></td>
+<td>предел кадров по умолчанию (FPS, <code>none</code> — нет); в опциях игры (Y на плитке) его можно сменить</td>
+</tr>
 </tbody>
 </table>
 <h2 id="b-sdl2-">Путь B: SDL2-игра</h2>
@@ -330,6 +334,7 @@ keys = f2=F9, f3=F5
 hint.ru = R1  огонь    L1  перезарядка  ...  F5  свернуть    F6 (держать)  выйти
 scale = fit
 fps = 0
+fps_limit = 60
 gyro = 9.09
 [env]
 SDL_BAREAPP_GL_ASYNC = 1
