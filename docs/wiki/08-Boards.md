@@ -71,7 +71,10 @@
   `games-image.py` без `--card`.
 - **Wi-Fi** ESP8089 (внешний модуль). Доступ — UART (`oga-serial.py`) или ssh.
 - **Игры**: Герои (VCMI, окно 960×640 вдвое больше экрана, лупа), Doom, Half-Life
-  (программный рендер). Wine нет — процессор слабый.
+  (программный рендер), Return to Castle Wolfenstein (iortcw, ~28 fps с
+  `PAN_MESA_DEBUG=linear`), под Wine только 2D: Fallout 1 и 2 (720×480 → экран, лупа на
+  L2), «Как достать соседа» 1 и 2. Карта — `games/oga.manifest`; 3D-игры Wine,
+  DOOM 3 и NFSU с GO Ultra не тянет.
 
 ## BeagleBone Black, Raspberry Pi
 

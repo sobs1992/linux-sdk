@@ -94,6 +94,11 @@
 <ul>
 <li><strong>Первый запуск после пересборки Wine падает один раз</strong> и может сбросить
   настройки игры (prefs). Запустить ещё раз.</li>
+<li><strong>Ввод только после HELLO.</strong> <code>bare_app_wine</code> слал движение мыши самому старому
+  процессу Wine ещё до ответа на его HELLO, и <code>winebare.drv</code> принимал его за свой
+  конфиг: рабочий стол оставался без драйвера, игра падала с «graphics driver is
+  missing». На GO Advance так было всегда (стик в покое чуть дрожит). Теперь ввод идёт
+  только поздоровавшимся, а драйвер до конфига пропускает чужое (Wine 0028).</li>
 <li><strong>Один префикс на все игры</strong> (<code>/data/wine/prefix</code>): шрифты, реестр, Documents
   общие. Строки <code>reg</code> в <code>wine.ini</code> ставятся при каждом старте (0,1–0,8 с), так
   что они и переживают пересоздание префикса.</li>
@@ -126,6 +131,9 @@
 </ul>
 <h2 id="sdl2-">SDL2-игры</h2>
 <ul>
+<li><strong>GL-игра через SDL на A35</strong> (GO Advance): <code>glReadPixels</code> раскладывал тайловый кадр
+  Panfrost процессором из некэшируемой памяти — половина ядра, 13 fps у RTCW.
+  <code>PAN_MESA_DEBUG=linear</code> в <code>[env]</code> <code>game.ini</code> — 27–30 fps.</li>
 <li><strong>Не ставить <code>SDL_VIDEODRIVER</code></strong> в <code>[env]</code>: драйвер <code>bareapp</code> выбирается сам;
   чужой даст чёрный экран и вечную «Загрузку…».</li>
 <li><strong>Игра не видит контроллер</strong> — читает <code>/dev/input</code> сама или знает только

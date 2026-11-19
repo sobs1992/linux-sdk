@@ -253,3 +253,41 @@ scripts/homm3-install.sh ~/games/HoMM3 192.168.50.61       # на плату п�
 VCMI остаются в `/data/config/vcmi`.
 Сборка VCMI тяжёлая: компилируется в 4 потока (`VCMI_JOBS`), примерно по 1 ГБ памяти
 на поток.
+
+## Игры с GO Ultra
+
+`oga_defconfig` собирает и движки игр GO Ultra, которые тянет RK3326 (4×A35, 1 ГБ,
+Mali-G31): `bare-app.SDL=y bare-app.RTCW=y bare-app.WINE=y`. Файлы игр кладёт на
+карту манифест `games/oga.manifest` — те же источники, что у GO Ultra, со своими
+`wine.ini`/`game.ini` из `games/<игра>/overlay-oga` (экран 480×320, один стик):
+
+```sh
+scripts/games-image.py -m games/oga.manifest --card lab/images/work-oga/games
+ssh root@192.168.50.61 mount -o remount,rw /games
+tar -C lab/images/work-oga/games -cf - rtcw fallout fallout2 neighbours neighbours2 \
+  | ssh root@192.168.50.61 tar -xf - -C /games
+ssh root@192.168.50.61 mount -o remount,ro /games
+```
+
+| Игра | Как идёт на OGA |
+|---|---|
+| Return to Castle Wolfenstein (iortcw) | 27–30 fps в первом уровне; стик — обзор, крестовина — ходьба (`main/gamepad-device.cfg` на карте); F2 сохранение, F3 режим оружия, F4 блокнот |
+| Fallout, Fallout 2 (Wine) | hi-res патч на 720×480 с панелью 640 — ровно ⅔ экрана; крестовина прокручивает карту, L2 — лупа 1:1 для мелкого текста; игре ~400 МБ памяти (Fallout 1) |
+| Как достать соседа 1, 2 (Wine) | как на GO Ultra (верхние 480 строк 800×600), уменьшено до 480×288 |
+
+Не перенесены: игры Wine с 3D (Pirates!, Daemonica, Monkey Island, Knights of the
+Temple, Prince of Persia, Shade, NFSU) — на GO Ultra они упираются в процессор A73,
+A35 в несколько раз медленнее; DOOM 3 BFG — нужно больше 1 ГБ памяти; HotA под Wine —
+Герои уже есть в VCMI.
+
+**GL-игры через SDL.** Драйвер SDL `bareapp` читает каждый кадр из GPU
+(`glReadPixels`). Panfrost рисует в тайловые буферы, и Mesa раскладывала их на
+процессоре из некэшируемой памяти GPU: 56 % ядра A35, RTCW — 13 fps. С
+`PAN_MESA_DEBUG=linear` (раздел `[env]` в `game.ini`) буферы линейные, 27–30 fps;
+остаток — перевод BGRX → RGBA в `glReadPixels` (~20 %).
+
+**Корневой раздел под Wine.** С Wine rootfs ~540 МБ. Новый образ размечается сам; на
+плате со старой картой (p2 ~370 МБ) p2 растягивается до начала `/data` (p3 стоит на
+4 ГБ) без перепрошивки: `sfdisk -N 2` с размером до p3, `partx -u -n 2`, затем
+`resize2fs /dev/mmcblk0p2` на смонтированном корне (`resize2fs` теперь в образе OGA).
+Префикс Wine (`/data/wine/prefix`, ~370 МБ) создаётся при первом запуске, около 2 минут.

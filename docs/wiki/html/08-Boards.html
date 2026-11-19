@@ -144,7 +144,10 @@
   <code>games-image.py</code> без <code>--card</code>.</li>
 <li><strong>Wi-Fi</strong> ESP8089 (внешний модуль). Доступ — UART (<code>oga-serial.py</code>) или ssh.</li>
 <li><strong>Игры</strong>: Герои (VCMI, окно 960×640 вдвое больше экрана, лупа), Doom, Half-Life
-  (программный рендер). Wine нет — процессор слабый.</li>
+  (программный рендер), Return to Castle Wolfenstein (iortcw, ~28 fps с
+  <code>PAN_MESA_DEBUG=linear</code>), под Wine только 2D: Fallout 1 и 2 (720×480 → экран, лупа на
+  L2), «Как достать соседа» 1 и 2. Карта — <code>games/oga.manifest</code>; 3D-игры Wine,
+  DOOM 3 и NFSU с GO Ultra не тянет.</li>
 </ul>
 <h2 id="beaglebone-black-raspberry-pi">BeagleBone Black, Raspberry Pi</h2>
 <p>Опорные платы без экрана и геймпада: проверяют общность SDK. BBB грузится

@@ -77,7 +77,8 @@ APPS_AUTOSTART := bare-app
 # the file manager's viewer for pictures, video and sound (FFmpeg)
 APPS_CONFIG    := bare-app.DEFCONFIG=oga_defconfig bare-app.INIT_ORDER=06 \
                   bare-app.DOOM_WAD=y bare-app.HOMM3=y bare-app.HALFLIFE=y \
-                  bare-app.STREAM=y bare-app.MEDIA=y
+                  bare-app.STREAM=y bare-app.MEDIA=y \
+                  bare-app.SDL=y bare-app.RTCW=y bare-app.WINE=y
 
 # --- SD card image ---
 # Layout: [MBR][U-Boot env @16K][idbloader @32K][u-boot.itb @1M]

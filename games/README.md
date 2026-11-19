@@ -57,6 +57,16 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
 растягивается до конца карты: если нужно место под игры, копируемые потом, задайте
 `games_free_mb` или `games_size_mb`.
 
+## Карта GO Advance
+
+`games/oga.manifest` — игры GO Ultra, которые тянет GO Advance (RTCW, Fallout 1 и 2,
+«Как достать соседа» 1 и 2), с теми же источниками и своими настройками из
+`games/<игра>/overlay-oga` (экран 480×320, один стик; Fallout — `FALLOUT_SCREEN` и
+`FALLOUT_BAR` для `fallout/prepare.sh`). Раздел `GAMES` у OGA — p4 его единственной
+SD-карты, поэтому `--card` указывает на сам `<work>/games`, а на плату игры идут по
+ssh (`tar`, `/games` перемонтируется на запись). Подробности и что не перенесено —
+[docs/boards/oga.md](../docs/boards/oga.md), «Игры с GO Ultra».
+
 ## Данные проекта вне git: `lab/`
 
 Всё, что не входит в git и не нужно самой сборке (Buildroot живёт на ext4 в

@@ -1,0 +1,74 @@
+; oga.manifest: games of the GO Ultra's games.manifest for the ODROID-GO
+; Advance's card, for scripts/games-image.py. The keys are those of
+; games.manifest (explained there); the games come from the same sources,
+; with the GO Advance's own settings: a screen of 480x320, one stick, A35
+; cores and 1 GB of memory (Wine games: the 2D ones only).
+;
+; The GO Advance keeps its games on p4 of its only SD card (FAT32 "GAMES",
+; /games, mounted read-only): put together in <work>/games (--card the same: nothing
+; copied twice), then onto the board:
+;
+;   scripts/games-image.py -m games/oga.manifest --card lab/images/work-oga/games
+;   ssh root@BOARD mount -o remount,rw /games
+;   tar -C lab/images/work-oga/games -cf - GAME... | ssh root@BOARD tar -xf - -C /games
+;   ssh root@BOARD mount -o remount,ro /games
+;
+; Heroes III (VCMI), Half-Life and Doom were put on the card by
+; scripts/homm3-install.sh, scripts/halflife-install.sh and the image.
+
+[image]
+fw = oga
+work = lab/images/work-oga
+
+[rtcw]
+; Return to Castle Wolfenstein (iortcw, bare-app.RTCW=y), the files of
+; games.manifest's [rtcw]; game.ini and main/gamepad-device.cfg of the GO
+; Advance: the stick looks, the D-pad walks
+install = none
+file = lab/games/Return to Castle Wolfenstein/Main/pak0.pk3 -> main/
+file = lab/games/Return to Castle Wolfenstein/Main/sp_pak*.pk3 -> main/
+file = lab/games/Return to Castle Wolfenstein/Main/z_*.pk3 -> main/
+overlay = games/rtcw/overlay-oga
+cover = lab/games/Return to Castle Wolfenstein/2.ico
+cover_crop = fit
+
+[fallout]
+; Fallout (FE) under Wine: the hi-res patch at 720x480 with the original
+; 640-wide interface (two thirds of it fill the screen)
+source = lab/games/FalloutFE/game_info/data
+exclude = uninstall
+exclude = DirectX_9.0c_Full.exe
+exclude = *.pdf
+overlay = games/fallout/overlay-oga
+run = games/fallout/prepare.sh
+env = FALLOUT_SCREEN=720x480
+env = FALLOUT_BAR=640
+cover = lab/games/FalloutFE/game_info/data/Icon_I.ico
+cover_crop = fit
+
+[fallout2]
+; Fallout 2 (FE) under Wine, the same way
+source = lab/games/Fallout2FE/game_info/data
+exclude = uninstall
+exclude = DirectX_9.0c_Full.exe
+exclude = !docs
+exclude = sfall-log.txt
+overlay = games/fallout2/overlay-oga
+run = games/fallout/prepare.sh
+env = FALLOUT_SCREEN=720x480
+env = FALLOUT_BAR=640
+cover = lab/games/Fallout2FE/game_info/data/Icon_I.ico
+cover_crop = fit
+
+[neighbours]
+; Neighbours from Hell under Wine: its interface in the top 480 rows of
+; 800x600 (prepare.sh) as on the GO Ultra, shown at 0.6
+source = lab/games/NeighborsFromHell
+overlay = games/neighbours/overlay-oga
+run = games/neighbours/prepare.sh
+
+[neighbours2]
+; Neighbours from Hell 2, the same way
+source = lab/games/NeighborsFromHell2
+overlay = games/neighbours2/overlay-oga
+run = games/neighbours2/prepare.sh

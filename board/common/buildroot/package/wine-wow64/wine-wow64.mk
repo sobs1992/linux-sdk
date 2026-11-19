@@ -148,6 +148,15 @@ define WINE_WOW64_WINEBARE_PROTO
 endef
 WINE_WOW64_PRE_CONFIGURE_HOOKS += WINE_WOW64_WINEBARE_PROTO
 
+# The tools' tree has the same patches, and its configure (makedep) reads
+# the includes of every dll, winebare.drv's too: the header from bare_app's
+# source, as the tools are built before bare-app
+define HOST_WINE_WOW64_WINEBARE_PROTO
+	$(INSTALL) -m 0644 $(BARE_APP_SITE)/ports/wine/winebare_proto.h \
+		$(@D)/dlls/winebare.drv/
+endef
+HOST_WINE_WOW64_PRE_CONFIGURE_HOOKS += HOST_WINE_WOW64_WINEBARE_PROTO
+
 # install-lib: the programs and dlls, not the headers and build tools.
 # It makes bin/winecfg etc. links to "wine" but not bin/wine itself.
 WINE_WOW64_INSTALL_TARGET_OPTS = DESTDIR=$(TARGET_DIR) install-lib

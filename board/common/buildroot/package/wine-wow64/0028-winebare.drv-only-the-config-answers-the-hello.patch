@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Thu, 19 Nov 2026 19:20:00 +0100
+Subject: [PATCH] winebare.drv: only the config answers the hello
+
+The driver took the first message after its hello for bare_app_wine's
+answer. bare_app_wine sent input to the oldest process even before its
+hello: on the GO Advance, whose stick is never quite at rest, a mouse
+move (WB_INPUT_MOUSE) came first, the desktop process (explorer) went
+without a driver and every game ended at once with "the graphics driver
+is missing". Now messages before the config are dropped, and the wait of
+5 s also goes on through Wine's signals (EINTR). bare_app_wine no longer
+sends input before the hello either.
+---
+--- a/dlls/winebare.drv/main.c
++++ b/dlls/winebare.drv/main.c
+@@ -32,6 +32,7 @@
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ #include "ntstatus.h"
+@@ -339,13 +340,44 @@
+     .pWindowPosChanged = BARE_WindowPosChanged,
+ };
+ 
++/* bare_app_wine's answer to the hello, its config, within 5 s. Whatever
++ * comes before it is not for a driver that has none yet: a mouse move (an
++ * older bare_app_wine sent input to a process before its hello; the GO
++ * Advance's stick moved the mouse while the desktop, explorer, started
++ * and it went without a driver: "the graphics driver is missing"). The
++ * wait goes on through Wine's signals too. */
++static BOOL wait_config(struct wb_msg *msg)
++{
++    struct pollfd pfd = { .fd = host_sock, .events = POLLIN };
++    struct timespec now, end;
++    ssize_t n;
++    int left, r;
++
++    clock_gettime(CLOCK_MONOTONIC, &end);
++    end.tv_sec += 5;
++    for (;;)
++    {
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        left = (end.tv_sec - now.tv_sec) * 1000 + (end.tv_nsec - now.tv_nsec) / 1000000;
++        if (left <= 0) break;
++        r = poll(&pfd, 1, left);
++        if (r < 0 && errno == EINTR) continue;
++        if (r <= 0) break;
++        n = recv(host_sock, msg, sizeof(*msg), 0);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) break;
++        if (msg->type == WB_CONFIG) return TRUE;
++        WARN("message %u before the config, dropped\n", msg->type);
++    }
++    ERR("no answer from bare_app_wine\n");
++    return FALSE;
++}
++
+ static NTSTATUS baredrv_unix_init(void *arg)
+ {
+     const char *path = getenv(WINEBARE_SOCKET_ENV);
+     struct sockaddr_un addr = { .sun_family = AF_UNIX };
+     struct wb_msg msg = { .type = WB_HELLO };
+-    struct pollfd pfd;
+-    ssize_t n;
+ 
+     if (host_sock >= 0) return STATUS_SUCCESS;
+     if (!path || !*path || strlen(path) >= sizeof(addr.sun_path)) return STATUS_UNSUCCESSFUL;
+@@ -360,14 +392,7 @@
+     msg.hello.pid = getpid();
+     msg.hello.version = WB_PROTO_VERSION;
+     bare_send(&msg, -1);
+-    pfd.fd = host_sock;
+-    pfd.events = POLLIN;
+-    if (poll(&pfd, 1, 5000) <= 0 || (n = recv(host_sock, &msg, sizeof(msg), 0)) <= 0 ||
+-        msg.type != WB_CONFIG)
+-    {
+-        ERR("no answer from bare_app_wine\n");
+-        goto fail;
+-    }
++    if (!wait_config(&msg)) goto fail;
+     set_config(&msg);
+ 
+     __wine_set_user_driver(&baredrv_funcs, WINE_GDI_DRIVER_VERSION);
+-- 
+2.53.0
