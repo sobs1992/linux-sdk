@@ -1,0 +1,481 @@
+From: OdroidLinux SDK
+Subject: [PATCH] ASoC: meson, rk817: keep the sound card's registers across hibernation
+
+After resuming from hibernation the SoC and the RK817 have been powered
+off and the boot kernel that loads the image does not have the sound
+modules: the audio clock controller, the DDR arbiter, the FRDDR/TODDR
+FIFOs, the TDM formatters and the RK817 codec are as reset left them.
+The restored kernel counts clocks as enabled, FIFOs as set up (a stream
+open across the sleep is only prepared again, not given its hw_params),
+DAPM muxes and the codec setup as written, and never writes them again:
+no sound, "invalid position" from the FIFO pointer.
+
+Each driver saves its registers before the image is made and writes back
+those the hardware now holds differently: the audio clock controller,
+arbiter, FIFOs (without the DMA enable and interrupt clear bits) and TDM
+formatters (without the enable bit) in the noirq phase, suppliers before
+consumers; the RK817 codec, on I2C, in the normal phase, the APLL
+dividers first. The axg sound card has no sleep callbacks, so DAPM keeps
+its paths and the restored registers match them; the application sees
+an xrun and starts the stream again. After a suspend to RAM nothing
+differs and nothing is written.
+
+--- a/drivers/clk/meson/axg-audio.c
++++ b/drivers/clk/meson/axg-audio.c
+@@ -1323,11 +1323,60 @@
+ 	unsigned int max_register;
+ };
+ 
++/*
++ * The registers of the controller, kept across a system sleep. After
++ * resuming from hibernation the SoC has been off and the boot kernel that
++ * loaded the image does not have this module: the gates, muxes and
++ * dividers are as reset left them while the clock framework of the
++ * restored kernel counts them as set up and never writes them again (no
++ * sound, the FIFOs of the sound card unclocked). They are saved in the
++ * noirq phase before the image is made and written back, in register
++ * order (the gates first), where the hardware holds another value, before
++ * the consumers resume. After a suspend to RAM nothing is written.
++ */
++struct axg_audio_clkc_pm {
++	struct regmap *map;
++	unsigned int num;
++	u32 regs[];
++};
++
++static int axg_audio_clkc_save(struct device *dev)
++{
++	struct axg_audio_clkc_pm *pm = dev_get_drvdata(dev);
++	unsigned int i, v;
++
++	for (i = 0; i < pm->num; i++)
++		if (!regmap_read(pm->map, i * 4, &v))
++			pm->regs[i] = v;
++	return 0;
++}
++
++static int axg_audio_clkc_restore(struct device *dev)
++{
++	struct axg_audio_clkc_pm *pm = dev_get_drvdata(dev);
++	unsigned int i, v, n = 0;
++
++	for (i = 0; i < pm->num; i++) {
++		if (regmap_read(pm->map, i * 4, &v) || v == pm->regs[i])
++			continue;
++		regmap_write(pm->map, i * 4, pm->regs[i]);
++		n++;
++	}
++	if (n)
++		dev_info(dev, "%u registers restored\n", n);
++	return 0;
++}
++
++static const struct dev_pm_ops axg_audio_clkc_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(axg_audio_clkc_save, axg_audio_clkc_restore)
++};
++
+ static int axg_audio_clkc_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	const struct audioclk_data *data;
+ 	struct auxiliary_device *auxdev;
++	struct axg_audio_clkc_pm *pm;
+ 	struct regmap *map;
+ 	void __iomem *regs;
+ 	struct clk_hw *hw;
+@@ -1349,6 +1398,14 @@
+ 		return PTR_ERR(map);
+ 	}
+ 
++	pm = devm_kzalloc(dev, struct_size(pm, regs, data->max_register / 4 + 1),
++			  GFP_KERNEL);
++	if (!pm)
++		return -ENOMEM;
++	pm->map = map;
++	pm->num = data->max_register / 4 + 1;
++	platform_set_drvdata(pdev, pm);
++
+ 	/* Get the mandatory peripheral clock */
+ 	clk = devm_clk_get_enabled(dev, "pclk");
+ 	if (IS_ERR(clk))
+@@ -1438,6 +1495,7 @@
+ 	.driver		= {
+ 		.name	= "axg-audio-clkc",
+ 		.of_match_table = clkc_match_table,
++		.pm = pm_sleep_ptr(&axg_audio_clkc_pm_ops),
+ 	},
+ };
+ module_platform_driver(axg_audio_driver);
+--- a/drivers/reset/amlogic/reset-meson-audio-arb.c
++++ b/drivers/reset/amlogic/reset-meson-audio-arb.c
+@@ -18,6 +18,7 @@
+ 	struct clk *clk;
+ 	const unsigned int *reset_bits;
+ 	spinlock_t lock;
++	u32 saved;
+ };
+ 
+ struct meson_audio_arb_match_data {
+@@ -108,6 +109,42 @@
+ 	.status = meson_audio_arb_status,
+ };
+ 
++/*
++ * The arbiter register is kept across a system sleep. After resuming from
++ * hibernation the SoC has been off and the boot kernel did not have this
++ * module: the register is as reset left it, every memory interface held
++ * in reset, while the FIFOs that had taken theirs out of reset (a stream
++ * open across the sleep) count on them running. Saved in the noirq phase
++ * before the image is made, written back if the hardware holds another
++ * value; after a suspend to RAM nothing is written.
++ */
++static int meson_audio_arb_save(struct device *dev)
++{
++	struct meson_audio_arb_data *arb = dev_get_drvdata(dev);
++
++	arb->saved = readl(arb->regs);
++	return 0;
++}
++
++static int meson_audio_arb_restore(struct device *dev)
++{
++	struct meson_audio_arb_data *arb = dev_get_drvdata(dev);
++	u32 val;
++
++	spin_lock(&arb->lock);
++	val = readl(arb->regs);
++	if (val != arb->saved)
++		writel(arb->saved, arb->regs);
++	spin_unlock(&arb->lock);
++	if (val != arb->saved)
++		dev_info(dev, "restored 0x%08x (was 0x%08x)\n", arb->saved, val);
++	return 0;
++}
++
++static const struct dev_pm_ops meson_audio_arb_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(meson_audio_arb_save, meson_audio_arb_restore)
++};
++
+ static const struct of_device_id meson_audio_arb_of_match[] = {
+ 	{
+ 		.compatible = "amlogic,meson-axg-audio-arb",
+@@ -184,6 +221,7 @@
+ 	.driver = {
+ 		.name = "meson-audio-arb-reset",
+ 		.of_match_table = meson_audio_arb_of_match,
++		.pm = pm_sleep_ptr(&meson_audio_arb_pm_ops),
+ 	},
+ };
+ module_platform_driver(meson_audio_arb_pdrv);
+--- a/sound/soc/meson/axg-fifo.c
++++ b/sound/soc/meson/axg-fifo.c
+@@ -317,6 +317,69 @@
+ }
+ EXPORT_SYMBOL_GPL(axg_fifo_pcm_new);
+ 
++/*
++ * The setup of the FIFO kept across a system sleep. After resuming from
++ * hibernation the SoC has been off and the boot kernel did not have this
++ * module: the registers are as reset left them. A stream open across the
++ * sleep is only prepared again, not given its hw_params, so the buffer
++ * addresses, the period interrupt and the sink would stay unset: no sound,
++ * and the pointer reads garbage ("invalid position"). The registers are
++ * saved in the noirq phase before the image is made and written back,
++ * without the DMA enable and the interrupt clear bits, where the hardware
++ * holds another value. After a suspend to RAM nothing is written.
++ */
++static const unsigned int axg_fifo_kept_regs[] = {
++	FIFO_CTRL0, FIFO_CTRL1, FIFO_START_ADDR, FIFO_FINISH_ADDR,
++	FIFO_INT_ADDR, FIFO_INIT_ADDR, FIFO_CTRL2,
++};
++
++static int axg_fifo_save(struct device *dev)
++{
++	struct axg_fifo *fifo = dev_get_drvdata(dev);
++	unsigned int i, v;
++	int ret;
++
++	BUILD_BUG_ON(ARRAY_SIZE(axg_fifo_kept_regs) > ARRAY_SIZE(fifo->kept));
++
++	ret = clk_prepare_enable(fifo->pclk);
++	if (ret)
++		return ret;
++	for (i = 0; i < ARRAY_SIZE(axg_fifo_kept_regs); i++)
++		if (!regmap_read(fifo->map, axg_fifo_kept_regs[i], &v))
++			fifo->kept[i] = v;
++	fifo->kept[0] &= ~CTRL0_DMA_EN;
++	fifo->kept[1] &= ~CTRL1_INT_CLR;
++	clk_disable_unprepare(fifo->pclk);
++	return 0;
++}
++
++static int axg_fifo_restore(struct device *dev)
++{
++	struct axg_fifo *fifo = dev_get_drvdata(dev);
++	unsigned int i, v, n = 0;
++	int ret;
++
++	ret = clk_prepare_enable(fifo->pclk);
++	if (ret)
++		return ret;
++	for (i = 0; i < ARRAY_SIZE(axg_fifo_kept_regs); i++) {
++		if (regmap_read(fifo->map, axg_fifo_kept_regs[i], &v) ||
++		    v == fifo->kept[i])
++			continue;
++		regmap_write(fifo->map, axg_fifo_kept_regs[i], fifo->kept[i]);
++		n++;
++	}
++	clk_disable_unprepare(fifo->pclk);
++	if (n)
++		dev_info(dev, "%u registers restored\n", n);
++	return 0;
++}
++
++const struct dev_pm_ops axg_fifo_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(axg_fifo_save, axg_fifo_restore)
++};
++EXPORT_SYMBOL_GPL(axg_fifo_pm_ops);
++
+ static const struct regmap_config axg_fifo_regmap_cfg = {
+ 	.reg_bits	= 32,
+ 	.val_bits	= 32,
+--- a/sound/soc/meson/axg-fifo.h
++++ b/sound/soc/meson/axg-fifo.h
+@@ -64,6 +64,7 @@
+ 	struct regmap_field *field_threshold;
+ 	unsigned int depth;
+ 	int irq;
++	u32 kept[7];
+ };
+ 
+ struct axg_fifo_match_data {
+@@ -91,5 +92,6 @@
+ 
+ int axg_fifo_pcm_new(struct snd_soc_pcm_runtime *rtd, unsigned int type);
+ int axg_fifo_probe(struct platform_device *pdev);
++extern const struct dev_pm_ops axg_fifo_pm_ops;
+ 
+ #endif /* _MESON_AXG_FIFO_H */
+--- a/sound/soc/meson/axg-frddr.c
++++ b/sound/soc/meson/axg-frddr.c
+@@ -391,6 +391,7 @@
+ 	.driver = {
+ 		.name = "axg-frddr",
+ 		.of_match_table = axg_frddr_of_match,
++		.pm = pm_sleep_ptr(&axg_fifo_pm_ops),
+ 	},
+ };
+ module_platform_driver(axg_frddr_pdrv);
+--- a/sound/soc/meson/axg-toddr.c
++++ b/sound/soc/meson/axg-toddr.c
+@@ -344,6 +344,7 @@
+ 	.driver = {
+ 		.name = "axg-toddr",
+ 		.of_match_table = axg_toddr_of_match,
++		.pm = pm_sleep_ptr(&axg_fifo_pm_ops),
+ 	},
+ };
+ module_platform_driver(axg_toddr_pdrv);
+--- a/sound/soc/meson/axg-tdm-formatter.c
++++ b/sound/soc/meson/axg-tdm-formatter.c
+@@ -24,6 +24,8 @@
+ 	struct reset_control *reset;
+ 	bool enabled;
+ 	struct regmap *map;
++	unsigned int num_kept;
++	u32 *kept;
+ };
+ 
+ int axg_tdm_formatter_set_channel_masks(struct regmap *map,
+@@ -257,6 +259,65 @@
+ }
+ EXPORT_SYMBOL_GPL(axg_tdm_formatter_event);
+ 
++/*
++ * The registers of the formatter, kept across a system sleep. After
++ * resuming from hibernation the SoC has been off and the boot kernel did
++ * not have this module: the registers are as reset left them. Starting
++ * the stream again writes the format, but not the input the formatter
++ * takes its samples from (a DAPM mux, written only when it changes), the
++ * gains and the mutes. The registers are saved in the noirq phase before
++ * the image is made and written back, the formatter not enabled (the
++ * stream starts it), where the hardware holds another value. After a
++ * suspend to RAM nothing is written. Both TDMOUT and TDMIN have their
++ * enable bit at bit 31 of the first register.
++ */
++#define AXG_TDM_FORMATTER_ENABLE	BIT(31)
++
++static int axg_tdm_formatter_save(struct device *dev)
++{
++	struct axg_tdm_formatter *formatter = dev_get_drvdata(dev);
++	unsigned int i, v;
++	int ret;
++
++	ret = clk_prepare_enable(formatter->pclk);
++	if (ret)
++		return ret;
++	for (i = 0; i < formatter->num_kept; i++)
++		if (!regmap_read(formatter->map, i * 4, &v))
++			formatter->kept[i] = v;
++	formatter->kept[0] &= ~AXG_TDM_FORMATTER_ENABLE;
++	clk_disable_unprepare(formatter->pclk);
++	return 0;
++}
++
++static int axg_tdm_formatter_restore(struct device *dev)
++{
++	struct axg_tdm_formatter *formatter = dev_get_drvdata(dev);
++	unsigned int i, v, n = 0;
++	int ret;
++
++	ret = clk_prepare_enable(formatter->pclk);
++	if (ret)
++		return ret;
++	for (i = 0; i < formatter->num_kept; i++) {
++		if (regmap_read(formatter->map, i * 4, &v) ||
++		    v == formatter->kept[i])
++			continue;
++		regmap_write(formatter->map, i * 4, formatter->kept[i]);
++		n++;
++	}
++	clk_disable_unprepare(formatter->pclk);
++	if (n)
++		dev_info(dev, "%u registers restored\n", n);
++	return 0;
++}
++
++const struct dev_pm_ops axg_tdm_formatter_pm_ops = {
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(axg_tdm_formatter_save,
++				  axg_tdm_formatter_restore)
++};
++EXPORT_SYMBOL_GPL(axg_tdm_formatter_pm_ops);
++
+ int axg_tdm_formatter_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -287,6 +348,12 @@
+ 		return PTR_ERR(formatter->map);
+ 	}
+ 
++	formatter->num_kept = regmap_get_max_register(formatter->map) / 4 + 1;
++	formatter->kept = devm_kcalloc(dev, formatter->num_kept,
++				       sizeof(*formatter->kept), GFP_KERNEL);
++	if (!formatter->kept)
++		return -ENOMEM;
++
+ 	/* Peripharal clock */
+ 	formatter->pclk = devm_clk_get(dev, "pclk");
+ 	if (IS_ERR(formatter->pclk))
+--- a/sound/soc/meson/axg-tdm-formatter.h
++++ b/sound/soc/meson/axg-tdm-formatter.h
+@@ -41,5 +41,6 @@
+ 			    struct snd_kcontrol *control,
+ 			    int event);
+ int axg_tdm_formatter_probe(struct platform_device *pdev);
++extern const struct dev_pm_ops axg_tdm_formatter_pm_ops;
+ 
+ #endif /* _MESON_AXG_TDM_FORMATTER_H */
+--- a/sound/soc/meson/axg-tdmout.c
++++ b/sound/soc/meson/axg-tdmout.c
+@@ -330,6 +330,7 @@
+ 	.driver = {
+ 		.name = "axg-tdmout",
+ 		.of_match_table = axg_tdmout_of_match,
++		.pm = pm_sleep_ptr(&axg_tdm_formatter_pm_ops),
+ 	},
+ };
+ module_platform_driver(axg_tdmout_pdrv);
+--- a/sound/soc/meson/axg-tdmin.c
++++ b/sound/soc/meson/axg-tdmin.c
+@@ -251,6 +251,7 @@
+ 	.driver = {
+ 		.name = "axg-tdmin",
+ 		.of_match_table = axg_tdmin_of_match,
++		.pm = pm_sleep_ptr(&axg_tdm_formatter_pm_ops),
+ 	},
+ };
+ module_platform_driver(axg_tdmin_pdrv);
+--- a/sound/soc/codecs/rk817_codec.c
++++ b/sound/soc/codecs/rk817_codec.c
+@@ -23,6 +23,7 @@
+ 	struct clk *mclk;
+ 	unsigned int stereo_sysclk;
+ 	bool mic_in_differential;
++	u8 kept[RK817_CODEC_DI2S_TXCR3_TXCMD - RK817_CODEC_DTOP_VUCTL + 1];
+ };
+ 
+ /*
+@@ -524,9 +525,73 @@
+ 	clk_disable_unprepare(rk817->mclk);
+ }
+ 
++/*
++ * The codec registers, kept across a system sleep. Powering off for
++ * hibernation powers the RK817 off, which resets the codec: the setup of
++ * the probe (the APLL among it), the volumes and the routing are gone
++ * while ALSA and DAPM count them as written (the sound card has no sleep
++ * callbacks: DAPM keeps the paths as they were). They are saved before
++ * the image is made and written back, where the codec holds another
++ * value, when the system comes back: the APLL dividers first, then the
++ * registers in their order. After a suspend to RAM the RK817 kept its
++ * power and nothing is written.
++ */
++#define RK817_CODEC_KEPT(i)	(RK817_CODEC_DTOP_VUCTL + (i))
++
++static int rk817_codec_save(struct device *dev)
++{
++	struct rk817_codec_priv *rk817 = dev_get_drvdata(dev);
++	unsigned int i;
++	int v;
++
++	if (!rk817 || !rk817->component)
++		return 0;
++	for (i = 0; i < ARRAY_SIZE(rk817->kept); i++) {
++		v = snd_soc_component_read(rk817->component, RK817_CODEC_KEPT(i));
++		if (v >= 0)
++			rk817->kept[i] = v;
++	}
++	return 0;
++}
++
++static bool rk817_codec_restore_reg(struct rk817_codec_priv *rk817,
++				    unsigned int reg)
++{
++	unsigned int i = reg - RK817_CODEC_DTOP_VUCTL;
++	int v;
++
++	v = snd_soc_component_read(rk817->component, reg);
++	if (v < 0 || v == rk817->kept[i])
++		return false;
++	snd_soc_component_write(rk817->component, reg, rk817->kept[i]);
++	return true;
++}
++
++static int rk817_codec_restore(struct device *dev)
++{
++	struct rk817_codec_priv *rk817 = dev_get_drvdata(dev);
++	unsigned int reg, n = 0;
++
++	if (!rk817 || !rk817->component)
++		return 0;
++	for (reg = RK817_CODEC_APLL_CFG1; reg <= RK817_CODEC_APLL_CFG5; reg++)
++		n += rk817_codec_restore_reg(rk817, reg);
++	for (reg = RK817_CODEC_DTOP_VUCTL; reg <= RK817_CODEC_DI2S_TXCR3_TXCMD; reg++)
++		if (reg < RK817_CODEC_APLL_CFG1 || reg > RK817_CODEC_APLL_CFG5)
++			n += rk817_codec_restore_reg(rk817, reg);
++	if (n)
++		dev_info(dev, "%u codec registers restored\n", n);
++	return 0;
++}
++
++static const struct dev_pm_ops rk817_codec_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(rk817_codec_save, rk817_codec_restore)
++};
++
+ static struct platform_driver rk817_codec_driver = {
+ 	.driver = {
+ 		   .name = "rk817-codec",
++		   .pm = pm_sleep_ptr(&rk817_codec_pm_ops),
+ 		   },
+ 	.probe = rk817_platform_probe,
+ 	.remove = rk817_platform_remove,

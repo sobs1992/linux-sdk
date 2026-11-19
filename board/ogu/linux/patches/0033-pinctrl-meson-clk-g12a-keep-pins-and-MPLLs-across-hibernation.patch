@@ -1,0 +1,205 @@
+From: OdroidLinux SDK
+Subject: [PATCH] pinctrl: meson, clk: meson: g12a: keep pins and MPLLs across hibernation
+
+After resuming from hibernation the SoC has been powered off. The boot
+kernel that loads the image sets up only what its built-in drivers use;
+the pins of drivers built as modules (the TDM and MCLK pins of the sound
+card) are plain inputs again and the MPLLs the sound card runs on are
+off, while the restored kernel counts its pinctrl states as selected and
+the MPLLs as running and never writes them again. No sound after a
+resume.
+
+pinctrl-meson saves the output, direction, pull, drive strength and mux
+registers of each pin controller in a syscore suspend, right before the
+image is made, and writes back in the syscore resume those the hardware
+now holds differently (outputs before directions, the function last).
+The g12a clock controller keeps the MPLL registers with the others of
+patch 0029. After a suspend to RAM nothing differs and nothing is
+written.
+
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -5483,6 +5483,10 @@
+ 	HHI_MALI_CLK_CNTL,
+ 	HHI_VDEC_CLK_CNTL, HHI_VDEC2_CLK_CNTL, HHI_VDEC3_CLK_CNTL,
+ 	HHI_VDEC4_CLK_CNTL,
++	/* the MPLLs of the sound card */
++	HHI_MPLL_CNTL0, HHI_MPLL_CNTL1, HHI_MPLL_CNTL2, HHI_MPLL_CNTL3,
++	HHI_MPLL_CNTL4, HHI_MPLL_CNTL5, HHI_MPLL_CNTL6, HHI_MPLL_CNTL7,
++	HHI_MPLL_CNTL8,
+ };
+ static u32 g12a_clkc_kept[ARRAY_SIZE(g12a_clkc_kept_regs)];
+ 
+--- a/drivers/pinctrl/meson/pinctrl-meson.c
++++ b/drivers/pinctrl/meson/pinctrl-meson.c
+@@ -51,6 +51,7 @@
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/seq_file.h>
++#include <linux/syscore_ops.h>
+ 
+ #include "../core.h"
+ #include "../pinctrl-utils.h"
+@@ -733,6 +734,148 @@
+ }
+ EXPORT_SYMBOL_GPL(meson_a1_parse_dt_extra);
+ 
++/*
++ * Pin state kept across a system sleep. After resuming from hibernation
++ * the SoC has been off: the boot kernel that loaded the image only set up
++ * the pins of its built-in drivers, so the pins of drivers that are
++ * modules (the TDM and MCLK pins of the sound card among them) are as
++ * reset left them, plain inputs, while the restored kernel counts their
++ * pinctrl state as selected and never writes it again. Each register is
++ * saved before the image is made (so the value is in the image) and
++ * written back when the hardware holds another value; after a suspend to
++ * RAM they are unchanged and nothing is written. The order of the list is
++ * the order of the writes: output levels before directions, the pulls and
++ * drive strengths, the function last.
++ */
++struct meson_pinctrl_kept_reg {
++	struct regmap *map;
++	unsigned int reg;
++	u32 val;
++};
++
++struct meson_pinctrl_kept {
++	struct device *dev;
++	struct meson_pinctrl_kept_reg *regs;
++	unsigned int num;
++};
++
++static struct meson_pinctrl_kept meson_pinctrl_kept[4];
++static unsigned int meson_pinctrl_num_kept;
++
++static void meson_pinctrl_keep_reg(struct meson_pinctrl_kept *k,
++				   unsigned int max, struct regmap *map,
++				   unsigned int reg)
++{
++	unsigned int i;
++
++	for (i = 0; i < k->num; i++)
++		if (k->regs[i].map == map && k->regs[i].reg == reg)
++			return;
++	if (k->num < max) {
++		k->regs[k->num].map = map;
++		k->regs[k->num].reg = reg;
++		k->num++;
++	}
++}
++
++static void meson_pinctrl_keep_range(struct meson_pinctrl_kept *k,
++				     unsigned int max, struct regmap *map)
++{
++	unsigned int reg;
++
++	if (!map)
++		return;
++	for (reg = 0; reg <= regmap_get_max_register(map); reg += 4)
++		meson_pinctrl_keep_reg(k, max, map, reg);
++}
++
++static int meson_pinctrl_syscore_suspend(void *data)
++{
++	unsigned int i, j, v;
++
++	for (i = 0; i < meson_pinctrl_num_kept; i++) {
++		struct meson_pinctrl_kept *k = &meson_pinctrl_kept[i];
++
++		for (j = 0; j < k->num; j++)
++			if (!regmap_read(k->regs[j].map, k->regs[j].reg, &v))
++				k->regs[j].val = v;
++	}
++	return 0;
++}
++
++static void meson_pinctrl_syscore_resume(void *data)
++{
++	unsigned int i, j, v, n;
++
++	for (i = 0; i < meson_pinctrl_num_kept; i++) {
++		struct meson_pinctrl_kept *k = &meson_pinctrl_kept[i];
++
++		for (j = n = 0; j < k->num; j++) {
++			if (regmap_read(k->regs[j].map, k->regs[j].reg, &v) ||
++			    v == k->regs[j].val)
++				continue;
++			regmap_write(k->regs[j].map, k->regs[j].reg,
++				     k->regs[j].val);
++			n++;
++		}
++		if (n)
++			dev_info(k->dev, "%u pin registers restored\n", n);
++	}
++}
++
++static const struct syscore_ops meson_pinctrl_syscore_ops = {
++	.suspend = meson_pinctrl_syscore_suspend,
++	.resume = meson_pinctrl_syscore_resume,
++};
++
++static struct syscore meson_pinctrl_syscore = {
++	.ops = &meson_pinctrl_syscore_ops,
++};
++
++static void meson_pinctrl_keep(struct meson_pinctrl *pc)
++{
++	static const enum meson_reg_type types[] = {
++		MESON_REG_OUT, MESON_REG_DIR, MESON_REG_PULL, MESON_REG_PULLEN,
++	};
++	struct meson_pinctrl_kept *k;
++	unsigned int b, t, max, reg, last, bit;
++
++	if (meson_pinctrl_num_kept >= ARRAY_SIZE(meson_pinctrl_kept))
++		return;
++	k = &meson_pinctrl_kept[meson_pinctrl_num_kept];
++
++	max = regmap_get_max_register(pc->reg_mux) / 4 + 1 +
++	      2 * ARRAY_SIZE(types) * pc->data->num_banks;
++	if (pc->reg_ds)
++		max += regmap_get_max_register(pc->reg_ds) / 4 + 1;
++	k->regs = devm_kcalloc(pc->dev, max, sizeof(*k->regs), GFP_KERNEL);
++	if (!k->regs)
++		return;
++	k->dev = pc->dev;
++
++	for (t = 0; t < ARRAY_SIZE(types); t++) {
++		struct regmap *map = types[t] == MESON_REG_PULL ? pc->reg_pull :
++				     types[t] == MESON_REG_PULLEN ? pc->reg_pullen :
++				     pc->reg_gpio;
++
++		for (b = 0; map && b < pc->data->num_banks; b++) {
++			const struct meson_bank *bank = &pc->data->banks[b];
++
++			meson_calc_reg_and_bit(bank, bank->first, types[t],
++					       &reg, &bit);
++			meson_calc_reg_and_bit(bank, bank->last, types[t],
++					       &last, &bit);
++			for (; reg <= last; reg += 4)
++				meson_pinctrl_keep_reg(k, max, map, reg);
++		}
++	}
++	meson_pinctrl_keep_range(k, max, pc->reg_ds);
++	meson_pinctrl_keep_range(k, max, pc->reg_mux);
++
++	if (!meson_pinctrl_num_kept++)
++		register_syscore(&meson_pinctrl_syscore);
++}
++
+ int meson_pinctrl_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -764,7 +907,12 @@
+ 		return PTR_ERR(pc->pcdev);
+ 	}
+ 
+-	return meson_gpiolib_register(pc);
++	ret = meson_gpiolib_register(pc);
++	if (ret)
++		return ret;
++
++	meson_pinctrl_keep(pc);
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(meson_pinctrl_probe);
+ 
