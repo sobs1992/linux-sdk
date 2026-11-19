@@ -32,8 +32,13 @@ entry.
   F1 pause (Esc).
 - **Menus.** They take the pad's Button 0 (A) as Enter and 1 (B) as back,
   but neither its D-pad nor its stick: `dpad = arrows` (the keyboard's
-  arrows, which also steer in a race). A press shorter than about a
-  game frame or two can go unseen.
+  arrows, which also steer in a race). The right stick is the mouse: the
+  item under the pointer is lit and A takes it. A press shorter than
+  about a game frame or two can go unseen.
+- **Sound.** The music is 22 kHz: Wine's DirectSound resamples it to the
+  device's 48 kHz, since patch 0029 by a 16-point windowed sinc. Patch
+  0005's linear interpolation left a hiss over it (images of the music
+  20-30 dB under it above 11 kHz).
 - **Profile.** The console cannot type a name, so `overlay/save` holds a
   fresh profile "player" (made by the game). The widescreen fix's
   `CustomUserFilesDirectoryInGameDir = save` puts profiles and saved

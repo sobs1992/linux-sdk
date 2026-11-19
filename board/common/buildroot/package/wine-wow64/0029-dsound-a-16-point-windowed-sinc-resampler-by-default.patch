@@ -1,0 +1,221 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] dsound: a 16-point windowed sinc resampler by default
+
+Patch 0005 made linear interpolation the default resampler: the 66-tap
+filter took the 32-bit mixer, emulated by Box64, to a whole core. But
+linear interpolation leaves images of the input's band above its
+Nyquist frequency: NFS Underground's 22 kHz music on the 48 kHz device
+had them 20-30 dB under the music from 11 to 20 kHz, a hiss ("sand")
+over it. The long filter takes them to -60 dB at 37% of a core.
+
+The default is now a 16-point Kaiser-windowed sinc (beta 5, its cutoff
+the input's Nyquist frequency) from a table of 129 positions between two
+input samples, the input copied to floats first as the long filter does:
+16 products per output sample and channel. NFS Underground's mixer
+thread at 3.4% of a core; the images 55-65 dB under the music.
+
+It only upsamples; a buffer faster than the device still goes through
+the long filter, which narrows its band. "Resampler" (the DirectSound
+key of HKCU\Software\Wine or the application's AppDefaults) "linear"
+and "fir" choose the others.
+---
+--- a/dlls/dsound/dsound_main.c
++++ b/dlls/dsound/dsound_main.c
+@@ -81,7 +81,7 @@
+ 
+ /* All default settings, you most likely don't want to touch these, see wiki on UsefulRegistryKeys */
+ int ds_hel_buflen = 32768 * 2;
+-BOOL ds_fir_resampler = FALSE;
++enum ds_resampler ds_resampler = DS_RESAMPLER_SINC;
+ 
+ /*
+  * Get a config key from either the app-specific or the default config
+@@ -133,16 +133,23 @@
+     if (!get_config_key( hkey, appkey, "HelBuflen", buffer, MAX_PATH ))
+         ds_hel_buflen = atoi(buffer);
+ 
+-    /* "fir": the windowed-sinc filter, ~66 products per sample and channel,
+-     * too slow where i386 code is emulated (WoW64 on arm64); "linear" (the
+-     * default): interpolation between the two nearest samples */
++    /* "fir": the long windowed-sinc filter, ~66 products per sample and
++     * channel, too slow where i386 code is emulated (WoW64 on arm64);
++     * "linear": interpolation between the two nearest samples, cheapest but
++     * with images of the input's band above its Nyquist frequency (a hiss
++     * over 22 kHz sounds); the default: a 16-point windowed sinc */
+     if (!get_config_key( hkey, appkey, "Resampler", buffer, MAX_PATH ))
+-        ds_fir_resampler = !strcmp( buffer, "fir" );
++    {
++        if (!strcmp( buffer, "fir" )) ds_resampler = DS_RESAMPLER_FIR;
++        else if (!strcmp( buffer, "linear" )) ds_resampler = DS_RESAMPLER_LINEAR;
++        else ds_resampler = DS_RESAMPLER_SINC;
++    }
+ 
+     if (appkey) RegCloseKey( appkey );
+     if (hkey) RegCloseKey( hkey );
+ 
+-    TRACE("ds_hel_buflen = %d, resampler %s\n", ds_hel_buflen, ds_fir_resampler ? "fir" : "linear");
++    TRACE("ds_hel_buflen = %d, resampler %s\n", ds_hel_buflen, ds_resampler == DS_RESAMPLER_FIR ? "fir" :
++          ds_resampler == DS_RESAMPLER_LINEAR ? "linear" : "sinc");
+ }
+ 
+ static const char * get_device_id(LPCGUID pGuid)
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -35,7 +35,8 @@
+ #define DS_MAX_CHANNELS 6
+ 
+ extern int ds_hel_buflen;
+-extern BOOL ds_fir_resampler;
++enum ds_resampler { DS_RESAMPLER_SINC, DS_RESAMPLER_LINEAR, DS_RESAMPLER_FIR };
++extern enum ds_resampler ds_resampler;
+ 
+ /*****************************************************************************
+  * Predeclare the interface implementation structures
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -444,15 +444,143 @@
+     return max_ipos;
+ }
+ 
++/* The short windowed sinc: SINC_TAPS input samples per output sample, the
++ * weights of the nearest of SINC_PHASES + 1 positions between two input
++ * samples. Its cutoff is the input's Nyquist frequency (upsampling only), a
++ * Kaiser window (beta 5: ~54 dB of stopband from 0.6 of the input's rate,
++ * the transition 0.4..0.6 of it). Each row sums to 1. */
++#define SINC_TAPS 16
++#define SINC_PHASES 128
++static float sinc_table[SINC_PHASES + 1][SINC_TAPS];
++static INIT_ONCE sinc_once = INIT_ONCE_STATIC_INIT;
++
++static double bessel_i0(double x)
++{
++    double sum = 1.0, term = 1.0;
++    int k;
++
++    for (k = 1; k < 30; k++)
++    {
++        term *= (x / (2 * k)) * (x / (2 * k));
++        sum += term;
++    }
++    return sum;
++}
++
++static BOOL WINAPI sinc_init(INIT_ONCE *once, void *param, void **context)
++{
++    const double beta = 5.0, half = SINC_TAPS / 2.0;
++    int p, k;
++
++    for (p = 0; p <= SINC_PHASES; p++)
++    {
++        double frac = (double)p / SINC_PHASES, w[SINC_TAPS], sum = 0.0;
++
++        for (k = 0; k < SINC_TAPS; k++)
++        {
++            /* input sample k is at k - (SINC_TAPS / 2 - 1) - frac from the output */
++            double t = k - (SINC_TAPS / 2 - 1) - frac, r = t / half;
++            double s = fabs(t) < 1e-9 ? 1.0 : sin(M_PI * t) / (M_PI * t);
++            double win = fabs(r) < 1.0 ? bessel_i0(beta * sqrt(1.0 - r * r)) / bessel_i0(beta) : 0.0;
++
++            w[k] = s * win;
++            sum += w[k];
++        }
++        for (k = 0; k < SINC_TAPS; k++)
++            sinc_table[p][k] = w[k] / sum;
++    }
++    return TRUE;
++}
++
++/* SINC_TAPS products per output sample and channel, from a float copy of
++ * the input as cp_fields_resample() makes; the output lags the input by
++ * SINC_TAPS / 2 - 1 samples of it, as that one's does by half its length */
++static UINT cp_fields_resample_sinc(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
++{
++    UINT istride = dsb->pwfx->nBlockAlign;
++    UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
++    UINT channels = dsb->mix_channels;
++    LONG64 freqAcc_start = *freqAccNum;
++    UINT max_ipos = (freqAcc_start + count * dsb->freqAdjustNum) / dsb->freqAdjustDen;
++    UINT required_input = max_ipos + SINC_TAPS;
++    UINT committed_samples = 0, i, channel, ipos;
++    DWORD num = dsb->freqAdjustNum, den = dsb->freqAdjustDen, rem;
++    DWORD len = required_input * channels * sizeof(float);
++    float *intermediate, *itmp;
++
++    *freqAccNum = (freqAcc_start + count * dsb->freqAdjustNum) % dsb->freqAdjustDen;
++
++    if (!secondarybuffer_is_audible(dsb))
++        return max_ipos;
++
++    InitOnceExecuteOnce(&sinc_once, sinc_init, NULL, NULL);
++
++    if (!dsb->device->cp_buffer) {
++        dsb->device->cp_buffer = malloc(len);
++        dsb->device->cp_buffer_len = len;
++    } else if (len > dsb->device->cp_buffer_len) {
++        dsb->device->cp_buffer = realloc(dsb->device->cp_buffer, len);
++        dsb->device->cp_buffer_len = len;
++    }
++    intermediate = dsb->device->cp_buffer;
++
++    if (dsb->use_committed)
++    {
++        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
++        committed_samples = committed_samples <= required_input ? committed_samples : required_input;
++    }
++
++    itmp = intermediate;
++    for (channel = 0; channel < channels; channel++)
++    {
++        for (i = 0; i < committed_samples; i++)
++            *(itmp++) = get_current_sample(dsb, dsb->committedbuff,
++                dsb->writelead, dsb->committed_mixpos + i * istride, channel);
++        for (; i < required_input; i++)
++            *(itmp++) = get_current_sample(dsb, dsb->buffer->memory,
++                dsb->buflen, dsb->sec_mixpos + i * istride, channel);
++    }
++
++    /* the position in 32 bits: freqAcc_start < den, rates < 2^32 / SINC_PHASES */
++    ipos = 0;
++    rem = freqAcc_start;
++    for (i = 0; i < count; i++)
++    {
++        const float *w = sinc_table[(rem * SINC_PHASES + den / 2) / den];
++
++        for (channel = 0; channel < channels; channel++)
++        {
++            const float *in = intermediate + channel * required_input + ipos;
++            float sum = 0.0f;
++            int k;
++
++            for (k = 0; k < SINC_TAPS; k++)
++                sum += w[k] * in[k];
++            dsb->put(dsb, i * ostride, channel, sum);
++        }
++        rem += num;
++        while (rem >= den)
++        {
++            rem -= den;
++            ipos++;
++        }
++    }
++
++    return max_ipos;
++}
++
+ static void cp_fields(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+ {
+     DWORD ipos, adv;
+ 
+     if (dsb->freqAdjustNum == dsb->freqAdjustDen)
+         adv = cp_fields_noresample(dsb, count); /* *freqAccNum is unmodified */
+-    else if (!ds_fir_resampler)
++    else if (ds_resampler == DS_RESAMPLER_LINEAR)
+         adv = cp_fields_resample_linear(dsb, count, freqAccNum);
+-    else
++    else if (ds_resampler == DS_RESAMPLER_SINC && dsb->freqAdjustNum < dsb->freqAdjustDen &&
++             dsb->freqAdjustDen <= 0xffffffff / SINC_PHASES)
++        adv = cp_fields_resample_sinc(dsb, count, freqAccNum);
++    else /* the long filter also downsamples (it narrows its band) */
+         adv = cp_fields_resample(dsb, count, freqAccNum);
+ 
+     ipos = dsb->sec_mixpos + adv * dsb->pwfx->nBlockAlign;
