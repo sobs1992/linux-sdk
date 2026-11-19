@@ -1,0 +1,22 @@
+#!/bin/sh
+# The level this device's battery charges to (/usr/sbin/charge-limit): 100%
+# unless a lower one was chosen in bare_app's Settings > System. Right after
+# S05data (the choice is on /data; the name sorts after it) and before
+# bare_app, which reads it (S06bare-app on the GO Advance); the battery's
+# driver is built in. A board without such a battery: nothing.
+
+case "$1" in
+start)
+	printf "Setting the charge limit: "
+	if /usr/sbin/charge-limit load; then
+		l=$(/usr/sbin/charge-limit get 2>/dev/null) && echo "OK ($l%)" || echo "none"
+	else
+		echo "FAIL"
+	fi
+	;;
+stop|restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+esac

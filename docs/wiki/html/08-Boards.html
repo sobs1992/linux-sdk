@@ -105,7 +105,9 @@
 <li><strong>Питание.</strong> Два PMIC: RK818 (батарея, USB-C) и RK817 (загрузочный кластер,
   звук, кнопка питания). Выключение как у Hardkernel (ядро 0016): плата сама
   включается от USB, U-Boot (патч 0001) ждёт кнопку при зарядке. Покой 889 мА с
-  подсветкой / 682 мА без — аппаратный пол; cpuidle вешает загрузку (BL31).</li>
+  подсветкой / 682 мА без — аппаратный пол; cpuidle вешает загрузку (BL31).
+  Предел заряда («Система → Предел заряда», 90 или 85 %, по умолчанию выкл.) —
+  ядро 0032 и <code>charge-limit</code>, выбор в <code>/data/charge-limit</code>.</li>
 <li><strong>Часы.</strong> RK817 отстаёт на 14 %, время — из RK818 (<code>rtc-clock</code>, <code>S31clock</code>);
   зон нет, хранится UTC. Батарея после сброса PMIC — ядро 0031.</li>
 <li><strong>Перезагрузка.</strong> <code>DEV_OFF_RST</code> RK818 перед reboot (ядро 0017) и SD на 50 МГц в
@@ -131,8 +133,9 @@
 <ul>
 <li><strong>Гибридный образ</strong>: SPI miniloader (Black Edition) или открытая цепочка TPL/SPL/TF-A.
   Ревизия платы — по SARADC, три dtb (<code>go2</code>, <code>go2-v11</code>, <code>go3</code>).</li>
-<li><strong>Ядро</strong>: 3 патча — делители I2S (без них звук вдвое медленнее), перезагрузка
-  через RK817, опрос стика раз в 10 мс со снап-бэком.</li>
+<li><strong>Ядро</strong>: 4 патча — делители I2S (без них звук вдвое медленнее), перезагрузка
+  через RK817, опрос стика раз в 10 мс со снап-бэком, предел заряда RK817
+  (90 %, «Система → Предел заряда», <code>charge-limit</code>).</li>
 <li><strong>Быстрая загрузка</strong> ~5 с: <code>BOOTDELAY=0</code>, ядро без лишнего, <code>quiet</code>, mdev в
   фоне, bare_app <code>S06</code> сразу после <code>/data</code>.</li>
 <li><strong>Аппаратный H.264</strong> — свой драйвер <code>rk-vepu-h264</code> (VEPU2 PX30; Hantro в ядре

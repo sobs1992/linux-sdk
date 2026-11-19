@@ -1,0 +1,206 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: supply: rk817: a charge limit (charge_control_end_threshold)
+
+On the charger a battery is kept at 4.2 V for good: a Li-ion cell kept
+full and warm ages fast, and swells in the end. Charged to 4.1 V it keeps
+about 90% and lives much longer.
+
+- charge_control_end_threshold (%) chooses the voltage a charge ends at:
+  100 is the device tree's constant-charge-voltage-max, 1% less for
+  every 10 mV less, in the PMIC's 50 mV steps down to 4.1 V (100, 95, 90
+  for 4.2 V); others are refused.
+- The finished charge sets the coulomb counter to the limit's share of
+  the full capacity instead of the whole of it, and the drift correction
+  holds it there: with 4.1 V the gauge says 90%, not 100%. Choosing
+  another limit anchors it again at the next finished charge.
+- The chosen voltage is the driver's: reading the PMIC it writes it back
+  when a reset of the PMIC left the device tree's in CHRG_VOL_SEL.
+
+Nothing in the driver keeps the choice across a boot: the SDK's
+/usr/sbin/charge-limit does, on /data.
+---
+--- a/drivers/power/supply/rk817_charger.c
++++ b/drivers/power/supply/rk817_charger.c
+@@ -102,6 +102,13 @@
+ 	int max_chg_cur_ua;
+ 	int max_chg_volt_uv;
+ 	int charge_status;
++	/*
++	 * The voltage a charge ends at: the battery's constant charge voltage
++	 * (cv_full_uv, the device tree's), or lower to spare the cell
++	 * (charge_control_end_threshold). Put back if the PMIC lost it.
++	 */
++	int cv_full_uv;
++	int chg_volt_uv;
+ 	int charger_input_volt_avg_uv;
+ 
+ 	/* Work queue to periodically update values. */
+@@ -237,10 +244,56 @@
+ 	return 0;
+ }
+ 
++/*
++ * The level a charge ends at, %: 100 at the battery's constant charge
++ * voltage, 1% less for every 10 mV less. A Li-ion cell charged CC/CV to
++ * 4.1 V instead of 4.2 V takes about 90% of the charge, and lives much
++ * longer kept there on the charger.
++ */
++static int rk817_limit_pct(struct rk817_charger *charger)
++{
++	if (charger->chg_volt_uv <= 0 || charger->chg_volt_uv >= charger->cv_full_uv)
++		return 100;
++	return max(100 - (charger->cv_full_uv - charger->chg_volt_uv) / 10000, 1);
++}
++
++/* CHRG_VOL_SEL: 4.1 V to 4.45 V in 50 mV steps */
++static int rk817_write_chg_volt(struct rk817_charger *charger, int uv)
++{
++	return regmap_write_bits(charger->rk808->regmap, RK817_PMIC_CHRG_OUT,
++				 RK817_CHRG_VOL_SEL,
++				 ((uv - 4100000) / 50000) << 4);
++}
++
++/* charge_control_end_threshold: only the levels of the PMIC's 50 mV steps
++ * from 4.1 V up to the battery's own (100, 95, 90 for 4.2 V) */
++static int rk817_set_limit_pct(struct rk817_charger *charger, int pct)
++{
++	int uv = charger->cv_full_uv - (100 - pct) * 10000;
++	int ret;
++
++	if (charger->cv_full_uv <= 0 || pct > 100 || uv < 4100000 ||
++	    (uv - 4100000) % 50000)
++		return -EINVAL;
++	ret = rk817_write_chg_volt(charger, uv);
++	if (ret)
++		return ret;
++	if (uv != charger->chg_volt_uv) {
++		charger->chg_volt_uv = uv;
++		/* a charge now ends at another level: anchor the gauge again */
++		charger->soc_cal = 0;
++		dev_info(charger->dev, "charge end voltage %d mV (%d%%)\n",
++			 uv / 1000, pct);
++	}
++	return 0;
++}
++
+ static int rk817_bat_calib_cap(struct rk817_charger *charger)
+ {
+ 	struct rk808 *rk808 = charger->rk808;
+ 	int charge_now, charge_now_adc;
++	int limit = rk817_limit_pct(charger);
++	int full_mah = charger->fcc_mah * limit / 100;	/* what a charge ends at */
+ 	u8 bulk_reg[4];
+ 
+ 	/* Don't do anything if there's no battery. */
+@@ -277,25 +330,26 @@
+ 		 * a completed charge cycle should correct this (my device was
+ 		 * showing 33% battery after 3 days unplugged when it should
+ 		 * have been closer to 95% based on voltage and charge
+-		 * current).
++		 * current). With a lower charge voltage (charge limit) the
++		 * charge ends at the limit's share of the full capacity.
+ 		 */
+ 
+-		charger->soc = 100000;
+-		charge_now_adc = CHARGE_TO_ADC(charger->fcc_mah,
+-					       charger->res_div);
++		charger->soc = limit * 1000;
++		charge_now_adc = CHARGE_TO_ADC(full_mah, charger->res_div);
+ 		put_unaligned_be32(charge_now_adc, bulk_reg);
+ 		regmap_bulk_write(rk808->regmap, RK817_GAS_GAUGE_Q_INIT_H3,
+ 				  bulk_reg, 4);
+ 
+ 		charger->soc_cal = 1;
+ 		dev_dbg(charger->dev,
+-			"Fully charged. SOC is %d, full capacity is %d\n",
+-			charger->soc, charger->fcc_mah * 1000);
++			"Charged to %d%%. SOC is %d, full capacity is %d\n",
++			limit, charger->soc, charger->fcc_mah * 1000);
+ 	}
+ 
+ 	/*
+ 	 * The columb counter can drift up slightly, so we should correct for
+-	 * it. But don't correct it until we're at 100% soc.
++	 * it. But don't correct it until the charge has ended (100% soc, or
++	 * the limit's).
+ 	 */
+ 	if (charger->charge_status == CHARGE_FINISH && charger->soc_cal) {
+ 		regmap_bulk_read(rk808->regmap, RK817_GAS_GAUGE_Q_PRES_H3,
+@@ -309,7 +363,7 @@
+ 		/*
+ 		 * Re-init columb counter with updated values to correct drift.
+ 		 */
+-		if (charge_now / 1000 > charger->fcc_mah) {
++		if (charge_now / 1000 > full_mah) {
+ 			dev_dbg(charger->dev,
+ 				"Recalibrating columb counter to %d uah\n",
+ 				charge_now);
+@@ -318,7 +372,7 @@
+ 			 * enough precision until the last step to keep from
+ 			 * making needless updates to columb counter.
+ 			 */
+-			charge_now_adc = CHARGE_TO_ADC(charger->fcc_mah,
++			charge_now_adc = CHARGE_TO_ADC(full_mah,
+ 					 charger->res_div);
+ 			put_unaligned_be32(charge_now_adc, bulk_reg);
+ 			regmap_bulk_write(rk808->regmap,
+@@ -398,6 +452,15 @@
+ 	regmap_read(charger->rk808->regmap, RK817_PMIC_CHRG_OUT, &reg);
+ 	charger->max_chg_volt_uv = ((((reg & RK817_CHRG_VOL_SEL) >> 4) *
+ 				    50000) + 4100000);
++	/* a reset of the PMIC leaves it at the device tree's */
++	if (charger->chg_volt_uv > 0 &&
++	    charger->max_chg_volt_uv != charger->chg_volt_uv) {
++		dev_info(charger->dev, "charge end voltage %d mV, back to %d mV\n",
++			 charger->max_chg_volt_uv / 1000,
++			 charger->chg_volt_uv / 1000);
++		if (!rk817_write_chg_volt(charger, charger->chg_volt_uv))
++			charger->max_chg_volt_uv = charger->chg_volt_uv;
++	}
+ 
+ 	/* Check if battery still present. */
+ 	regmap_read(charger->rk808->regmap, RK817_PMIC_CHRG_STS, &reg);
+@@ -525,6 +588,9 @@
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
+ 		val->intval = charger->max_chg_volt_uv;
+ 		break;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = rk817_limit_pct(charger);
++		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+ 		val->intval = charger->bat_voltage_max_design_uv;
+ 		break;
+@@ -639,6 +705,8 @@
+ 			return -EINVAL;
+ 		charger->fcc_mah = val->intval / 1000;
+ 		return rk817_bat_calib_cap(charger);
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		return rk817_set_limit_pct(charger, val->intval);
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -653,6 +721,7 @@
+ 	POWER_SUPPLY_PROP_CHARGE_EMPTY_DESIGN,
+ 	POWER_SUPPLY_PROP_CHARGE_NOW,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+ 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
+ 	POWER_SUPPLY_PROP_CURRENT_AVG,
+@@ -674,6 +743,7 @@
+ {
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+ 		return 1;
+ 	default:
+ 		return 0;
+@@ -979,6 +1049,8 @@
+ 			  "Danger, unable to set max charger voltage: %u\n",
+ 			  ret);
+ 	}
++	charger->cv_full_uv = max_chg_vol_mv * 1000;
++	charger->chg_volt_uv = charger->cv_full_uv;
+ 
+ 	ret = regmap_write_bits(rk808->regmap, RK817_PMIC_CHRG_OUT,
+ 				RK817_CHRG_CUR_SEL, max_chg_cur_reg);

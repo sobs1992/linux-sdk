@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# The level a charge of the battery ends at, chosen per device. On the
+# charger a Li-ion cell is otherwise kept at 4.2 V for good: kept full and
+# warm it ages fast and swells in the end. Charged to 4.1 V it keeps about
+# 90% and lives much longer. The battery's driver (charge_control_end_
+# threshold: the RK818 of the GO Ultra, kernel 0032; the RK817 of the GO
+# Advance, kernel 0004) turns the level into the voltage the charge ends
+# at and makes its gauge say that level when it has. The choice is kept on
+# /data, which a new system image leaves alone, so each device keeps its
+# own.
+#
+#   charge-limit list      the levels to choose from, %, highest first
+#   charge-limit get       the level now, %
+#   charge-limit set PCT   the level now and from the next boot on
+#   charge-limit load      at boot: the kept one, else DEFAULT
+#
+# bare_app's Settings > System runs list, get and set. Without such a
+# battery (a board on a power supply) list and get fail, load does nothing.
+
+KEEP=/data/charge-limit
+DEFAULT=100	# as the device tree charges it
+
+# the battery whose charge can end lower, nothing if none
+battery() {
+	for d in /sys/class/power_supply/*; do
+		[ "$(cat $d/type 2>/dev/null)" = Battery ] &&
+			[ -e $d/charge_control_end_threshold ] && { echo $d; return 0; }
+	done
+	return 1
+}
+
+# the levels its PMIC's 50 mV steps make (kernel 0032 and 0004)
+choices() {
+	case "$(basename "$1")" in
+	rk818-battery) echo "100 90 85" ;;	# down to 4.05 V
+	rk817-battery) echo "100 90" ;;		# down to 4.1 V
+	*) echo 100 ;;
+	esac
+}
+
+no_battery() {
+	echo "charge-limit: no battery with a charge limit" >&2
+	exit 1
+}
+
+case "$1" in
+list)
+	bat=$(battery) || no_battery
+	choices "$bat"
+	;;
+get)
+	bat=$(battery) || no_battery
+	cat "$bat/charge_control_end_threshold"
+	;;
+set)
+	bat=$(battery) || no_battery
+	case " $(choices "$bat") " in
+	*" $2 "*) ;;
+	*) echo "Usage: $0 set {$(choices "$bat" | tr ' ' '|')}" >&2; exit 1 ;;
+	esac
+	echo "$2" > "$bat/charge_control_end_threshold" || exit 1
+	if mountpoint -q /data; then
+		echo "$2" > $KEEP.new && mv $KEEP.new $KEEP && sync
+	else
+		echo "charge-limit: /data is not mounted: $2% until the next boot" >&2
+	fi
+	;;
+load)
+	bat=$(battery) || exit 0
+	want=$(cat $KEEP 2>/dev/null)
+	case " $(choices "$bat") " in
+	*" $want "*) ;;
+	*) want=$DEFAULT ;;
+	esac
+	echo "$want" > "$bat/charge_control_end_threshold"
+	;;
+*)
+	echo "Usage: $0 list | get | set PCT | load" >&2
+	exit 1
+	;;
+esac

@@ -1,0 +1,240 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: supply: rk818: a charge limit (charge_control_end_threshold)
+
+On the charger a battery is kept at 4.2 V for good, and topped up every
+few minutes once the charge has finished (patch 0031): a Li-ion cell kept
+full and warm ages fast, and swells in the end. Charged to a lower
+voltage it keeps less (4.1 V about 90%, 4.05 V about 85%) and lives much
+longer.
+
+- charge_control_end_threshold (%) chooses the voltage a charge ends at:
+  100 is the battery's constant-charge-voltage-max, 1% less for every
+  10 mV less, in the PMIC's 50 mV steps down to 4.05 V (100, 95, 90, 85
+  for 4.2 V); others are refused. constant_charge_voltage, writable
+  before, sets the same voltage, but no longer above the battery's own.
+- The finished charge snaps the coulomb counter to the limit's share of
+  the FCC instead of the whole of it, and the latch of 0031 keeps that
+  level: with 4.1 V the gauge says 90% and "full", not 100%. Choosing
+  another limit drops the latch.
+- The chosen voltage is the driver's: the monitor writes it back when a
+  reset of the PMIC (a reboot, the boot kernel of a hibernation) left
+  the device tree's in CHRG_VOL_SEL.
+
+Nothing in the driver keeps the choice across a boot: the SDK's
+/usr/sbin/charge-limit does, on /data.
+---
+--- a/drivers/power/supply/rk818_battery.c
++++ b/drivers/power/supply/rk818_battery.c
+@@ -289,8 +289,13 @@
+ 	bool	is_first_power_on;
+ 	bool	is_initialized;
+ 	/* the charge finished with the charger plugged in and has not been
+-	 * lost since: 100% and "full" until it is unplugged */
++	 * lost since: the limit's level (rk818_limit_pct()) and "full" until
++	 * it is unplugged */
+ 	bool	full_latched;
++	/* the voltage a charge ends at (CHRG_VOL_SEL), 0 none chosen: the
++	 * battery's constant-charge-voltage-max, or lower to spare the cell
++	 * (charge_control_end_threshold); put back if the PMIC lost it */
++	int	chg_volt_uv;
+ 	u32	pwroff_min;
+ 
+ 	u32		monitor_ms;
+@@ -343,6 +348,7 @@
+ /* Forward declarations for helpers used before their definition. */
+ static int rk818_charger_set_current_max(struct rk818_battery *di, int val);
+ static int rk818_charger_set_voltage_max(struct rk818_battery *di, int val);
++static int rk818_charger_get_voltage_max(struct rk818_battery *di, int *val);
+ static int rk818_charger_current_to_nominal(struct rk818_battery *di, int val);
+ 
+ /*
+@@ -1051,6 +1057,47 @@
+ #define CALIB_INTERVAL_MIN	8
+ #define FULL_KEEP_PCT		5	/* lost on the charger: not full any more */
+ 
++/*
++ * The level a charge ends at, %: 100 at the battery's constant-charge
++ * voltage, 1% less for every 10 mV less. A Li-ion cell charged CC/CV to
++ * 4.1 V instead of 4.2 V takes about 90% of the charge, to 4.05 V about
++ * 85%, and lives much longer kept there on the charger.
++ */
++static int rk818_limit_pct(struct rk818_battery *di)
++{
++	int full = di->info->constant_charge_voltage_max_uv;
++
++	if (full <= 0 || di->chg_volt_uv <= 0 || di->chg_volt_uv >= full)
++		return 100;
++	return max(100 - (full - di->chg_volt_uv) / 10000, 1);
++}
++
++/* charge_control_end_threshold: only the levels of the PMIC's 50 mV steps
++ * from 4.05 V up to the battery's own (100, 95, 90, 85 for 4.2 V) */
++static int rk818_set_limit_pct(struct rk818_battery *di, int pct)
++{
++	int full = di->info->constant_charge_voltage_max_uv;
++	int uv = full - (100 - pct) * 10000;
++
++	if (full <= 0 || pct > 100 || uv < 4050000 || (uv - 4050000) % 50000)
++		return -EINVAL;
++	return rk818_charger_set_voltage_max(di, uv);
++}
++
++/* A reset of the PMIC (a reboot's DEV_OFF_RST, the boot kernel of a
++ * hibernation) leaves CHRG_VOL_SEL at the DT's: put the chosen one back. */
++static void rk818_keep_chg_volt(struct rk818_battery *di)
++{
++	int now;
++
++	if (di->chg_volt_uv <= 0 || rk818_charger_get_voltage_max(di, &now) ||
++	    now == di->chg_volt_uv)
++		return;
++	dev_info(di->dev, "charge end voltage %d mV, back to %d mV\n",
++		 now / 1000, di->chg_volt_uv / 1000);
++	rk818_charger_set_voltage_max(di, di->chg_volt_uv);
++}
++
+ static void rk818_periodic_calib(struct rk818_battery *di)
+ {
+ 	int poffset, ioffset;
+@@ -1085,19 +1132,23 @@
+  * toward it by at most DSOC_DELTA_MAX per call.
+  *
+  * Special cases:
+- *   - RK818_CHG_STS_TERMINATED: snap remain_cap to fcc so rsoc hits 100 cleanly.
++ *   - RK818_CHG_STS_TERMINATED: snap remain_cap to the limit's share of
++ *     fcc so rsoc hits the limit (100% without one) cleanly.
+  *   - Valid relaxed voltage: re-anchor the coulomb counter to the OCV cap.
+  *   - OCV estimate below shutdown threshold: force dsoc to 0.
+  */
+ static void rk818_update_soc(struct rk818_battery *di)
+ {
++	int limit = rk818_limit_pct(di);
++	int full_cap = di->fcc_mah * limit / 100;	/* what a charge ends at */
++
+ 	di->remain_cap_mah = rk818_get_coulomb_cap(di);
+ 
+ 	if (di->chrg_status == RK818_CHG_STS_TERMINATED &&
+-	    di->remain_cap_mah != di->fcc_mah) {
+-		dev_info(di->dev, "charge finish: cap %d -> %d mAh\n",
+-			 di->remain_cap_mah, di->fcc_mah);
+-		rk818_set_coulomb_cap(di, di->fcc_mah);
++	    di->remain_cap_mah != full_cap) {
++		dev_info(di->dev, "charge finish: cap %d -> %d mAh (%d%%)\n",
++			 di->remain_cap_mah, full_cap, limit);
++		rk818_set_coulomb_cap(di, full_cap);
+ 	}
+ 
+ 	di->voltage_relax_mv = rk818_get_relax_voltage(di);
+@@ -1124,22 +1175,23 @@
+ 	 * With the charger plugged in, once the charge finished the RK818 lets
+ 	 * the system run from the battery until it falls to the recharge
+ 	 * threshold, tops it up and finishes again, every few minutes: 100,
+-	 * 99, 100... and "full", "charging", "full". It stays 100% and full
+-	 * through that, until the charger goes or the battery really loses
+-	 * charge (a load bigger than the charger gives).
++	 * 99, 100... and "full", "charging", "full". It stays at the limit
++	 * (100% without one) and full through that, until the charger goes or
++	 * the battery really loses charge (a load bigger than the charger
++	 * gives).
+ 	 */
+ 	if (!di->charger_online) {
+ 		di->full_latched = false;
+ 	} else if (di->chrg_status == RK818_CHG_STS_TERMINATED) {
+ 		di->full_latched = true;
+ 	} else if (di->full_latched &&
+-		   di->remain_cap_mah < di->fcc_mah - di->fcc_mah * FULL_KEEP_PCT / 100) {
++		   di->remain_cap_mah < full_cap - di->fcc_mah * FULL_KEEP_PCT / 100) {
+ 		dev_info(di->dev, "losing charge on the charger: %d mAh, not full any more\n",
+ 			 di->remain_cap_mah);
+ 		di->full_latched = false;
+ 	}
+ 	if (di->full_latched) {
+-		di->dsoc = 100;
++		di->dsoc = limit;
+ 		return;
+ 	}
+ 
+@@ -1402,6 +1454,7 @@
+ 	di->chrg_status    = rk818_get_chrg_status(di);
+ 	di->charger_online = rk818_charger_online(di);
+ 	rk818_update_temperature(di);
++	rk818_keep_chg_volt(di);
+ 
+ 	/*
+ 	 * Derive is_charging from CHG_STS, not the current sign: during
+@@ -1964,6 +2017,11 @@
+ 	unsigned reg;
+ 	int ret;
+ 
++	/* never above the battery's own (a 4.2 V cell charged to 4.35 V) */
++	if (di->info->constant_charge_voltage_max_uv > 0 &&
++	    val > di->info->constant_charge_voltage_max_uv)
++		return -EINVAL;
++
+ 	if (val < 4050000)
+ 		reg = 0;
+ 	else if (val < 4350000)
+@@ -1974,11 +2032,24 @@
+ 	ret = regmap_update_bits(di->regmap, RK818_CHRG_CTRL_REG1,
+ 				 RK818_CHRG_CTRL_REG1_CHRG_VOL_SEL_MASK,
+ 				 reg << RK818_CHRG_CTRL_REG1_CHRG_VOL_SEL_OFFSET);
+-	if (ret)
++	if (ret) {
+ 		dev_err(di->dev,
+ 			"Charging end voltage setting failed (%d)\n", ret);
++		return ret;
++	}
+ 
+-	return ret;
++	val = 4050000 + reg * 50000;
++	if (val != di->chg_volt_uv) {
++		bool was_set = di->chg_volt_uv > 0;
++
++		di->chg_volt_uv = val;
++		if (was_set)
++			dev_info(di->dev, "charge end voltage %d mV (%d%%)\n",
++				 val / 1000, rk818_limit_pct(di));
++		/* a charge now ends at another level */
++		di->full_latched = false;
++	}
++	return 0;
+ }
+ 
+ static int rk818_charger_get_voltage_max(struct rk818_battery *di, int *val)
+@@ -2106,6 +2177,10 @@
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+ 		return rk818_charger_get_voltage_max(di, &val->intval);
+ 
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = rk818_limit_pct(di);
++		break;
++
+ 	case POWER_SUPPLY_PROP_PRECHARGE_CURRENT:
+ 		ret = rk818_charger_get_current_max(di, &val->intval);
+ 		val->intval /= 10;
+@@ -2160,6 +2235,9 @@
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+ 		return rk818_charger_set_voltage_max(di, val->intval);
+ 
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		return rk818_set_limit_pct(di, val->intval);
++
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 		return rk818_charger_set_current_max(di, val->intval);
+ 
+@@ -2174,6 +2252,7 @@
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+ 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+ 		return 1;
+ 
+@@ -2191,6 +2270,7 @@
+ 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
+ 	POWER_SUPPLY_PROP_PRECHARGE_CURRENT,
