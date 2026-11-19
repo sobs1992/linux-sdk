@@ -384,3 +384,16 @@ overlay = games/ssam2/overlay
 run = games/serioussam/prepare.sh
 cover = lab/games/Serious Sam - The Second Encounter/cover.png
 cover_crop = center
+
+[syberia]
+; Syberia (2002), the Russian edition 1.0 (Nival) as installed, without
+; the uninstaller and the log of its last start on the PC; under Wine
+; (games/syberia/README.md)
+source = lab/games/Syberia
+exclude = Uninstall
+exclude = debug.log
+overlay = games/syberia/overlay
+; cover: a frame of its opening cinematic as the GO Ultra shows it
+cover = lab/games/Syberia/cover.png
+; the drummer automaton, without the cinematic's black bars
+cover_crop = 200 70 340
