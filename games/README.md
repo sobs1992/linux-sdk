@@ -144,6 +144,21 @@ bare_app показывает лишь игры, файлы которых ес�
   W A S D, правый — мышь: камера и кинжал-указатель меню, `mouse = relative`) и
   готовый профиль «prince»; около 30 fps; подробности — `pop/README.md`.
 
+- **fallout**, **fallout2** — Fallout 1 и 2, русские «Fixed Edition» (sfall, hi-res
+  патч; Wine): из `FalloutFE.tar.xz`/`Fallout2FE.tar.xz` Kron4ek'а только
+  `game_info/data`. `fallout/prepare.sh` (общий) ставит 854×480 — пиксель в пиксель;
+  ролики MVE требуют `BOX64_DYNAREC_BIGBLOCK=0`, запуск — патча wowbox64 0004;
+  записываемы `data/savegame`, `data/maps`, `data/proto`, `data/scripts`;
+  подробности — `fallout/README.md`.
+- **shade** — Shade: Wrath of Angels («Гнев ангелов», 1С; Wine): `prepare.sh` ставит
+  854×480 и снимает инверсию мыши; левый стик — W A S D, правый — камера
+  (`mouse = relative`); 60–70 fps; `shade/README.md`.
+- **nfsu** — Need for Speed: Underground 1.4 с widescreen fix (Wine): `prepare.sh`
+  кладёт русские файлы из `rus/` архива поверх игры и переносит профили в `save/`
+  каталога игры; в `overlay/save` — готовый профиль «player» (имя с консоли не
+  набрать); левый стик — аналоговый руль через геймпад Wine (`stick = pad`, патч
+  0026); ~43 fps в гонке; `nfsu/README.md`.
+
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
   6,4 ГБ; `doom3/overlay/game.ini` — пункт меню (движок в rootfs).

@@ -285,3 +285,60 @@ overlay = games/ut2004/overlay
 ; the logo in the game's Help
 cover = game:Help/UT2004Logo.bmp
 cover_crop = fit
+
+[fallout]
+; Fallout (1997), the Russian "Fixed Edition" 3.6.1 (games/fallout/README.md):
+; game_info/data of FalloutFE.tar.xz (its own Wine left out), without the
+; uninstaller, DirectX's installer and the manuals (PDF). prepare.sh sets
+; the hi-res patch to the screen's 854x480
+source = lab/games/FalloutFE/game_info/data
+exclude = uninstall
+exclude = DirectX_9.0c_Full.exe
+exclude = *.pdf
+overlay = games/fallout/overlay
+run = games/fallout/prepare.sh
+cover = lab/games/FalloutFE/game_info/data/Icon_I.ico
+cover_crop = fit
+
+[fallout2]
+; Fallout 2 (1998), the Russian "Fixed Edition" 5.0.5.4, the same way
+; (sfall's log and the edition's documents left out too)
+source = lab/games/Fallout2FE/game_info/data
+exclude = uninstall
+exclude = DirectX_9.0c_Full.exe
+exclude = !docs
+exclude = sfall-log.txt
+overlay = games/fallout2/overlay
+run = games/fallout/prepare.sh
+cover = lab/games/Fallout2FE/game_info/data/Icon_I.ico
+cover_crop = fit
+
+[shade]
+; Shade: Wrath of Angels (2004), 1C's Russian edition 1.2 ("Гнев
+; ангелов"): game_info/data of Kron4ek's "Shade Wrath of Angels.zip" (its
+; own Wine left out), without the uninstaller, KillSave.exe, the links and
+; the logs of its last start. prepare.sh sets settings.cfg to the screen's
+; 854x480 (games/shade/README.md)
+source = lab/games/Shade Wrath of Angels/game_info/data
+exclude = unins000.*
+exclude = KillSave.exe
+exclude = *.url
+exclude = *.log
+overlay = games/shade/overlay
+run = games/shade/prepare.sh
+cover = lab/games/Shade Wrath of Angels/cover.jpg
+cover_crop = center
+
+[nfsu]
+; Need for Speed: Underground (2003) 1.4: game_info/data of NFSU_Linux.tar.xz
+; (its own Wine left out), without EA's uninstaller and the US patch's
+; installer; prepare.sh puts the Russian edition's files (rus/ of the same
+; archive) over it and sets the widescreen fix (games/nfsu/README.md)
+source = lab/games/NFSU/game_info/data
+exclude = US_PATCH_4.exe
+exclude = eauninstall.exe
+overlay = games/nfsu/overlay
+run = games/nfsu/prepare.sh
+; the logo of its CD's autorun window
+cover = lab/games/NFSU/game_info/data/AutoRun/autorun.bmp
+cover_crop = center

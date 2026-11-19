@@ -127,7 +127,7 @@
 <td><code>chocolate-doom/</code></td>
 </tr>
 <tr>
-<td>HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT</td>
+<td>HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT, Fallout 1–2 (FE), Shade: Wrath of Angels, NFS Underground</td>
 <td>A</td>
 <td>Wine 11.0 WoW64 + Box64</td>
 <td><code>&lt;id&gt;/</code> с <code>wine.ini</code></td>
@@ -177,7 +177,7 @@
 <p>Wine здесь — <strong>WoW64</strong>: Unix-часть и 64-битные DLL native aarch64, 32-битные
 DLL — i386 (их собирает <code>llvm-mingw</code>), x86-код игры исполняет <code>wowbox64.dll</code>
 (Box64). Direct3D идёт через WineD3D → OpenGL → Mesa panfrost → GPU Mali-G52.
-Этот стек — 25 патчей Wine, 3 wowbox64 и 5 Mesa; самые важные для
+Этот стек — 26 патчей Wine, 4 wowbox64 и 5 Mesa; самые важные для
 производительности:</p>
 <table>
 <thead>
@@ -218,8 +218,21 @@ DLL — i386 (их собирает <code>llvm-mingw</code>), x86-код игр�
 <td>движения вместо позиций</td>
 <td>игры с DirectInput (Prince of Persia)</td>
 </tr>
+<tr>
+<td>Wine 0026 геймпад (<code>stick = pad</code>, <code>pad_a</code>…)</td>
+<td>HID-геймпад как у Xbox 360 для DirectInput/XInput, состояние от bare_app_wine</td>
+<td>аналоговый руль в NFS Underground</td>
+</tr>
+<tr>
+<td>wowbox64 0004</td>
+<td>селектор FS, загруженный заново, — снова TEB</td>
+<td>рантайм Watcom (Fallout) перезагружает FS и падал на <code>fs:[0x18]</code></td>
+</tr>
 </tbody>
 </table>
+<p>Самомодифицирующийся код (декодер роликов MVE в Fallout пишет байты своих
+инструкций и сразу туда прыгает) Box64 в больших блоках не замечает: таким играм
+<code>BOX64_DYNAREC_BIGBLOCK=0</code> вместо 3.</p>
 <p>Box64 ускоряют <code>BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1</code> в <code>env</code> — это
 общие для всех Wine-игр.</p>
 <h3 id="wineini">Ключи <code>wine.ini</code>, которые решают больше всего</h3>

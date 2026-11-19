@@ -1,0 +1,413 @@
+From c1843f57abd1a3cc7f89653f68b24577f5c91d74 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Thu, 19 Nov 2026 00:38:22 +0100
+Subject: [PATCH] winebus.sys: bare_app_wine's gamepad (WB_PAD_HELLO,
+ WB_INPUT_PAD) as an XInput-like HID pad.
+
+bare_app_wine (the SDK of the ODROID-GO Ultra) turns the console's buttons
+and sticks into a game's input. Where the game's wine.ini asks for a
+gamepad ("stick = pad", "a = pad_a"...) it sends the pad's state over the
+socket of winebare.drv. A bus of its own connects once more, says
+WB_PAD_HELLO and on the first state makes an Xbox 360-like HID gamepad
+(hid_device_add_gamepad(): six axes, the D-pad as a hat, the buttons in
+XInput's order), which DirectInput and XInput see; analog steering in
+Need for Speed: Underground. Without a pad in wine.ini the host never
+answers and no device is made.
+---
+ dlls/winebus.sys/Makefile.in    |   1 +
+ dlls/winebus.sys/bus_bare.c     | 284 ++++++++++++++++++++++++++++++++
+ dlls/winebus.sys/main.c         |  15 ++
+ dlls/winebus.sys/unix_private.h |   4 +
+ dlls/winebus.sys/unixlib.c      |   3 +
+ dlls/winebus.sys/unixlib.h      |   3 +
+ 6 files changed, 310 insertions(+)
+ create mode 100644 dlls/winebus.sys/bus_bare.c
+
+diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
+index db32fae..91e7781 100644
+--- a/dlls/winebus.sys/Makefile.in
++++ b/dlls/winebus.sys/Makefile.in
+@@ -7,6 +7,7 @@ UNIX_CFLAGS  = $(UDEV_CFLAGS) $(SDL2_CFLAGS)
+ EXTRADLLFLAGS = -Wl,--subsystem,native
+ 
+ SOURCES = \
++	bus_bare.c \
+ 	bus_iohid.c \
+ 	bus_sdl.c \
+ 	bus_udev.c \
+diff --git a/dlls/winebus.sys/bus_bare.c b/dlls/winebus.sys/bus_bare.c
+new file mode 100644
+index 0000000..67520d2
+--- /dev/null
++++ b/dlls/winebus.sys/bus_bare.c
+@@ -0,0 +1,284 @@
++/*
++ * The gamepad of bare_app_wine (the SDK of the ODROID-GO Ultra)
++ *
++ * bare_app_wine runs a Windows game on the console and turns its buttons
++ * and sticks into the game's input. Where the game's wine.ini asks for a
++ * gamepad ("stick = pad", "a = pad_a"...), it sends that pad's state over
++ * the same socket the graphics driver winebare.drv uses (WINEBARE_SOCKET):
++ * this bus connects once more, says WB_PAD_HELLO, and on the first state
++ * makes an Xbox 360-like HID gamepad of it (six axes, the D-pad as a hat,
++ * the buttons in XInput's order), which DirectInput and XInput then see.
++ * Without a pad in wine.ini the host never answers and no device is made.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winbase.h"
++#include "winternl.h"
++#include "ddk/wdm.h"
++#include "ddk/hidtypes.h"
++#include "hidusage.h"
++
++#include "wine/debug.h"
++#include "wine/hid.h"
++#include "wine/unixlib.h"
++
++#include "unix_private.h"
++
++/* bare_app's ports/wine/winebare_proto.h, copied next to winebare.drv by the SDK package */
++#include "../winebare.drv/winebare_proto.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(hid);
++
++struct bare_device
++{
++    struct unix_device unix_device;
++};
++
++static pthread_mutex_t bare_cs = PTHREAD_MUTEX_INITIALIZER;
++static struct list event_queue = LIST_INIT(event_queue);
++static struct bare_device *pad;     /* made on the first state */
++static BOOL pad_started;
++static int host_sock = -1;
++static int quit_pipe[2] = {-1, -1};
++
++static void bare_device_destroy(struct unix_device *iface)
++{
++}
++
++static NTSTATUS bare_device_start(struct unix_device *iface)
++{
++    pthread_mutex_lock(&bare_cs);
++    pad_started = TRUE;
++    pthread_mutex_unlock(&bare_cs);
++    return STATUS_SUCCESS;
++}
++
++static void bare_device_stop(struct unix_device *iface)
++{
++    pthread_mutex_lock(&bare_cs);
++    pad_started = FALSE;
++    pad = NULL;
++    pthread_mutex_unlock(&bare_cs);
++}
++
++static NTSTATUS bare_device_haptics_start(struct unix_device *iface, UINT duration_ms,
++                                          USHORT rumble_intensity, USHORT buzz_intensity,
++                                          USHORT left_intensity, USHORT right_intensity)
++{
++    return STATUS_SUCCESS;  /* the console does not rumble */
++}
++
++static NTSTATUS bare_device_haptics_stop(struct unix_device *iface)
++{
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS bare_device_physical_device_control(struct unix_device *iface, USAGE control)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS bare_device_physical_device_set_gain(struct unix_device *iface, BYTE percent)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS bare_device_physical_effect_control(struct unix_device *iface, BYTE index,
++                                                    USAGE control, BYTE iterations)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS bare_device_physical_effect_update(struct unix_device *iface, BYTE index,
++                                                   struct effect_params *params)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static const struct hid_device_vtbl bare_device_vtbl =
++{
++    bare_device_destroy,
++    bare_device_start,
++    bare_device_stop,
++    bare_device_haptics_start,
++    bare_device_haptics_stop,
++    bare_device_physical_device_control,
++    bare_device_physical_device_set_gain,
++    bare_device_physical_effect_control,
++    bare_device_physical_effect_update,
++};
++
++/* the host's state into the report: hid_device_add_gamepad()'s layout */
++static void set_state(struct unix_device *iface, const struct wb_msg *m)
++{
++    unsigned int i;
++
++    /* left and right sticks; up is + in the XUSB / GIP protocol, as for
++     * SDL's controllers (bus_sdl.c) */
++    hid_device_set_abs_axis(iface, 0, m->pad.axis[WB_PAD_LX]);
++    hid_device_set_abs_axis(iface, 1, -m->pad.axis[WB_PAD_LY] - 1);
++    hid_device_set_abs_axis(iface, 2, m->pad.axis[WB_PAD_RX]);
++    hid_device_set_abs_axis(iface, 3, -m->pad.axis[WB_PAD_RY] - 1);
++    hid_device_set_abs_axis(iface, 4, m->pad.axis[WB_PAD_LT]);
++    hid_device_set_abs_axis(iface, 5, m->pad.axis[WB_PAD_RT]);
++    /* the hat from the D-pad */
++    hid_device_set_hatswitch_x(iface, 0, m->pad.hat_x);
++    hid_device_set_hatswitch_y(iface, 0, m->pad.hat_y);
++    for (i = 0; i < WB_PAD_BUTTONS; i++)
++        hid_device_set_button(iface, i, (m->pad.buttons >> i) & 1);
++}
++
++static void make_pad(const struct wb_msg *m)
++{
++    const USAGE_AND_PAGE device_usage = {.UsagePage = HID_USAGE_PAGE_GENERIC, .Usage = HID_USAGE_GENERIC_GAMEPAD};
++    struct device_desc desc =
++    {
++        .input = -1,
++        /* an Xbox 360 pad's ids: games that know it lay out its buttons */
++        .vid = 0x045e,
++        .pid = 0x028e,
++        .version = 0x0114,
++        .is_gamepad = TRUE,
++        .manufacturer = {'b','a','r','e','_','a','p','p',0},
++        .product = {'G','O',' ','U','l','t','r','a',' ','g','a','m','e','p','a','d',0},
++        .serialnumber = {'0','0','0','0',0},
++    };
++    struct bare_device *impl;
++
++    if (!(impl = hid_device_create(&bare_device_vtbl, sizeof(struct bare_device)))) return;
++    if (!hid_device_begin_report_descriptor(&impl->unix_device, &device_usage) ||
++        !hid_device_add_gamepad(&impl->unix_device) ||
++        !hid_device_end_report_descriptor(&impl->unix_device))
++    {
++        ERR("cannot describe the gamepad\n");
++        impl->unix_device.vtbl->destroy(&impl->unix_device);
++        return;
++    }
++    set_state(&impl->unix_device, m);
++    pad = impl;
++    TRACE("gamepad %s\n", debugstr_device_desc(&desc));
++    bus_event_queue_device_created(&event_queue, &impl->unix_device, &desc);
++}
++
++static void on_state(const struct wb_msg *m)
++{
++    struct unix_device *iface;
++    struct hid_device_state *state;
++
++    pthread_mutex_lock(&bare_cs);
++    if (!pad) make_pad(m);
++    else if (pad_started)
++    {
++        iface = &pad->unix_device;
++        state = &iface->hid_device_state;
++        set_state(iface, m);
++        bus_event_queue_input_report(&event_queue, iface, state->report_buf, state->report_len);
++    }
++    pthread_mutex_unlock(&bare_cs);
++}
++
++NTSTATUS bare_bus_init(void *args)
++{
++    const char *path = getenv(WINEBARE_SOCKET_ENV);
++    struct sockaddr_un addr = {.sun_family = AF_UNIX};
++    struct wb_msg m = {.type = WB_PAD_HELLO};
++
++    if (!path || strlen(path) >= sizeof(addr.sun_path)) return STATUS_NOT_SUPPORTED;
++    strcpy(addr.sun_path, path);
++    if ((host_sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0)) < 0) return STATUS_UNSUCCESSFUL;
++    if (connect(host_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0 || pipe(quit_pipe) < 0)
++    {
++        WARN("cannot connect to bare_app_wine at %s: %s\n", path, strerror(errno));
++        close(host_sock);
++        host_sock = -1;
++        return STATUS_UNSUCCESSFUL;
++    }
++    m.hello.pid = getpid();
++    m.hello.version = WB_PROTO_VERSION;
++    if (send(host_sock, &m, sizeof(m), MSG_NOSIGNAL) != sizeof(m))
++        WARN("cannot greet bare_app_wine: %s\n", strerror(errno));
++    return STATUS_SUCCESS;
++}
++
++NTSTATUS bare_bus_wait(void *args)
++{
++    struct bus_event *result = args;
++    struct pollfd fds[2];
++    struct wb_msg m;
++    ssize_t n;
++
++    /* cleanup previously returned event */
++    bus_event_cleanup(result);
++
++    for (;;)
++    {
++        if (bus_event_queue_pop(&event_queue, result)) return STATUS_PENDING;
++
++        fds[0].fd = host_sock;
++        fds[0].events = POLLIN;
++        fds[1].fd = quit_pipe[0];
++        fds[1].events = POLLIN;
++        if (poll(fds, 2, -1) < 0)
++        {
++            if (errno == EINTR) continue;
++            break;
++        }
++        if (fds[1].revents) break;
++        if (!fds[0].revents) continue;
++        n = recv(host_sock, &m, sizeof(m), 0);
++        if (n <= 0)
++        {
++            if (n < 0 && errno == EINTR) continue;
++            break;  /* bare_app_wine has gone: Wine follows */
++        }
++        if (n == sizeof(m) && m.type == WB_INPUT_PAD) on_state(&m);
++    }
++
++    TRACE("bare_app_wine's bus exiting\n");
++    bus_event_queue_destroy(&event_queue);
++    close(host_sock);
++    host_sock = -1;
++    return STATUS_SUCCESS;
++}
++
++NTSTATUS bare_bus_stop(void *args)
++{
++    char c = 0;
++
++    if (quit_pipe[1] >= 0 && write(quit_pipe[1], &c, 1) != 1)
++        WARN("cannot stop the bus: %s\n", strerror(errno));
++    return STATUS_SUCCESS;
++}
+diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
+index 4e2227b..149658a 100644
+--- a/dlls/winebus.sys/main.c
++++ b/dlls/winebus.sys/main.c
+@@ -1272,6 +1272,19 @@ static NTSTATUS iohid_driver_init(void)
+     return bus_main_thread_start(&bus);
+ }
+ 
++/* bare_app_wine's gamepad (bus_bare.c): there when Wine runs under it */
++static NTSTATUS bare_driver_init(void)
++{
++    struct bus_main_params bus =
++    {
++        .name = L"bare_app",
++        .init_args = &options,
++        .init_code = bare_init,
++        .wait_code = bare_wait,
++    };
++    return bus_main_thread_start(&bus);
++}
++
+ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+ {
+     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation(irp);
+@@ -1291,6 +1304,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+         if (!sdl_driver_init()) options.disable_input = TRUE;
+         udev_driver_init();
+         iohid_driver_init();
++        bare_driver_init();
+ 
+         irp->IoStatus.Status = STATUS_SUCCESS;
+         break;
+@@ -1301,6 +1315,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+         winebus_call(sdl_stop, NULL);
+         winebus_call(udev_stop, NULL);
+         winebus_call(iohid_stop, NULL);
++        winebus_call(bare_stop, NULL);
+ 
+         WaitForMultipleObjects(bus_count, bus_thread, TRUE, INFINITE);
+         while (bus_count--) CloseHandle(bus_thread[bus_count]);
+diff --git a/dlls/winebus.sys/unix_private.h b/dlls/winebus.sys/unix_private.h
+index 11328ca..89715d4 100644
+--- a/dlls/winebus.sys/unix_private.h
++++ b/dlls/winebus.sys/unix_private.h
+@@ -234,6 +234,10 @@ extern NTSTATUS iohid_bus_init(void *);
+ extern NTSTATUS iohid_bus_wait(void *);
+ extern NTSTATUS iohid_bus_stop(void *);
+ 
++extern NTSTATUS bare_bus_init(void *);
++extern NTSTATUS bare_bus_wait(void *);
++extern NTSTATUS bare_bus_stop(void *);
++
+ extern void bus_event_cleanup(struct bus_event *event);
+ extern void bus_event_queue_destroy(struct list *queue);
+ extern BOOL bus_event_queue_device_removed(struct list *queue, struct unix_device *device);
+diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
+index bd4351f..5f2d0d3 100644
+--- a/dlls/winebus.sys/unixlib.c
++++ b/dlls/winebus.sys/unixlib.c
+@@ -311,6 +311,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     iohid_bus_init,
+     iohid_bus_wait,
+     iohid_bus_stop,
++    bare_bus_init,
++    bare_bus_wait,
++    bare_bus_stop,
+     mouse_device_create,
+     keyboard_device_create,
+     unix_device_remove,
+diff --git a/dlls/winebus.sys/unixlib.h b/dlls/winebus.sys/unixlib.h
+index d2b17f4..c2a6b9e 100644
+--- a/dlls/winebus.sys/unixlib.h
++++ b/dlls/winebus.sys/unixlib.h
+@@ -145,6 +145,9 @@ enum unix_funcs
+     iohid_init,
+     iohid_wait,
+     iohid_stop,
++    bare_init,
++    bare_wait,
++    bare_stop,
+     mouse_create,
+     keyboard_create,
+     device_remove,
+-- 
+2.53.0
+

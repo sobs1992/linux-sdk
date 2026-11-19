@@ -1,0 +1,68 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] wowbox64: FS loaded again is still the TEB
+
+GetSegmentBase() of the WoW64 build returned NULL for every selector, so
+x86 code that loads FS again (mov fs, pop fs) with the selector it holds
+had its FS base set to 0, and the next fs:[0x18] (the TEB) read address
+0x18. Watcom's runtime does that: Fallout (Fixed Edition's Falloutw.exe)
+died at its start in kernelbase. WoW64 gives every 32-bit thread one FS
+selector, its 32-bit TEB: keep the selector of the thread's context and
+give that one the TEB; the other selectors of the GDT (0x23 code, 0x2b
+data, which the same runtime loads into GS) are flat, base 0.
+
+---
+--- a/src/os/os_wine.c
++++ b/src/os/os_wine.c
+@@ -130,9 +130,24 @@
+     return NULL;
+ }
+ 
++/* The FS selector of the 32-bit threads (set by wowbox64.c from the
++ * thread's context): WoW64 gives every thread the same one, its 32-bit
++ * TEB. */
++uint16_t box64_wow64_fs_sel;
++
+ void* GetSegmentBase(void* emu, uint32_t desc)
+ {
+-    printf_log(LOG_NONE, "GetSegmentBase does not apply to Wine dlls\n");
++    static int told;
++
++    /* x86 code may load FS again with the selector it holds (Watcom's
++     * runtime pushes and pops FS: Fallout); it is still the TEB */
++    if (desc && (desc | 3) == (box64_wow64_fs_sel | 3))
++        return (void*)calculate_fs();
++    /* the other selectors of the GDT (0x23 code, 0x2b data, which Watcom's
++     * runtime also loads into GS) are flat: base 0. An LDT one is not
++     * known here. */
++    if ((desc & 4) && !told++)
++        printf_log(LOG_NONE, "GetSegmentBase: LDT selector 0x%x taken as base 0\n", desc);
+     return NULL;
+ }
+ 
+--- a/wine/wow64/wowbox64.c
++++ b/wine/wow64/wowbox64.c
+@@ -28,6 +28,8 @@
+ #include "hostext.h"
+ #include "sysinfo.h"
+ 
++extern uint16_t box64_wow64_fs_sel;
++
+ uintptr_t box64_pagesize = 4096;
+ 
+ uint32_t default_gs = 0x2b;
+@@ -394,6 +396,7 @@
+     R_DS = ctx->SegDs & 0xffff;
+     R_ES = ctx->SegEs & 0xffff;
+     R_FS = ctx->SegFs & 0xffff;
++    box64_wow64_fs_sel = R_FS;
+     R_GS = ctx->SegGs & 0xffff;
+     R_SS = ctx->SegSs & 0xffff;
+     emu->eflags.x64 = ctx->EFlags;
+@@ -498,6 +501,7 @@
+             R_ECX = ctx->Ecx;
+             R_EDX = ctx->Edx;
+             R_FS = ctx->SegFs & 0xffff;
++            box64_wow64_fs_sel = R_FS;
+             emu->segs_offs[_FS] = calculate_fs();
+             emu->eflags.x64 = ctx->EFlags;
+         }

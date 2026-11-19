@@ -23,7 +23,7 @@
 | RTCW | B | iortcw, `iortcw` | `rtcw/main/*.pk3` | `rtcw/` |
 | Unreal Tournament 2004 | B | своя Linux-сборка x86_64 под Box64, `ut2004` (+ `box64`, `sdl12-compat`) | `ut2004/` (Linux-установщик DVD) | `ut2004/.ut2004` |
 | Chocolate Doom | B | пакет Buildroot (в ogu выключен) | — | `chocolate-doom/` |
-| HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT | A | Wine 11.0 WoW64 + Box64 | `<id>/` с `wine.ini` | `wine/prefix`, `wine/games/<id>` |
+| HotA, Pirates!, Daemonica, Tales of Monkey Island ×5, Knights of the Temple, Neighbours from Hell 1–2, Prince of Persia SoT, Fallout 1–2 (FE), Shade: Wrath of Angels, NFS Underground | A | Wine 11.0 WoW64 + Box64 | `<id>/` с `wine.ini` | `wine/prefix`, `wine/games/<id>` |
 
 ## Где что лежит на плате
 
@@ -73,7 +73,7 @@
 Wine здесь — **WoW64**: Unix-часть и 64-битные DLL native aarch64, 32-битные
 DLL — i386 (их собирает `llvm-mingw`), x86-код игры исполняет `wowbox64.dll`
 (Box64). Direct3D идёт через WineD3D → OpenGL → Mesa panfrost → GPU Mali-G52.
-Этот стек — 25 патчей Wine, 3 wowbox64 и 5 Mesa; самые важные для
+Этот стек — 26 патчей Wine, 4 wowbox64 и 5 Mesa; самые важные для
 производительности:
 
 | Патч | Что | Зачем |
@@ -84,6 +84,12 @@ DLL — i386 (их собирает `llvm-mingw`), x86-код игры испо�
 | Wine 0013/0023/0024 | файлы на ro-ФС открываются read-only; поиск имён через `stat()` на FAT/exFAT | игры открывают `*.lod` на запись; каталоги на карте большие |
 | Wine 0008 `WINE_FONT_SCALE`, 0007 Uniscribe | крупнее шрифт, кэш раскладки текста | текст Daemonica на маленьком экране |
 | Wine 0025 `mouse = relative` | движения вместо позиций | игры с DirectInput (Prince of Persia) |
+| Wine 0026 геймпад (`stick = pad`, `pad_a`…) | HID-геймпад как у Xbox 360 для DirectInput/XInput, состояние от bare_app_wine | аналоговый руль в NFS Underground |
+| wowbox64 0004 | селектор FS, загруженный заново, — снова TEB | рантайм Watcom (Fallout) перезагружает FS и падал на `fs:[0x18]` |
+
+Самомодифицирующийся код (декодер роликов MVE в Fallout пишет байты своих
+инструкций и сразу туда прыгает) Box64 в больших блоках не замечает: таким играм
+`BOX64_DYNAREC_BIGBLOCK=0` вместо 3.
 
 Box64 ускоряют `BOX64_DYNAREC_BIGBLOCK=3 BOX64_DYNAREC_CALLRET=1` в `env` — это
 общие для всех Wine-игр.
