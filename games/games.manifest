@@ -342,3 +342,45 @@ run = games/nfsu/prepare.sh
 ; the logo of its CD's autorun window
 cover = lab/games/NFSU/game_info/data/AutoRun/autorun.bmp
 cover_crop = center
+
+[ssam1]
+; Serious Sam: The First Encounter, the Russian edition (1C) patched to
+; 1.05 (the game's own .gro files carry the Russian text and voices), by
+; Serious Engine 1.10 (bare-app.SERIOUSSAM=y). Without the Windows
+; programs (Bin), the editors' help, the uninstaller, the mods (their
+; libraries are Windows ones), the PC's saved games and players' controls
+; (the engine keeps those in the game's data directory). prepare.sh: the
+; gamepad's controls and the aim assist option (games/serioussam)
+source = lab/games/Serious Sam - The First Encounter
+exclude = Bin
+exclude = Backup
+exclude = Uninstall
+exclude = Help
+exclude = Mods
+exclude = SaveGame
+exclude = Controls/Controls?.ctl
+exclude = *.log
+overlay = games/ssam1/overlay
+run = games/serioussam/prepare.sh
+; cover: the game's splash screen as the engine draws it on the GO Ultra
+cover = lab/games/Serious Sam - The First Encounter/cover.png
+cover_crop = center
+
+[ssam2]
+; Serious Sam: The Second Encounter, the Russian edition patched to 1.07,
+; as [ssam1] (the mod Warped left out with the other mods; Steam's shader
+; cache too)
+source = lab/games/Serious Sam - The Second Encounter
+exclude = Bin
+exclude = Backup
+exclude = Uninstall
+exclude = Help
+exclude = Mods
+exclude = SaveGame
+exclude = steam_shader_cache
+exclude = Controls/Controls?.ctl
+exclude = *.log
+overlay = games/ssam2/overlay
+run = games/serioussam/prepare.sh
+cover = lab/games/Serious Sam - The Second Encounter/cover.png
+cover_crop = center

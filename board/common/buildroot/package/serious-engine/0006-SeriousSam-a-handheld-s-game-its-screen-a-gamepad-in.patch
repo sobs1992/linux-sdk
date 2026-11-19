@@ -1,0 +1,369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 00:10:00 +0100
+Subject: [PATCH] SeriousSam: a handheld's game: its screen, a gamepad in
+ the menus, quit on SIGTERM
+
+- SE1_SCREEN_WIDTH and SE1_SCREEN_HEIGHT: the game always at that size,
+  full screen, whatever a former start remembered.
+- A gamepad (an SDL game controller's numbering) drives the menus,
+  NETRICSA and the demos as the keyboard does: the D-pad or the left
+  stick the arrows, A Enter, B Escape. Joystick events stay enabled for
+  that; in the game the buttons are polled controls as before. WM_NULL
+  is SDL_FIRSTEVENT here, as is WM_CLOSE: other joystick events are left
+  as they are, not made WM_NULL (which quit).
+- SIGTERM and SIGINT quit as the menu's Quit does (settings, controls
+  and players saved), and a normal end is exit status 0.
+---
+ SamTFE/Sources/Engine/Base/SDL/SDLEvents.cpp | 10 +++
+ SamTFE/Sources/Engine/Base/SDL/SDLInput.cpp  |  2 +-
+ SamTFE/Sources/SeriousSam/SeriousSam.cpp     | 85 +++++++++++++++++++-
+ SamTSE/Sources/Engine/Base/SDL/SDLEvents.cpp | 10 +++
+ SamTSE/Sources/Engine/Base/SDL/SDLInput.cpp  |  2 +-
+ SamTSE/Sources/SeriousSam/SeriousSam.cpp     | 85 +++++++++++++++++++-
+ 6 files changed, 190 insertions(+), 4 deletions(-)
+
+diff --git a/SamTFE/Sources/Engine/Base/SDL/SDLEvents.cpp b/SamTFE/Sources/Engine/Base/SDL/SDLEvents.cpp
+index d9bd2bb..0cc8536 100644
+--- a/SamTFE/Sources/Engine/Base/SDL/SDLEvents.cpp
++++ b/SamTFE/Sources/Engine/Base/SDL/SDLEvents.cpp
+@@ -73,6 +73,16 @@ BOOL PeekMessage(MSG *msg, void *hwnd, UINT wMsgFilterMin,
+                 msg->wParam = sdlevent.key.keysym.sym;
+                 return TRUE;
+ 
++            // a gamepad's buttons and sticks, for the menus (SeriousSam.cpp)
++            case SDL_JOYBUTTONDOWN:
++                msg->wParam = sdlevent.jbutton.button;
++                return TRUE;
++
++            case SDL_JOYAXISMOTION:
++                msg->wParam = sdlevent.jaxis.axis;
++                msg->lParam = sdlevent.jaxis.value;
++                return TRUE;
++
+             case SDL_TEXTINPUT:
+                 msg->wParam = sdlevent.text.text[0];  // !!! FIXME: dropping characters!
+                 return TRUE;
+diff --git a/SamTFE/Sources/Engine/Base/SDL/SDLInput.cpp b/SamTFE/Sources/Engine/Base/SDL/SDLInput.cpp
+index 703786f..625cd50 100644
+--- a/SamTFE/Sources/Engine/Base/SDL/SDLInput.cpp
++++ b/SamTFE/Sources/Engine/Base/SDL/SDLInput.cpp
+@@ -683,7 +683,7 @@ void CInput::DisableInput( void)
+   // skip if allready disabled
+   if( !inp_bInputEnabled) return;
+ 
+-  SDL_JoystickEventState(SDL_DISABLE);
++  // joystick events stay on: a gamepad drives the menus (SeriousSam.cpp)
+ 
+   // show mouse on screen
+   SDL_SetRelativeMouseMode(SDL_FALSE);
+diff --git a/SamTFE/Sources/SeriousSam/SeriousSam.cpp b/SamTFE/Sources/SeriousSam/SeriousSam.cpp
+index 372f769..4995a49 100644
+--- a/SamTFE/Sources/SeriousSam/SeriousSam.cpp
++++ b/SamTFE/Sources/SeriousSam/SeriousSam.cpp
+@@ -27,6 +27,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
+     #include <mntent.h>
+   #endif
+ #include <unistd.h>
++#include <signal.h>
+ #endif
+ 
+ #include <fcntl.h>
+@@ -802,6 +803,21 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
+     _pShell->Execute("include \"Scripts\\Addons\\SFX-AutoAdjust.ini\"");
+   }
+ 
++#ifdef PLATFORM_UNIX
++  // A device with one screen (SE1_SCREEN_WIDTH, SE1_SCREEN_HEIGHT): the game
++  // always at its size, full screen, whatever a former start remembered
++  {
++    const char *strW = getenv("SE1_SCREEN_WIDTH");
++    const char *strH = getenv("SE1_SCREEN_HEIGHT");
++    if (strW != NULL && strH != NULL && atoi(strW) > 0 && atoi(strH) > 0) {
++      sam_iScreenSizeI = atoi(strW);
++      sam_iScreenSizeJ = atoi(strH);
++      sam_bFullScreenActive = TRUE;
++      sam_bBorderLessActive = FALSE;
++    }
++  }
++#endif
++
+   // execute script given on command line
+   if (cmd_strScript!="") {
+     CPrintF("Command line script: '%s'\n", (const char *) cmd_strScript);
+@@ -1185,6 +1201,15 @@ static void SetDPIAwareness(void) {
+ };
+ #endif // PLATFORM_WIN32
+ 
++#ifdef PLATFORM_UNIX
++static volatile sig_atomic_t _bQuitSignal = 0;
++static void OnQuitSignal(int iSignal)
++{
++  (void)iSignal;
++  _bQuitSignal = 1;
++}
++#endif
++
+ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+ {
+   (void)hPrevInstance;
+@@ -1195,6 +1220,13 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+ 
+   if( !Init( hInstance, nCmdShow, lpCmdLine )) return FALSE;
+ 
++#ifdef PLATFORM_UNIX
++  // SIGTERM and SIGINT (a launcher ending the game) quit as the menu's Quit
++  // does: the settings, the controls and the players are saved
++  signal(SIGTERM, OnQuitSignal);
++  signal(SIGINT, OnQuitSignal);
++#endif
++
+   // initialy, application is running and active, console and menu are off
+   _bRunning    = TRUE;
+   _bQuitScreen = TRUE;
+@@ -1205,6 +1237,13 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+   // while it is still running
+   while( _bRunning && _fnmModToLoad=="")
+   {
++#ifdef PLATFORM_UNIX
++    if (_bQuitSignal) {
++      _bRunning = FALSE;
++      _bQuitScreen = FALSE;
++      break;
++    }
++#endif
+     // while there are any messages in the message queue
+     MSG msg;
+     while( PeekMessage( &msg, NULL, 0, 0, PM_REMOVE)) {
+@@ -1277,6 +1316,49 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+       STUBBED("SDL2 can handle these events");
+ #endif
+ 
++#ifdef PLATFORM_UNIX
++      // A gamepad (an SDL game controller's button numbers) drives the menus,
++      // NETRICSA and the demos as the keyboard does: the D-pad or the left
++      // stick the arrows, A Enter, B Escape. In the game its buttons are
++      // controls of their own (polled), so only while one of those is up.
++      if (msg.message==SDL_JOYBUTTONDOWN || msg.message==SDL_JOYAXISMOTION) {
++        static INDEX aiStick[2] = { 0, 0 };  // the left stick's directions now
++        INDEX iVK = 0;
++        if (msg.message==SDL_JOYBUTTONDOWN) {
++          switch (msg.wParam) {
++          case SDL_CONTROLLER_BUTTON_A:          iVK = VK_RETURN; break;
++          case SDL_CONTROLLER_BUTTON_B:          iVK = VK_ESCAPE; break;
++          case SDL_CONTROLLER_BUTTON_DPAD_UP:    iVK = VK_UP;     break;
++          case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  iVK = VK_DOWN;   break;
++          case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  iVK = VK_LEFT;   break;
++          case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: iVK = VK_RIGHT;  break;
++          }
++        } else if (msg.wParam==SDL_CONTROLLER_AXIS_LEFTX || msg.wParam==SDL_CONTROLLER_AXIS_LEFTY) {
++          // a press when the stick leaves the middle, with hysteresis
++          const INDEX iAxis = msg.wParam==SDL_CONTROLLER_AXIS_LEFTX ? 0 : 1;
++          const SLONG slValue = (SLONG)msg.lParam;
++          INDEX iDir = aiStick[iAxis];
++          if (slValue > 20000) iDir = 1;
++          else if (slValue < -20000) iDir = -1;
++          else if (slValue > -10000 && slValue < 10000) iDir = 0;
++          if (iDir != aiStick[iAxis] && iDir != 0) {
++            iVK = iAxis==0 ? (iDir>0 ? VK_RIGHT : VK_LEFT) : (iDir>0 ? VK_DOWN : VK_UP);
++          }
++          aiStick[iAxis] = iDir;
++        }
++        const BOOL bKeyboardUp = bMenuActive
++          || _pGame->gm_csComputerState==CS_ON || _pGame->gm_csComputerState==CS_TURNINGON
++          || _gmRunningGameMode==GM_DEMO || _gmRunningGameMode==GM_INTRO;
++        if (iVK != 0 && bKeyboardUp && _pGame->gm_csConsoleState==CS_OFF) {
++          msg.message = WM_KEYDOWN;
++          msg.wParam = iVK;
++          msg.lParam = 0;
++        }
++        // else left as it is: nothing below takes it (WM_NULL would not do:
++        // here it is WM_CLOSE too, which quits)
++      }
++#endif
++
+       // toggle full-screen on alt-enter
+       if( msg.message==WM_SYSKEYDOWN && msg.wParam==VK_RETURN && !IsIconic(_hwndMain)) {
+         // !!! FIXME: SDL doesn't need to rebuild the GL context here to toggle fullscreen.
+@@ -1787,7 +1869,8 @@ int main(int argc, char **argv)
+     cmdLine += "\"";
+   }
+ 
+-  return(CommonMainline(NULL, NULL, (char *) ((const char *) cmdLine), 0));
++  // SubMain's TRUE (it ran) is a success for the shell: exit status 0
++  return(CommonMainline(NULL, NULL, (char *) ((const char *) cmdLine), 0) ? 0 : 1);
+ }
+ 
+ #endif
+diff --git a/SamTSE/Sources/Engine/Base/SDL/SDLEvents.cpp b/SamTSE/Sources/Engine/Base/SDL/SDLEvents.cpp
+index d9bd2bb..0cc8536 100644
+--- a/SamTSE/Sources/Engine/Base/SDL/SDLEvents.cpp
++++ b/SamTSE/Sources/Engine/Base/SDL/SDLEvents.cpp
+@@ -73,6 +73,16 @@ BOOL PeekMessage(MSG *msg, void *hwnd, UINT wMsgFilterMin,
+                 msg->wParam = sdlevent.key.keysym.sym;
+                 return TRUE;
+ 
++            // a gamepad's buttons and sticks, for the menus (SeriousSam.cpp)
++            case SDL_JOYBUTTONDOWN:
++                msg->wParam = sdlevent.jbutton.button;
++                return TRUE;
++
++            case SDL_JOYAXISMOTION:
++                msg->wParam = sdlevent.jaxis.axis;
++                msg->lParam = sdlevent.jaxis.value;
++                return TRUE;
++
+             case SDL_TEXTINPUT:
+                 msg->wParam = sdlevent.text.text[0];  // !!! FIXME: dropping characters!
+                 return TRUE;
+diff --git a/SamTSE/Sources/Engine/Base/SDL/SDLInput.cpp b/SamTSE/Sources/Engine/Base/SDL/SDLInput.cpp
+index 703786f..625cd50 100644
+--- a/SamTSE/Sources/Engine/Base/SDL/SDLInput.cpp
++++ b/SamTSE/Sources/Engine/Base/SDL/SDLInput.cpp
+@@ -683,7 +683,7 @@ void CInput::DisableInput( void)
+   // skip if allready disabled
+   if( !inp_bInputEnabled) return;
+ 
+-  SDL_JoystickEventState(SDL_DISABLE);
++  // joystick events stay on: a gamepad drives the menus (SeriousSam.cpp)
+ 
+   // show mouse on screen
+   SDL_SetRelativeMouseMode(SDL_FALSE);
+diff --git a/SamTSE/Sources/SeriousSam/SeriousSam.cpp b/SamTSE/Sources/SeriousSam/SeriousSam.cpp
+index 372f769..4995a49 100644
+--- a/SamTSE/Sources/SeriousSam/SeriousSam.cpp
++++ b/SamTSE/Sources/SeriousSam/SeriousSam.cpp
+@@ -27,6 +27,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
+     #include <mntent.h>
+   #endif
+ #include <unistd.h>
++#include <signal.h>
+ #endif
+ 
+ #include <fcntl.h>
+@@ -802,6 +803,21 @@ BOOL Init( HINSTANCE hInstance, int nCmdShow, CTString strCmdLine)
+     _pShell->Execute("include \"Scripts\\Addons\\SFX-AutoAdjust.ini\"");
+   }
+ 
++#ifdef PLATFORM_UNIX
++  // A device with one screen (SE1_SCREEN_WIDTH, SE1_SCREEN_HEIGHT): the game
++  // always at its size, full screen, whatever a former start remembered
++  {
++    const char *strW = getenv("SE1_SCREEN_WIDTH");
++    const char *strH = getenv("SE1_SCREEN_HEIGHT");
++    if (strW != NULL && strH != NULL && atoi(strW) > 0 && atoi(strH) > 0) {
++      sam_iScreenSizeI = atoi(strW);
++      sam_iScreenSizeJ = atoi(strH);
++      sam_bFullScreenActive = TRUE;
++      sam_bBorderLessActive = FALSE;
++    }
++  }
++#endif
++
+   // execute script given on command line
+   if (cmd_strScript!="") {
+     CPrintF("Command line script: '%s'\n", (const char *) cmd_strScript);
+@@ -1185,6 +1201,15 @@ static void SetDPIAwareness(void) {
+ };
+ #endif // PLATFORM_WIN32
+ 
++#ifdef PLATFORM_UNIX
++static volatile sig_atomic_t _bQuitSignal = 0;
++static void OnQuitSignal(int iSignal)
++{
++  (void)iSignal;
++  _bQuitSignal = 1;
++}
++#endif
++
+ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+ {
+   (void)hPrevInstance;
+@@ -1195,6 +1220,13 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+ 
+   if( !Init( hInstance, nCmdShow, lpCmdLine )) return FALSE;
+ 
++#ifdef PLATFORM_UNIX
++  // SIGTERM and SIGINT (a launcher ending the game) quit as the menu's Quit
++  // does: the settings, the controls and the players are saved
++  signal(SIGTERM, OnQuitSignal);
++  signal(SIGINT, OnQuitSignal);
++#endif
++
+   // initialy, application is running and active, console and menu are off
+   _bRunning    = TRUE;
+   _bQuitScreen = TRUE;
+@@ -1205,6 +1237,13 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+   // while it is still running
+   while( _bRunning && _fnmModToLoad=="")
+   {
++#ifdef PLATFORM_UNIX
++    if (_bQuitSignal) {
++      _bRunning = FALSE;
++      _bQuitScreen = FALSE;
++      break;
++    }
++#endif
+     // while there are any messages in the message queue
+     MSG msg;
+     while( PeekMessage( &msg, NULL, 0, 0, PM_REMOVE)) {
+@@ -1277,6 +1316,49 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+       STUBBED("SDL2 can handle these events");
+ #endif
+ 
++#ifdef PLATFORM_UNIX
++      // A gamepad (an SDL game controller's button numbers) drives the menus,
++      // NETRICSA and the demos as the keyboard does: the D-pad or the left
++      // stick the arrows, A Enter, B Escape. In the game its buttons are
++      // controls of their own (polled), so only while one of those is up.
++      if (msg.message==SDL_JOYBUTTONDOWN || msg.message==SDL_JOYAXISMOTION) {
++        static INDEX aiStick[2] = { 0, 0 };  // the left stick's directions now
++        INDEX iVK = 0;
++        if (msg.message==SDL_JOYBUTTONDOWN) {
++          switch (msg.wParam) {
++          case SDL_CONTROLLER_BUTTON_A:          iVK = VK_RETURN; break;
++          case SDL_CONTROLLER_BUTTON_B:          iVK = VK_ESCAPE; break;
++          case SDL_CONTROLLER_BUTTON_DPAD_UP:    iVK = VK_UP;     break;
++          case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  iVK = VK_DOWN;   break;
++          case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  iVK = VK_LEFT;   break;
++          case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: iVK = VK_RIGHT;  break;
++          }
++        } else if (msg.wParam==SDL_CONTROLLER_AXIS_LEFTX || msg.wParam==SDL_CONTROLLER_AXIS_LEFTY) {
++          // a press when the stick leaves the middle, with hysteresis
++          const INDEX iAxis = msg.wParam==SDL_CONTROLLER_AXIS_LEFTX ? 0 : 1;
++          const SLONG slValue = (SLONG)msg.lParam;
++          INDEX iDir = aiStick[iAxis];
++          if (slValue > 20000) iDir = 1;
++          else if (slValue < -20000) iDir = -1;
++          else if (slValue > -10000 && slValue < 10000) iDir = 0;
++          if (iDir != aiStick[iAxis] && iDir != 0) {
++            iVK = iAxis==0 ? (iDir>0 ? VK_RIGHT : VK_LEFT) : (iDir>0 ? VK_DOWN : VK_UP);
++          }
++          aiStick[iAxis] = iDir;
++        }
++        const BOOL bKeyboardUp = bMenuActive
++          || _pGame->gm_csComputerState==CS_ON || _pGame->gm_csComputerState==CS_TURNINGON
++          || _gmRunningGameMode==GM_DEMO || _gmRunningGameMode==GM_INTRO;
++        if (iVK != 0 && bKeyboardUp && _pGame->gm_csConsoleState==CS_OFF) {
++          msg.message = WM_KEYDOWN;
++          msg.wParam = iVK;
++          msg.lParam = 0;
++        }
++        // else left as it is: nothing below takes it (WM_NULL would not do:
++        // here it is WM_CLOSE too, which quits)
++      }
++#endif
++
+       // toggle full-screen on alt-enter
+       if( msg.message==WM_SYSKEYDOWN && msg.wParam==VK_RETURN && !IsIconic(_hwndMain)) {
+         // !!! FIXME: SDL doesn't need to rebuild the GL context here to toggle fullscreen.
+@@ -1787,7 +1869,8 @@ int main(int argc, char **argv)
+     cmdLine += "\"";
+   }
+ 
+-  return(CommonMainline(NULL, NULL, (char *) ((const char *) cmdLine), 0));
++  // SubMain's TRUE (it ran) is a success for the shell: exit status 0
++  return(CommonMainline(NULL, NULL, (char *) ((const char *) cmdLine), 0) ? 0 : 1);
+ }
+ 
+ #endif

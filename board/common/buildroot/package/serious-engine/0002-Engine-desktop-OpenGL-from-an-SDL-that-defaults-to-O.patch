@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 00:10:00 +0100
+Subject: [PATCH] Engine: desktop OpenGL from an SDL that defaults to
+ OpenGL ES
+
+An SDL built for EGL with OpenGL ES only (Mesa without GLX) starts with
+an OpenGL ES 2 profile, which the fixed-function renderer cannot draw
+with. Ask for a desktop OpenGL compatibility context there.
+---
+ SamTFE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp | 14 ++++++++++++++
+ SamTSE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp | 14 ++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/SamTFE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp b/SamTFE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
+index fa75240..54af403 100644
+--- a/SamTFE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
++++ b/SamTFE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
+@@ -102,6 +102,20 @@ BOOL CGfxLibrary::SetupPixelFormat_OGL( HDC hdc, BOOL bReport/*=FALSE*/)
+   else if( gap_iStencilBits<7) gap_iStencilBits = 4;
+   else                         gap_iStencilBits = 8;
+ 
++  // An SDL built for EGL with OpenGL ES only (no desktop OpenGL of its own,
++  // as for Mesa without GLX) starts with an OpenGL ES 2 profile, which the
++  // fixed-function renderer cannot draw with: ask for desktop OpenGL there,
++  // Mesa gives its highest compatibility version
++  {
++    int iProfileMask = 0;
++    SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &iProfileMask);
++    if (iProfileMask == SDL_GL_CONTEXT_PROFILE_ES) {
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
++    }
++  }
++
+   SDL_GL_SetAttribute(SDL_GL_RED_SIZE, (dd != DD_16BIT) ? 8 : 5);
+   SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, (dd != DD_16BIT) ? 8 : 6);
+   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, (dd != DD_16BIT) ? 8 : 5);
+diff --git a/SamTSE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp b/SamTSE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
+index fa75240..54af403 100644
+--- a/SamTSE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
++++ b/SamTSE/Sources/Engine/Graphics/SDL/SDLOpenGL.cpp
+@@ -102,6 +102,20 @@ BOOL CGfxLibrary::SetupPixelFormat_OGL( HDC hdc, BOOL bReport/*=FALSE*/)
+   else if( gap_iStencilBits<7) gap_iStencilBits = 4;
+   else                         gap_iStencilBits = 8;
+ 
++  // An SDL built for EGL with OpenGL ES only (no desktop OpenGL of its own,
++  // as for Mesa without GLX) starts with an OpenGL ES 2 profile, which the
++  // fixed-function renderer cannot draw with: ask for desktop OpenGL there,
++  // Mesa gives its highest compatibility version
++  {
++    int iProfileMask = 0;
++    SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &iProfileMask);
++    if (iProfileMask == SDL_GL_CONTEXT_PROFILE_ES) {
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
++      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
++    }
++  }
++
+   SDL_GL_SetAttribute(SDL_GL_RED_SIZE, (dd != DD_16BIT) ? 8 : 5);
+   SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, (dd != DD_16BIT) ? 8 : 6);
+   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, (dd != DD_16BIT) ? 8 : 5);

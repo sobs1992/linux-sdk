@@ -1,0 +1,11 @@
+2
+
+\0\<
+Aim assist
+\0\>
+Помощь в прицеливании
+\0\<
+a gamepad's stick turns slower over an enemy and follows it while moving
+\0\>
+стик геймпада поворачивает медленнее на враге и ведет за ним при движении
+\0\$

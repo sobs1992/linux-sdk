@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 00:10:00 +0100
+Subject: [PATCH] Engine: aarch64 as 32-bit ARM where a float becomes an
+ int
+
+An infinite box (an entity with no size limit) became a grid range on
+x86, where converting an infinite or too big float gives INT_MIN; aarch64
+saturates instead, and FindEntitiesNearBox walked the whole 32000x32000
+grid: the game hung in the first level's physics. Take the 32-bit ARM
+code (infinity checked) for aarch64 in the collision grid and the
+terrain, and leave the lens flares' depth reads out as there (no depth
+read back from a GLES-class GPU).
+---
+ SamTFE/Sources/Engine/Graphics/DrawPort.cpp        | 2 +-
+ SamTFE/Sources/Engine/Terrain/TerrainMisc.cpp      | 2 +-
+ SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp | 2 +-
+ SamTSE/Sources/Engine/Graphics/DrawPort.cpp        | 2 +-
+ SamTSE/Sources/Engine/Terrain/TerrainMisc.cpp      | 2 +-
+ SamTSE/Sources/Engine/World/WorldCollisionGrid.cpp | 2 +-
+ 6 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/SamTFE/Sources/Engine/Graphics/DrawPort.cpp b/SamTFE/Sources/Engine/Graphics/DrawPort.cpp
+index 36de129..f998c87 100644
+--- a/SamTFE/Sources/Engine/Graphics/DrawPort.cpp
++++ b/SamTFE/Sources/Engine/Graphics/DrawPort.cpp
+@@ -1034,7 +1034,7 @@ BOOL CDrawPort::IsPointVisible( PIX pixI, PIX pixJ, FLOAT fOoK, INDEX iID, INDEX
+   // if the point is out or at the edge of drawport, it is not visible by default
+   if( pixI<1 || pixI>dp_Width-2 || pixJ<1 || pixJ>dp_Height-2) return FALSE;
+ 
+-  #if defined(__arm__) || PLATFORM_RISCV64
++  #if defined(__arm__) || defined(__aarch64__) || PLATFORM_RISCV64
+   #warning PLATFORM_NOT_X86 use GLES based GPU (Lens Flare not work)
+   // Assuming here that all ARM machine use GLES based GPU, were DEPTH reading is probably not available (or super slow)
+   return FALSE;
+diff --git a/SamTFE/Sources/Engine/Terrain/TerrainMisc.cpp b/SamTFE/Sources/Engine/Terrain/TerrainMisc.cpp
+index c87acb2..7659fc9 100644
+--- a/SamTFE/Sources/Engine/Terrain/TerrainMisc.cpp
++++ b/SamTFE/Sources/Engine/Terrain/TerrainMisc.cpp
+@@ -313,7 +313,7 @@ Rect ExtractPolygonsInBox(CTerrain *ptrTerrain, const FLOATaabbox3D &bboxExtract
+   Rect rc;
+   if(!bFixSize) {
+     // max vector of bbox in incremented for one, because first vertex is at 0,0,0 in world and in heightmap is at 1,1
+-#ifdef __arm__
++#if defined(__arm__) || defined(__aarch64__)
+ #if defined(PLATFORM_PANDORA) || defined(PLATFORM_PYRA)
+   #define Isinf(a) (((*(unsigned int*)&a)&0x7fffffff)==0x7f800000)
+ #else
+diff --git a/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp b/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
+index 6261ab8..b91e193 100644
+--- a/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
++++ b/SamTFE/Sources/Engine/World/WorldCollisionGrid.cpp
+@@ -47,7 +47,7 @@ static inline void BoxToGrid(
+   FLOAT fMinZ = boxEntity.Min()(3);
+   FLOAT fMaxX = boxEntity.Max()(1);
+   FLOAT fMaxZ = boxEntity.Max()(3);
+-#ifdef __arm__
++#if defined(__arm__) || defined(__aarch64__)
+ #if defined(PLATFORM_PANDORA) || defined(PLATFORM_PYRA)
+   #define Isinf(a) (((*(unsigned int*)&a)&0x7fffffff)==0x7f800000)
+ #else
+diff --git a/SamTSE/Sources/Engine/Graphics/DrawPort.cpp b/SamTSE/Sources/Engine/Graphics/DrawPort.cpp
+index 36de129..f998c87 100644
+--- a/SamTSE/Sources/Engine/Graphics/DrawPort.cpp
++++ b/SamTSE/Sources/Engine/Graphics/DrawPort.cpp
+@@ -1034,7 +1034,7 @@ BOOL CDrawPort::IsPointVisible( PIX pixI, PIX pixJ, FLOAT fOoK, INDEX iID, INDEX
+   // if the point is out or at the edge of drawport, it is not visible by default
+   if( pixI<1 || pixI>dp_Width-2 || pixJ<1 || pixJ>dp_Height-2) return FALSE;
+ 
+-  #if defined(__arm__) || PLATFORM_RISCV64
++  #if defined(__arm__) || defined(__aarch64__) || PLATFORM_RISCV64
+   #warning PLATFORM_NOT_X86 use GLES based GPU (Lens Flare not work)
+   // Assuming here that all ARM machine use GLES based GPU, were DEPTH reading is probably not available (or super slow)
+   return FALSE;
+diff --git a/SamTSE/Sources/Engine/Terrain/TerrainMisc.cpp b/SamTSE/Sources/Engine/Terrain/TerrainMisc.cpp
+index c87acb2..7659fc9 100644
+--- a/SamTSE/Sources/Engine/Terrain/TerrainMisc.cpp
++++ b/SamTSE/Sources/Engine/Terrain/TerrainMisc.cpp
+@@ -313,7 +313,7 @@ Rect ExtractPolygonsInBox(CTerrain *ptrTerrain, const FLOATaabbox3D &bboxExtract
+   Rect rc;
+   if(!bFixSize) {
+     // max vector of bbox in incremented for one, because first vertex is at 0,0,0 in world and in heightmap is at 1,1
+-#ifdef __arm__
++#if defined(__arm__) || defined(__aarch64__)
+ #if defined(PLATFORM_PANDORA) || defined(PLATFORM_PYRA)
+   #define Isinf(a) (((*(unsigned int*)&a)&0x7fffffff)==0x7f800000)
+ #else
+diff --git a/SamTSE/Sources/Engine/World/WorldCollisionGrid.cpp b/SamTSE/Sources/Engine/World/WorldCollisionGrid.cpp
+index 6261ab8..b91e193 100644
+--- a/SamTSE/Sources/Engine/World/WorldCollisionGrid.cpp
++++ b/SamTSE/Sources/Engine/World/WorldCollisionGrid.cpp
+@@ -47,7 +47,7 @@ static inline void BoxToGrid(
+   FLOAT fMinZ = boxEntity.Min()(3);
+   FLOAT fMaxX = boxEntity.Max()(1);
+   FLOAT fMaxZ = boxEntity.Max()(3);
+-#ifdef __arm__
++#if defined(__arm__) || defined(__aarch64__)
+ #if defined(PLATFORM_PANDORA) || defined(PLATFORM_PYRA)
+   #define Isinf(a) (((*(unsigned int*)&a)&0x7fffffff)==0x7f800000)
+ #else

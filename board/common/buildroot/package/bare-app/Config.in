@@ -204,6 +204,25 @@ config BR2_PACKAGE_BARE_APP_RTCW
 	  an entry of the main menu (the SDK's games/rtcw/overlay, by
 	  scripts/games-image.py). In the SDK: APPS_CONFIG += bare-app.RTCW=y
 
+config BR2_PACKAGE_BARE_APP_SERIOUSSAM
+	bool "Serious Sam: The First and The Second Encounter (Serious Engine, SDL2 games)"
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	depends on BR2_aarch64 || BR2_x86_64 # serious-engine
+	depends on BR2_INSTALL_LIBSTDCPP # serious-engine
+	depends on BR2_TOOLCHAIN_HAS_THREADS # serious-engine
+	depends on BR2_TOOLCHAIN_HAS_SYNC_4 # mesa-panfrost
+	depends on !BR2_PACKAGE_MESA3D # mesa-panfrost
+	select BR2_PACKAGE_MESA_PANFROST
+	select BR2_PACKAGE_SERIOUS_ENGINE
+	help
+	  Serious Engine 1.10 (package serious-engine, GPLv2) for Serious
+	  Sam Classic's two games, drawn by the GPU. The game files are not
+	  included: a bought copy's .gro files and the rest go to ssam1/ (The
+	  First Encounter, 1.05) and ssam2/ (The Second Encounter, 1.07) of the
+	  games partition, with the game.ini that makes each an entry of the
+	  main menu (the SDK's games/ssam1, games/ssam2, by
+	  scripts/games-image.py). In the SDK: APPS_CONFIG += bare-app.SERIOUSSAM=y
+
 config BR2_PACKAGE_BARE_APP_UT2004
 	bool "Unreal Tournament 2004 (its Linux x86_64 build under Box64)"
 	depends on BR2_PACKAGE_BARE_APP_SDL

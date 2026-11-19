@@ -1,0 +1,26 @@
+config BR2_PACKAGE_SERIOUS_ENGINE
+	bool "serious-engine"
+	depends on BR2_aarch64 || BR2_x86_64 # 64-bit fixes of the port
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on !BR2_STATIC_LIBS # the game libraries are dlopen'ed
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_MESA_PANFROST # OpenGL through EGL
+	# SDL2 with EGL and its bareapp video driver: the only window there is
+	depends on BR2_PACKAGE_BARE_APP_SDL
+	select BR2_PACKAGE_SDL2
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_LIBVORBIS # the music (Ogg, dlopen'ed)
+	help
+	  Serious Engine 1.10 (Croteam's, GPLv2) as tx00100xt's
+	  SeriousSamClassic port: Serious Sam: The First Encounter and
+	  The Second Encounter for bare_app, drawn by the GPU
+	  (mesa-panfrost) through SDL's bareapp driver, a gamepad in the
+	  menus and the game, aim assist. The game files (the .gro files
+	  and the rest of a bought copy) are not included.
+
+	  https://github.com/tx00100xt/SeriousSamClassic
+
+comment "serious-engine needs mesa-panfrost, bare_app's SDL2 games and a toolchain w/ C++, threads, dynamic library"
+	depends on BR2_aarch64 || BR2_x86_64
+	depends on !BR2_PACKAGE_MESA_PANFROST || !BR2_PACKAGE_BARE_APP_SDL || \
+		!BR2_INSTALL_LIBSTDCPP || BR2_STATIC_LIBS || !BR2_TOOLCHAIN_HAS_THREADS

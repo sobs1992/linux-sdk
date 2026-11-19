@@ -1,0 +1,410 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 00:10:00 +0100
+Subject: [PATCH] Player: aim assist for a gamepad, as DOOM 3 BFG's
+
+The target: the best enemy in front within 76 m that can be seen (0.8
+for looking at it, 0.2 for being near). Friction: while the line of aim
+passes near it (2.4 m, 4.9 m at 19.5 m and farther), the stick's turn
+(axes turn l/r, look u/d) slows to 0.4 on the target; the mouse's (view
+axes) is left alone. Adhesion: while the player moves, the view turns
+towards a target near the line of aim, a quarter of what is left and 0.6
+degrees at most a 60 Hz frame. plr_iAimAssist (persistent, 1 by
+default) turns it on or off.
+---
+ SamTFE/Sources/Entities/Common/AimAssist.h   | 145 +++++++++++++++++++
+ SamTFE/Sources/Entities/Player.es            |  18 +++
+ SamTSE/Sources/EntitiesMP/Common/AimAssist.h | 145 +++++++++++++++++++
+ SamTSE/Sources/EntitiesMP/Player.es          |  18 +++
+ 4 files changed, 326 insertions(+)
+ create mode 100644 SamTFE/Sources/Entities/Common/AimAssist.h
+ create mode 100644 SamTSE/Sources/EntitiesMP/Common/AimAssist.h
+
+diff --git a/SamTFE/Sources/Entities/Common/AimAssist.h b/SamTFE/Sources/Entities/Common/AimAssist.h
+new file mode 100644
+index 0000000..0b96cd1
+--- /dev/null
++++ b/SamTFE/Sources/Entities/Common/AimAssist.h
+@@ -0,0 +1,145 @@
++/* Aim assist for a gamepad (the ODROID SDK's), as DOOM 3 BFG Edition's
++ * (its AimAssist.cpp, the same rules and numbers, its units turned into
++ * meters: an inch is 0.0254 m), for Serious Sam's single player.
++ *
++ * - The target: the best enemy in front within 76 m that can be seen
++ *   (0.8 for looking at it, 0.2 for being near), the middle of its box.
++ *   An enemy is a living entity derived from Enemy Base, not a template.
++ * - Friction: while the line of aim passes near it (2.4 m, 4.9 m at
++ *   19.5 m and farther), turning with the stick slows down, to 0.4 on the
++ *   target. The stick turns by the axes "turn l/r" and "look u/d"; the
++ *   mouse (and bare_app's motion sensor) by "view l/r" and "view u/d",
++ *   which friction leaves alone.
++ * - Adhesion: while the player moves, the view turns towards a target
++ *   near the line of aim (2.4 m): a quarter of what is left and 0.6
++ *   degrees at most a 60 Hz frame, compounded for other frame times.
++ *
++ * plr_iAimAssist 0 turns it off (the game's options: "Aim assist").
++ * Included once, by Player.es, where ctl_ComposeActionPacket calls
++ * AimAssist_Apply before the stick's and the mouse's turns are added. */
++
++#define AIMASSIST_RANGE        76.2f   // 3000 inches
++#define AIMASSIST_RADIUS       2.44f   // 96 inches: the window around the line of aim
++#define AIMASSIST_RADIUS_FAR   19.5f   // 768 inches: the window twice as wide from there
++#define AIMASSIST_FRICTION     0.4f    // the stick's turning on the target
++#define AIMASSIST_ADHESION     0.25f   // of the angle left, a 60 Hz frame
++#define AIMASSIST_ADHESION_MAX 0.6f    // degrees, a 60 Hz frame
++
++INDEX plr_iAimAssist = 1;
++
++// the target for the view at plView: its point, the distance of the line
++// of aim from it and the window there; FALSE if none
++static BOOL AimAssist_FindTarget(CPlayer *penPlayer, const CPlacement3D &plView,
++  FLOAT3D &vTarget, FLOAT &fOffAxis, FLOAT &fWindow)
++{
++  const FLOAT3D vEye = plView.pl_PositionVector;
++  FLOAT3D vDir;
++  AnglesToDirectionVector(plView.pl_OrientationAngle, vDir);
++
++  CEntity *apenBest[3] = { NULL, NULL, NULL };
++  FLOAT afScore[3] = { -1.0f, -1.0f, -1.0f };
++  FLOAT3D avPoint[3];
++
++  {FOREACHINDYNAMICCONTAINER(penPlayer->GetWorld()->wo_cenEntities, CEntity, iten) {
++    CEntity *pen = iten;
++    if (!(pen->GetFlags()&ENF_ALIVE) || !IsDerivedFromClass(pen, "Enemy Base")) {
++      continue;
++    }
++    CEnemyBase *penEnemy = (CEnemyBase *)pen;
++    if (penEnemy->m_bTemplate || penEnemy->GetHealth()<=0.0f) {
++      continue;
++    }
++    FLOATaabbox3D box;
++    pen->GetBoundingBox(box);
++    const FLOAT3D vPoint = box.Center();
++    const FLOAT3D vTo = vPoint-vEye;
++    const FLOAT fDist = vTo.Length();
++    if (fDist<0.1f || fDist>AIMASSIST_RANGE) {
++      continue;
++    }
++    const FLOAT fCos = (vTo%vDir)/fDist;
++    if (fCos<=0.5f) {
++      continue;   // not in front
++    }
++    const FLOAT fScore = 0.8f*fCos + 0.2f*(1.0f-fDist/AIMASSIST_RANGE);
++    // keep the three best
++    for (INDEX i=0; i<3; i++) {
++      if (fScore>afScore[i]) {
++        for (INDEX j=2; j>i; j--) {
++          apenBest[j] = apenBest[j-1]; afScore[j] = afScore[j-1]; avPoint[j] = avPoint[j-1];
++        }
++        apenBest[i] = pen; afScore[i] = fScore; avPoint[i] = vPoint;
++        break;
++      }
++    }
++  }}
++
++  // the best one that can be seen
++  for (INDEX i=0; i<3; i++) {
++    if (apenBest[i]==NULL) {
++      break;
++    }
++    CCastRay crRay(penPlayer, vEye, avPoint[i]);
++    crRay.cr_bHitTranslucentPortals = FALSE;
++    crRay.cr_bPhysical = FALSE;
++    crRay.cr_ttHitModels = CCastRay::TT_COLLISIONBOX;
++    penPlayer->GetWorld()->CastRay(crRay);
++    if (crRay.cr_penHit!=NULL && crRay.cr_penHit!=apenBest[i]) {
++      continue;   // something else in the way
++    }
++    vTarget = avPoint[i];
++    const FLOAT3D vTo = vTarget-vEye;
++    const FLOAT fAlong = vTo%vDir;
++    fOffAxis = (vTo-vDir*fAlong).Length();
++    fWindow = AIMASSIST_RADIUS*(1.0f+Min(fAlong, AIMASSIST_RADIUS_FAR)/AIMASSIST_RADIUS_FAR);
++    return TRUE;
++  }
++  return FALSE;
++}
++
++// slows the stick's turn (paAction.pa_aRotation, heading and pitch) near a
++// target and, while moving, turns towards it; bPreScan: once a frame
++static void AimAssist_Apply(CPlayer *penPlayer, CPlayerAction &paAction, BOOL bPreScan,
++  BOOL bMoving)
++{
++  static CTimerValue tvLast;
++  static BOOL bLast = FALSE;
++  FLOAT fFrame = 1.0f/60.0f;
++  if (bPreScan) {
++    const CTimerValue tvNow = _pTimer->GetHighPrecisionTimer();
++    if (bLast) {
++      fFrame = Clamp((FLOAT)(tvNow-tvLast).GetSeconds(), 0.001f, 0.1f);
++    }
++    tvLast = tvNow;
++    bLast = TRUE;
++  }
++  if (!plr_iAimAssist || !(penPlayer->GetFlags()&ENF_ALIVE)) {
++    return;
++  }
++  CPlacement3D plView;
++  penPlayer->GetLerpedAbsoluteViewPlacement(plView);
++  FLOAT3D vTarget;
++  FLOAT fOffAxis, fWindow;
++  if (!AimAssist_FindTarget(penPlayer, plView, vTarget, fOffAxis, fWindow) || fOffAxis>=fWindow) {
++    return;
++  }
++
++  // friction: the stick turns slower near the target
++  const FLOAT fFriction = AIMASSIST_FRICTION + (1.0f-AIMASSIST_FRICTION)*fOffAxis/fWindow;
++  paAction.pa_aRotation(1) *= fFriction;
++  paAction.pa_aRotation(2) *= fFriction;
++
++  // adhesion: while moving, once a frame, towards the target
++  if (!bPreScan || !bMoving || fOffAxis>=AIMASSIST_RADIUS) {
++    return;
++  }
++  ANGLE3D aAim;
++  DirectionVectorToAnglesNoSnap((vTarget-plView.pl_PositionVector).Normalize(), aAim);
++  FLOAT fH = NormalizeAngle(aAim(1)-plView.pl_OrientationAngle(1));
++  FLOAT fP = NormalizeAngle(aAim(2)-plView.pl_OrientationAngle(2));
++  const FLOAT f60 = fFrame*60.0f;
++  const FLOAT fPart = 1.0f-powf(1.0f-AIMASSIST_ADHESION, f60);
++  const FLOAT fMax = AIMASSIST_ADHESION_MAX*f60;
++  paAction.pa_aRotation(1) += Clamp(fH*fPart, -fMax, fMax);
++  paAction.pa_aRotation(2) += Clamp(fP*fPart, -fMax, fMax);
++}
+diff --git a/SamTFE/Sources/Entities/Player.es b/SamTFE/Sources/Entities/Player.es
+index 6edf4c6..fe00ff8 100644
+--- a/SamTFE/Sources/Entities/Player.es
++++ b/SamTFE/Sources/Entities/Player.es
+@@ -110,6 +110,7 @@ event EAutoAction {
+ };
+ 
+ %{
++#include "Entities/Common/AimAssist.h"
+ extern void DrawHUD( const CPlayer *penPlayerCurrent, CDrawPort *pdpCurrent, BOOL bSnooping); 
+ extern void InitHUD(void);
+ extern void EndHUD(void);
+@@ -432,6 +433,22 @@ DECL_DLL const SLONG ctl_slPlayerControlsSize = sizeof(pctlCurrent);
+ // called to compose action packet from current controls
+ DECL_DLL void ctl_ComposeActionPacket(const CPlayerCharacter &pc, CPlayerAction &paAction, BOOL bPreScan)
+ {
++  // aim assist for a gamepad (Common/AimAssist.h): the stick's turn, before
++  // the mouse's is added
++  {
++    INDEX ctAimPlayers = CEntity::GetMaxPlayers();
++    for (INDEX iAimPlayer = 0; iAimPlayer<ctAimPlayers; iAimPlayer++) {
++      CPlayer *pen=(CPlayer *)CEntity::GetPlayerEntity(iAimPlayer);
++      if (pen!=NULL && pen->en_pcCharacter==pc) {
++        const BOOL bMoving = paAction.pa_vTranslation.Length()>0.01f
++          || pctlCurrent.bMoveForward || pctlCurrent.bMoveBackward
++          || pctlCurrent.bMoveLeft || pctlCurrent.bMoveRight;
++        AimAssist_Apply(pen, paAction, bPreScan, bMoving);
++        break;
++      }
++    }
++  }
++
+   // allow double axis controls
+   paAction.pa_aRotation += paAction.pa_aViewRotation;
+ 
+@@ -672,6 +689,7 @@ void CPlayer_OnInitClass(void)
+   _pShell->DeclareSymbol("user INDEX ctl_bWeaponPrev;",         &pctlCurrent.bWeaponPrev);
+   _pShell->DeclareSymbol("user INDEX ctl_bWeaponFlip;",         &pctlCurrent.bWeaponFlip);
+   _pShell->DeclareSymbol("user INDEX ctl_bSelectWeapon[30+1];", &pctlCurrent.bSelectWeapon);
++  _pShell->DeclareSymbol("persistent user INDEX plr_iAimAssist;", &plr_iAimAssist);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_tmComputerDoubleClick;", &ctl_tmComputerDoubleClick);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_fButtonRotationSpeedH;", &ctl_fButtonRotationSpeedH);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_fButtonRotationSpeedP;", &ctl_fButtonRotationSpeedP);
+diff --git a/SamTSE/Sources/EntitiesMP/Common/AimAssist.h b/SamTSE/Sources/EntitiesMP/Common/AimAssist.h
+new file mode 100644
+index 0000000..0b96cd1
+--- /dev/null
++++ b/SamTSE/Sources/EntitiesMP/Common/AimAssist.h
+@@ -0,0 +1,145 @@
++/* Aim assist for a gamepad (the ODROID SDK's), as DOOM 3 BFG Edition's
++ * (its AimAssist.cpp, the same rules and numbers, its units turned into
++ * meters: an inch is 0.0254 m), for Serious Sam's single player.
++ *
++ * - The target: the best enemy in front within 76 m that can be seen
++ *   (0.8 for looking at it, 0.2 for being near), the middle of its box.
++ *   An enemy is a living entity derived from Enemy Base, not a template.
++ * - Friction: while the line of aim passes near it (2.4 m, 4.9 m at
++ *   19.5 m and farther), turning with the stick slows down, to 0.4 on the
++ *   target. The stick turns by the axes "turn l/r" and "look u/d"; the
++ *   mouse (and bare_app's motion sensor) by "view l/r" and "view u/d",
++ *   which friction leaves alone.
++ * - Adhesion: while the player moves, the view turns towards a target
++ *   near the line of aim (2.4 m): a quarter of what is left and 0.6
++ *   degrees at most a 60 Hz frame, compounded for other frame times.
++ *
++ * plr_iAimAssist 0 turns it off (the game's options: "Aim assist").
++ * Included once, by Player.es, where ctl_ComposeActionPacket calls
++ * AimAssist_Apply before the stick's and the mouse's turns are added. */
++
++#define AIMASSIST_RANGE        76.2f   // 3000 inches
++#define AIMASSIST_RADIUS       2.44f   // 96 inches: the window around the line of aim
++#define AIMASSIST_RADIUS_FAR   19.5f   // 768 inches: the window twice as wide from there
++#define AIMASSIST_FRICTION     0.4f    // the stick's turning on the target
++#define AIMASSIST_ADHESION     0.25f   // of the angle left, a 60 Hz frame
++#define AIMASSIST_ADHESION_MAX 0.6f    // degrees, a 60 Hz frame
++
++INDEX plr_iAimAssist = 1;
++
++// the target for the view at plView: its point, the distance of the line
++// of aim from it and the window there; FALSE if none
++static BOOL AimAssist_FindTarget(CPlayer *penPlayer, const CPlacement3D &plView,
++  FLOAT3D &vTarget, FLOAT &fOffAxis, FLOAT &fWindow)
++{
++  const FLOAT3D vEye = plView.pl_PositionVector;
++  FLOAT3D vDir;
++  AnglesToDirectionVector(plView.pl_OrientationAngle, vDir);
++
++  CEntity *apenBest[3] = { NULL, NULL, NULL };
++  FLOAT afScore[3] = { -1.0f, -1.0f, -1.0f };
++  FLOAT3D avPoint[3];
++
++  {FOREACHINDYNAMICCONTAINER(penPlayer->GetWorld()->wo_cenEntities, CEntity, iten) {
++    CEntity *pen = iten;
++    if (!(pen->GetFlags()&ENF_ALIVE) || !IsDerivedFromClass(pen, "Enemy Base")) {
++      continue;
++    }
++    CEnemyBase *penEnemy = (CEnemyBase *)pen;
++    if (penEnemy->m_bTemplate || penEnemy->GetHealth()<=0.0f) {
++      continue;
++    }
++    FLOATaabbox3D box;
++    pen->GetBoundingBox(box);
++    const FLOAT3D vPoint = box.Center();
++    const FLOAT3D vTo = vPoint-vEye;
++    const FLOAT fDist = vTo.Length();
++    if (fDist<0.1f || fDist>AIMASSIST_RANGE) {
++      continue;
++    }
++    const FLOAT fCos = (vTo%vDir)/fDist;
++    if (fCos<=0.5f) {
++      continue;   // not in front
++    }
++    const FLOAT fScore = 0.8f*fCos + 0.2f*(1.0f-fDist/AIMASSIST_RANGE);
++    // keep the three best
++    for (INDEX i=0; i<3; i++) {
++      if (fScore>afScore[i]) {
++        for (INDEX j=2; j>i; j--) {
++          apenBest[j] = apenBest[j-1]; afScore[j] = afScore[j-1]; avPoint[j] = avPoint[j-1];
++        }
++        apenBest[i] = pen; afScore[i] = fScore; avPoint[i] = vPoint;
++        break;
++      }
++    }
++  }}
++
++  // the best one that can be seen
++  for (INDEX i=0; i<3; i++) {
++    if (apenBest[i]==NULL) {
++      break;
++    }
++    CCastRay crRay(penPlayer, vEye, avPoint[i]);
++    crRay.cr_bHitTranslucentPortals = FALSE;
++    crRay.cr_bPhysical = FALSE;
++    crRay.cr_ttHitModels = CCastRay::TT_COLLISIONBOX;
++    penPlayer->GetWorld()->CastRay(crRay);
++    if (crRay.cr_penHit!=NULL && crRay.cr_penHit!=apenBest[i]) {
++      continue;   // something else in the way
++    }
++    vTarget = avPoint[i];
++    const FLOAT3D vTo = vTarget-vEye;
++    const FLOAT fAlong = vTo%vDir;
++    fOffAxis = (vTo-vDir*fAlong).Length();
++    fWindow = AIMASSIST_RADIUS*(1.0f+Min(fAlong, AIMASSIST_RADIUS_FAR)/AIMASSIST_RADIUS_FAR);
++    return TRUE;
++  }
++  return FALSE;
++}
++
++// slows the stick's turn (paAction.pa_aRotation, heading and pitch) near a
++// target and, while moving, turns towards it; bPreScan: once a frame
++static void AimAssist_Apply(CPlayer *penPlayer, CPlayerAction &paAction, BOOL bPreScan,
++  BOOL bMoving)
++{
++  static CTimerValue tvLast;
++  static BOOL bLast = FALSE;
++  FLOAT fFrame = 1.0f/60.0f;
++  if (bPreScan) {
++    const CTimerValue tvNow = _pTimer->GetHighPrecisionTimer();
++    if (bLast) {
++      fFrame = Clamp((FLOAT)(tvNow-tvLast).GetSeconds(), 0.001f, 0.1f);
++    }
++    tvLast = tvNow;
++    bLast = TRUE;
++  }
++  if (!plr_iAimAssist || !(penPlayer->GetFlags()&ENF_ALIVE)) {
++    return;
++  }
++  CPlacement3D plView;
++  penPlayer->GetLerpedAbsoluteViewPlacement(plView);
++  FLOAT3D vTarget;
++  FLOAT fOffAxis, fWindow;
++  if (!AimAssist_FindTarget(penPlayer, plView, vTarget, fOffAxis, fWindow) || fOffAxis>=fWindow) {
++    return;
++  }
++
++  // friction: the stick turns slower near the target
++  const FLOAT fFriction = AIMASSIST_FRICTION + (1.0f-AIMASSIST_FRICTION)*fOffAxis/fWindow;
++  paAction.pa_aRotation(1) *= fFriction;
++  paAction.pa_aRotation(2) *= fFriction;
++
++  // adhesion: while moving, once a frame, towards the target
++  if (!bPreScan || !bMoving || fOffAxis>=AIMASSIST_RADIUS) {
++    return;
++  }
++  ANGLE3D aAim;
++  DirectionVectorToAnglesNoSnap((vTarget-plView.pl_PositionVector).Normalize(), aAim);
++  FLOAT fH = NormalizeAngle(aAim(1)-plView.pl_OrientationAngle(1));
++  FLOAT fP = NormalizeAngle(aAim(2)-plView.pl_OrientationAngle(2));
++  const FLOAT f60 = fFrame*60.0f;
++  const FLOAT fPart = 1.0f-powf(1.0f-AIMASSIST_ADHESION, f60);
++  const FLOAT fMax = AIMASSIST_ADHESION_MAX*f60;
++  paAction.pa_aRotation(1) += Clamp(fH*fPart, -fMax, fMax);
++  paAction.pa_aRotation(2) += Clamp(fP*fPart, -fMax, fMax);
++}
+diff --git a/SamTSE/Sources/EntitiesMP/Player.es b/SamTSE/Sources/EntitiesMP/Player.es
+index e82e0f4..329baa4 100644
+--- a/SamTSE/Sources/EntitiesMP/Player.es
++++ b/SamTSE/Sources/EntitiesMP/Player.es
+@@ -121,6 +121,7 @@ event EAutoAction {
+ };
+ 
+ %{
++#include "EntitiesMP/Common/AimAssist.h"
+ extern void DrawHUD( const CPlayer *penPlayerCurrent, CDrawPort *pdpCurrent, BOOL bSnooping, const CPlayer *penPlayerOwner);
+ extern void InitHUD(void);
+ extern void EndHUD(void);
+@@ -462,6 +463,22 @@ DECL_DLL const SLONG ctl_slPlayerControlsSize = sizeof(pctlCurrent);
+ // called to compose action packet from current controls
+ DECL_DLL void ctl_ComposeActionPacket(const CPlayerCharacter &pc, CPlayerAction &paAction, BOOL bPreScan)
+ {
++  // aim assist for a gamepad (Common/AimAssist.h): the stick's turn, before
++  // the mouse's is added
++  {
++    INDEX ctAimPlayers = CEntity::GetMaxPlayers();
++    for (INDEX iAimPlayer = 0; iAimPlayer<ctAimPlayers; iAimPlayer++) {
++      CPlayer *pen=(CPlayer *)CEntity::GetPlayerEntity(iAimPlayer);
++      if (pen!=NULL && pen->en_pcCharacter==pc) {
++        const BOOL bMoving = paAction.pa_vTranslation.Length()>0.01f
++          || pctlCurrent.bMoveForward || pctlCurrent.bMoveBackward
++          || pctlCurrent.bMoveLeft || pctlCurrent.bMoveRight;
++        AimAssist_Apply(pen, paAction, bPreScan, bMoving);
++        break;
++      }
++    }
++  }
++
+   // allow double axis controls
+   paAction.pa_aRotation += paAction.pa_aViewRotation;
+ 
+@@ -747,6 +764,7 @@ void CPlayer_OnInitClass(void)
+   _pShell->DeclareSymbol("user INDEX ctl_bWeaponPrev;",         (void *) &pctlCurrent.bWeaponPrev);
+   _pShell->DeclareSymbol("user INDEX ctl_bWeaponFlip;",         (void *) &pctlCurrent.bWeaponFlip);
+   _pShell->DeclareSymbol("user INDEX ctl_bSelectWeapon[30+1];", (void *) &pctlCurrent.bSelectWeapon);
++  _pShell->DeclareSymbol("persistent user INDEX plr_iAimAssist;", (void *) &plr_iAimAssist);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_tmComputerDoubleClick;", (void *) &ctl_tmComputerDoubleClick);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_fButtonRotationSpeedH;", (void *) &ctl_fButtonRotationSpeedH);
+   _pShell->DeclareSymbol("persistent user FLOAT ctl_fButtonRotationSpeedP;", (void *) &ctl_fButtonRotationSpeedP);

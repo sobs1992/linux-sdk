@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 00:10:00 +0100
+Subject: [PATCH] Engine: the game's data and libraries where the
+ environment says
+
+SE1_DATA_DIR and SE1_LIB_DIR (both set) give the game's data directory
+and the directory of its libraries, as an installation into the system
+does (sys_iSysPath), but at any path: the data on a read-only games
+card, the user's files in SDL's pref path. Group files beside the
+libraries (the engine's SE1_10b.gro) are loaded too, and group files of
+one priority are ordered by their names, not their full paths.
+---
+ SamTFE/Sources/Engine/Base/Stream.cpp | 13 +++++++++++++
+ SamTFE/Sources/Engine/Base/Unzip.cpp  |  4 +++-
+ SamTFE/Sources/Engine/Engine.cpp      | 13 +++++++++++++
+ SamTSE/Sources/Engine/Base/Stream.cpp | 13 +++++++++++++
+ SamTSE/Sources/Engine/Base/Unzip.cpp  |  4 +++-
+ SamTSE/Sources/Engine/Engine.cpp      | 13 +++++++++++++
+ 6 files changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/SamTFE/Sources/Engine/Base/Stream.cpp b/SamTFE/Sources/Engine/Base/Stream.cpp
+index f30213a..a9828d2 100644
+--- a/SamTFE/Sources/Engine/Base/Stream.cpp
++++ b/SamTFE/Sources/Engine/Base/Stream.cpp
+@@ -220,6 +220,19 @@ void InitStreams(void)
+   }
+   delete files;
+ 
++#ifdef PLATFORM_UNIX
++  // the engine's own group files (SE1_10b.gro) installed with its libraries
++  // when the game's data is elsewhere (SE1_LIB_DIR, SE1_DATA_DIR)
++  if (sys_iSysPath == 1 && _fnmModLibPath != "" && _fnmModLibPath != _fnmApplicationPath) {
++    files = _pFileSystem->FindFiles(_fnmModLibPath, "*.gro");
++    max = files->Count();
++    for (i = 0; i < max; i++) {
++      UNZIPAddArchive( _fnmModLibPath+((*files)[i]) );
++    }
++    delete files;
++  }
++#endif
++
+   // if there is a mod active
+   if (_fnmMod!="") {
+     // for each group file in mod directory
+diff --git a/SamTFE/Sources/Engine/Base/Unzip.cpp b/SamTFE/Sources/Engine/Base/Unzip.cpp
+index e1a7b84..f7d978a 100644
+--- a/SamTFE/Sources/Engine/Base/Unzip.cpp
++++ b/SamTFE/Sources/Engine/Base/Unzip.cpp
+@@ -478,7 +478,9 @@ int qsort_ArchiveCTFileName_reverse(const void *elem1, const void *elem2 )
+   } else if (iPriority1>iPriority2) {
+     return -1;
+   } else {
+-    return -stricmp(fnm1, fnm2);
++    // by the file's name: group files of one priority may be in different
++    // directories (the engine's own beside its libraries)
++    return -stricmp(fnm1.FileName()+fnm1.FileExt(), fnm2.FileName()+fnm2.FileExt());
+   }
+ }
+ // read directories of all currently added archives, in reverse alphabetical order
+diff --git a/SamTFE/Sources/Engine/Engine.cpp b/SamTFE/Sources/Engine/Engine.cpp
+index e6f7c4f..2e42e60 100644
+--- a/SamTFE/Sources/Engine/Engine.cpp
++++ b/SamTFE/Sources/Engine/Engine.cpp
+@@ -879,6 +879,19 @@ ENGINE_API void SE_InitEngine(CTString strGameID)
+     }
+   }
+ 
++  // A packaged engine (the ODROID SDK's): the game's libraries and its data
++  // are where the environment says, the data on a read-only games card, the
++  // user's files in SDL's pref path (XDG_DATA_HOME)
++  {
++    const char *strEnvLibDir = getenv("SE1_LIB_DIR");
++    const char *strEnvDataDir = getenv("SE1_DATA_DIR");
++    if (strEnvLibDir != NULL && strEnvLibDir[0] != 0 && strEnvDataDir != NULL && strEnvDataDir[0] != 0) {
++      sys_iSysPath = 1;
++      _fnmModLibPath = CTString(strEnvLibDir) + "/";
++      _fnmApplicationPath = CTString(strEnvDataDir) + "/";
++    }
++  }
++
+   // print info on the started application
+   CPrintF(TRANSV("Executable: %s\n"), (const char *) strExePath);
+   CPrintF(TRANSV("Assumed engine data directory: %s\n"), (const char *) _fnmApplicationPath);
+diff --git a/SamTSE/Sources/Engine/Base/Stream.cpp b/SamTSE/Sources/Engine/Base/Stream.cpp
+index f30213a..a9828d2 100644
+--- a/SamTSE/Sources/Engine/Base/Stream.cpp
++++ b/SamTSE/Sources/Engine/Base/Stream.cpp
+@@ -220,6 +220,19 @@ void InitStreams(void)
+   }
+   delete files;
+ 
++#ifdef PLATFORM_UNIX
++  // the engine's own group files (SE1_10b.gro) installed with its libraries
++  // when the game's data is elsewhere (SE1_LIB_DIR, SE1_DATA_DIR)
++  if (sys_iSysPath == 1 && _fnmModLibPath != "" && _fnmModLibPath != _fnmApplicationPath) {
++    files = _pFileSystem->FindFiles(_fnmModLibPath, "*.gro");
++    max = files->Count();
++    for (i = 0; i < max; i++) {
++      UNZIPAddArchive( _fnmModLibPath+((*files)[i]) );
++    }
++    delete files;
++  }
++#endif
++
+   // if there is a mod active
+   if (_fnmMod!="") {
+     // for each group file in mod directory
+diff --git a/SamTSE/Sources/Engine/Base/Unzip.cpp b/SamTSE/Sources/Engine/Base/Unzip.cpp
+index e1a7b84..f7d978a 100644
+--- a/SamTSE/Sources/Engine/Base/Unzip.cpp
++++ b/SamTSE/Sources/Engine/Base/Unzip.cpp
+@@ -478,7 +478,9 @@ int qsort_ArchiveCTFileName_reverse(const void *elem1, const void *elem2 )
+   } else if (iPriority1>iPriority2) {
+     return -1;
+   } else {
+-    return -stricmp(fnm1, fnm2);
++    // by the file's name: group files of one priority may be in different
++    // directories (the engine's own beside its libraries)
++    return -stricmp(fnm1.FileName()+fnm1.FileExt(), fnm2.FileName()+fnm2.FileExt());
+   }
+ }
+ // read directories of all currently added archives, in reverse alphabetical order
+diff --git a/SamTSE/Sources/Engine/Engine.cpp b/SamTSE/Sources/Engine/Engine.cpp
+index e6f7c4f..2e42e60 100644
+--- a/SamTSE/Sources/Engine/Engine.cpp
++++ b/SamTSE/Sources/Engine/Engine.cpp
+@@ -879,6 +879,19 @@ ENGINE_API void SE_InitEngine(CTString strGameID)
+     }
+   }
+ 
++  // A packaged engine (the ODROID SDK's): the game's libraries and its data
++  // are where the environment says, the data on a read-only games card, the
++  // user's files in SDL's pref path (XDG_DATA_HOME)
++  {
++    const char *strEnvLibDir = getenv("SE1_LIB_DIR");
++    const char *strEnvDataDir = getenv("SE1_DATA_DIR");
++    if (strEnvLibDir != NULL && strEnvLibDir[0] != 0 && strEnvDataDir != NULL && strEnvDataDir[0] != 0) {
++      sys_iSysPath = 1;
++      _fnmModLibPath = CTString(strEnvLibDir) + "/";
++      _fnmApplicationPath = CTString(strEnvDataDir) + "/";
++    }
++  }
++
+   // print info on the started application
+   CPrintF(TRANSV("Executable: %s\n"), (const char *) strExePath);
+   CPrintF(TRANSV("Assumed engine data directory: %s\n"), (const char *) _fnmApplicationPath);
