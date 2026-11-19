@@ -38,7 +38,10 @@ entry.
 - **Sound.** The music is 22 kHz: Wine's DirectSound resamples it to the
   device's 48 kHz, since patch 0029 by a 16-point windowed sinc. Patch
   0005's linear interpolation left a hiss over it (images of the music
-  20-30 dB under it above 11 kHz).
+  20-30 dB under it above 11 kHz). In a race the music, engine and crashes
+  together go over full scale (~10 times a second): patch 0030's limiter
+  keeps the mix under it, as Windows' audio engine does; cut off, the
+  peaks were heard as clicks.
 - **Profile.** The console cannot type a name, so `overlay/save` holds a
   fresh profile "player" (made by the game). The widescreen fix's
   `CustomUserFilesDirectoryInGameDir = save` puts profiles and saved

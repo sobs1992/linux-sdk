@@ -1,0 +1,94 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] dsound: a limiter keeps the mix under full scale
+
+The secondary buffers are summed in floats and the sum was cut off at
+full scale when it went to the device's format. NFS Underground's music,
+engine and crashes in a race went over it ~10 times a second: 1105
+samples cut in two minutes with linear resampling, 2426 with patch
+0029's sinc (whose ringing adds to the peaks), heard as clicks. Windows'
+audio engine has a limiter on its output, so games made for it do not
+crackle there.
+
+A frame whose loudest channel would pass -0.2 dBFS has the gain dropped
+at once to bring it there; the gain comes back towards 1 over ~0.1 s.
+The same race: no sample cut, the peaks at the ceiling. A few products a
+frame, in the mixer thread.
+---
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -97,6 +97,8 @@
+     DSVOLUMEPAN                 volpan;
+ 
+     normfunc normfunction;
++    /* the output limiter: how far its gain is down from 1 (0 at the start) */
++    float                       limiter_cut;
+ 
+     /* DirectSound3DListener fields */
+     DS3DLISTENER                ds3dl;
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -850,6 +850,46 @@
+  *   =[Volume]=> device->tmp_buffer (float format)
+  *   =[Reformat]=> device->buffer (device format, skipped on float)
+  */
++/*
++ * The mix kept under full scale, as Windows' audio engine keeps it with a
++ * limiter: where a frame's loudest channel would pass LIMIT_CEILING, the
++ * gain drops at once to bring it there; it comes back towards 1 over about
++ * LIMIT_RELEASE_S. Without it the sum of a game's buffers was cut off at
++ * full scale: NFS Underground's music, engine and crashes in a race, ~10
++ * cuts a second, heard as clicks.
++ */
++#define LIMIT_CEILING 0.977f	/* -0.2 dBFS */
++#define LIMIT_RELEASE_S 0.1f
++
++static void DSOUND_Limit(DirectSoundDevice *device, float *buf, DWORD frames)
++{
++    UINT channels = device->pwfx->nChannels, c;
++    float gain = 1.0f - device->limiter_cut;
++    float release = 1.0f / (LIMIT_RELEASE_S * device->pwfx->nSamplesPerSec);
++    DWORD i;
++
++    for (i = 0; i < frames; i++, buf += channels)
++    {
++        float peak = 0.0f;
++
++        for (c = 0; c < channels; c++)
++        {
++            float v = buf[c] < 0 ? -buf[c] : buf[c];
++            if (v > peak) peak = v;
++        }
++        if (peak * gain > LIMIT_CEILING)
++            gain = LIMIT_CEILING / peak;
++        if (gain < 1.0f)
++        {
++            for (c = 0; c < channels; c++)
++                buf[c] *= gain;
++            gain += (1.0f - gain) * release;
++            if (gain > 0.9999f) gain = 1.0f;
++        }
++    }
++    device->limiter_cut = 1.0f - gain;
++}
++
+ static void DSOUND_PerformMix(DirectSoundDevice *device)
+ {
+ 	DWORD block, pad_bytes, frames;
+@@ -904,13 +944,15 @@
+ 
+ 		memset(buffer, nfiller, frames * block);
+ 
+-		if (!device->normfunction)
++		if (!device->normfunction) {
+ 			DSOUND_MixToPrimary(device, buffer, frames, &all_stopped);
+-		else {
++			DSOUND_Limit(device, buffer, frames);
++		} else {
+ 			memset(device->buffer, nfiller, device->buflen);
+ 
+ 			/* do the mixing */
+ 			DSOUND_MixToPrimary(device, (float*)device->buffer, frames, &all_stopped);
++			DSOUND_Limit(device, (float*)device->buffer, frames);
+ 
+ 			device->normfunction(device->buffer, buffer, frames * device->pwfx->nChannels);
+ 		}
