@@ -397,3 +397,18 @@ overlay = games/syberia/overlay
 cover = lab/games/Syberia/cover.png
 ; the drummer automaton, without the cinematic's black bars
 cover_crop = 200 70 340
+
+[corsairs]
+; Pirates of the Caribbean ("Корсары: Пираты Карибского моря", 2003),
+; the fan-patched Russian-English edition (no CD check, dialogues in
+; Russian), with the Intel Fix (the sea's simpler shaders); under Wine.
+; prepare.sh puts the Russian voices and videos in place
+; (games/corsairs/README.md). Without the uninstallers and the logs.
+source = lab/games/Corsairs/Пираты Карибского Моря
+exclude = Uninstall*.exe
+exclude = Uninst.ico
+overlay = games/corsairs/overlay
+run = games/corsairs/prepare.sh
+; cover: its loading screen (the title and a ship) as the GO Ultra shows it
+cover = lab/games/Corsairs/cover.png
+cover_crop = 230 70 400
