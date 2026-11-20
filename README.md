@@ -114,6 +114,7 @@ scripts/devlib.py              общее для инструментов пла
 scripts/oga-serial.py          плата по UART: команды, файлы, кнопки, снимок (GO Advance)
 scripts/ogu-ctl.py             плата по ssh: кнопки, снимок, запуск игры, клики (GO Ultra)
 scripts/doom3-test.py          автоматический прогон DOOM 3 BFG на GO Ultra
+scripts/wine-stacks.py         стеки i386 всех потоков Windows-игры под Wine на GO Ultra (где висит или крутится)
 scripts/ogu-hold.c             удержание кнопок на плате (вспомогательная программа)
 docs/                          документация (ниже), книги (book, dev-book, check-book) и их PDF
 src/                           сабмодули компонентов
