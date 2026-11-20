@@ -412,3 +412,22 @@ run = games/corsairs/prepare.sh
 ; cover: its loading screen (the title and a ship) as the GO Ultra shows it
 cover = lab/games/Corsairs/cover.png
 cover_crop = 230 70 400
+
+[bardstale]
+; The Bard's Tale ARPG: Remastered and Resnarkled (GOG, 2018 edition of
+; the 2004 game) under Wine, in Russian (prepare.sh: the GOG minimanifest's
+; language), the gamepad on (wine.ini profile: settings.bin). Without the
+; German voices and videos (*_ge: the game plays English or German, the
+; Russian is text only), GOG's uninstaller, web cache and link
+; (games/bardstale/README.md)
+source = lab/games/The Bard's Tale
+exclude = Res/Sounds/*_ge.*
+exclude = Res/Movies/*_ge.*
+exclude = unins000.*
+exclude = webcache.zip
+exclude = *.lnk
+overlay = games/bardstale/overlay
+run = games/bardstale/prepare.sh
+; cover: the Bard on the game's character page, as the GO Ultra shows it
+cover = lab/games/The Bard's Tale/cover.png
+cover_crop = 160 60 240
