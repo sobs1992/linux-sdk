@@ -180,7 +180,7 @@ exclude = KillSave.exe
 exclude = protect.dll
 overlay = games/templar/overlay
 cover = lab/games/Tampliers/Sbz1/Videos/bd_05.bik:4
-cover_crop = 60 0 360
+cover_crop = 200 0 360
 
 [monkey1]
 ; Tales of Monkey Island (2009): the GOG edition with the Russian
@@ -327,7 +327,8 @@ exclude = *.log
 overlay = games/shade/overlay
 run = games/shade/prepare.sh
 cover = lab/games/Shade Wrath of Angels/cover.jpg
-cover_crop = center
+; the box art from below its "PC CD-ROM" corner: the title whole
+cover_crop = 110 45 530
 
 [nfsu]
 ; Need for Speed: Underground (2003) 1.4: game_info/data of NFSU_Linux.tar.xz
@@ -364,7 +365,8 @@ overlay = games/ssam1/overlay
 run = games/serioussam/prepare.sh
 ; cover: the game's splash screen as the engine draws it on the GO Ultra
 cover = lab/games/Serious Sam - The First Encounter/cover.png
-cover_crop = center
+; the bomb and Sam whole (a 1024x768 start of the engine: no title cut)
+cover_crop = 236 60 420
 
 [ssam2]
 ; Serious Sam: The Second Encounter, the Russian edition patched to 1.07,
@@ -383,7 +385,8 @@ exclude = *.log
 overlay = games/ssam2/overlay
 run = games/serioussam/prepare.sh
 cover = lab/games/Serious Sam - The Second Encounter/cover.png
-cover_crop = center
+; the bomb and Sam (the title, cut by the 16:9 screen, left out)
+cover_crop = 215 85 360
 
 [syberia]
 ; Syberia (2002), the Russian edition 1.0 (Nival) as installed, without
