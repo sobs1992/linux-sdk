@@ -5,8 +5,12 @@ USB-C port (S42usbnet: the board is 192.168.7.2; OGU_HOST to change it).
 
   ogu-ctl.py shot:FILE.png        screenshot of bare_app's layers (SIGUSR1)
   ogu-ctl.py a wait:2000 down a   buttons: up down left right a b x y l r l2 r2 f1..f6,
-                                  NAME:MS holds one for MS (default 100; over 150
-                                  written again every 2 ms by ogu-hold)
+                                  NAME:MS holds one for MS (default 100): by
+                                  bare_app's FIFO (press/release) where its bare_app
+                                  has them, else written into gpio-keys (a write
+                                  lasts until the driver's next poll, 16 ms; over
+                                  150 ms written again every 2 ms by ogu-hold,
+                                  which flickers at each poll)
   ogu-ctl.py stick:1,0.5,800      left stick at X,Y (-1..1, up and left negative)
                                   for MS (default 300), then back to the center
   ogu-ctl.py rstick:0,-1          the right stick
@@ -93,6 +97,18 @@ def need_hold():
         ssh("cat > %s && chmod 755 %s" % (HOLD, HOLD), f.read())
 
 
+_fifo_press = None
+
+
+def press_by_fifo():
+    """Whether the board's bare_app takes "press NAME" on its FIFO (the
+    buttons are then pressed there, for exactly as long as asked)"""
+    global _fifo_press
+    if _fifo_press is None:
+        _fifo_press = ssh("grep -q 'no such button' /usr/bin/bare_app && echo yes || true").strip() == b"yes"
+    return _fifo_press
+
+
 def run(steps):
     """Key events go into one file; a shell script writes them out with the pauses"""
     blob, script = b"", []
@@ -129,6 +145,12 @@ def run(steps):
             need_hold()
             script.append("%s $%s %d %d %d %d %d; sleep 0.15" %
                           (HOLD, dev, ms, ax[0], val(ax, v[0]), ay[0], val(ay, v[1])))
+        elif name.lower() in KEYS and press_by_fifo():
+            # bare_app's own press and release, held exactly that long (a
+            # write into gpio-keys-polled's device lasts until its next poll)
+            gp = {"l": "l1", "r": "r1"}.get(name.lower(), name.lower())
+            script.append(ctl(APP_CTL, "press " + gp) + "; sleep %.3f; " % (int(arg or 100) / 1000)
+                          + ctl(APP_CTL, "release " + gp) + "; sleep 0.25")
         elif name.lower() in KEYS and int(arg or 100) > 150:
             # held longer than a poll of gpio-keys-polled: written again and again
             need_hold()
