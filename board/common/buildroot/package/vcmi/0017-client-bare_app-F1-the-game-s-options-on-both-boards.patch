@@ -1,0 +1,93 @@
+From: OdroidLinux SDK
+Subject: [PATCH] client: bare_app: F1 the game's options, on both boards
+
+F1 opens the game's menu in every game of the SDK (the user's rule): here
+the options (the controller's start), as F3 did on the OGA. F2 and F3 are
+held as Ctrl and Shift, F4 ends the turn. The GO Ultra's row is now the
+OGA's: F1 no longer minimises (bare_app's F5 does, as in the other
+games) and F5 is no more the game's end turn or Escape (F4 and B are).
+---
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -173,7 +173,6 @@
+ 	uint8_t clicks = 0;	///< presses in a row (a double click)
+ 	/// BARE_APP_VCMI_KEYS=ogu: the ODROID-GO Ultra's F keys (onUltraButton)
+ 	const bool ultraKeys = ultraKeysSet();
+-	bool f5EndsTurn = false;	///< GO Ultra keys: F5 was pressed as end turn, not Escape
+ 	uint32_t stickDpad = 0;	///< D-pad directions the right stick holds, gp_button bits
+ 	Point captured;		///< the screen's size when taken, (0, 0): nothing new to present
+ 	const SDL_Surface * cursorImage = nullptr;	///< set for each frame, none: hidden
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -893,11 +893,12 @@
+ 	// buttons (the controller's x, y), B back (the keyboard's Escape:
+ 	// cancel, also back in the main menu's pages, where the controller's
+ 	// b is not), X accept and open the selected hero (the controller's a),
+-	// F4 end turn (back), F3 options (start), R1 the next hero (left
+-	// shoulder). The OGA has F1..F6 instead of Start and Select (F5, F6 are
+-	// bare_app's); bare_app keeps L2 and R2 for the volume. F1 and F2 are
+-	// held as the keyboard's Ctrl and Shift: a click on a stack then splits
+-	// it as in HotA (one creature off, into equal parts).
++	// F1 options (start: the game's menu, F1 in every game of the SDK), F4
++	// end turn (back), R1 the next hero (left shoulder). The OGA and the GO
++	// Ultra have F1..F6 instead of Start and Select (F5, F6 are bare_app's);
++	// bare_app keeps L2 and R2 for the volume. F2 and F3 are held as the
++	// keyboard's Ctrl and Shift: a click on a stack then splits it as in
++	// HotA (one creature off, into equal parts).
+ 	if(ultraKeys && onUltraButton(button, pressed))
+ 		return;
+ 	switch(button)
+@@ -909,9 +910,9 @@
+ 		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
+ 		case GP_F4:     pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
+ 		case GP_START:
+-		case GP_F3:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
+-		case GP_F1:     ctrl = pressed; break;
+-		case GP_F2:     shift = pressed; break;
++		case GP_F1:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
++		case GP_F2:     ctrl = pressed; break;
++		case GP_F3:     shift = pressed; break;
+ 		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
+ 		case GP_L1:
+ 			if(pressed && !native)	// native: no overview, the whole width is in view
+@@ -940,36 +941,12 @@
+ 	return keys && !std::strcmp(keys, "ogu");
+ }
+ 
+-/// The ODROID-GO Ultra's row of F1..F6: F1 (minimise) and F6 (quit) are
+-/// bare_app's, F2 and F3 are held as Ctrl and Shift, F4 ends the turn (as
+-/// on the OGA), F5 too on the adventure map, elsewhere it is Escape (as B).
+-/// The options stay on the map's own button. false: as on the OGA.
++/// The ODROID-GO Ultra's row of F1..F6 is the OGA's: F5 (minimise) and F6
++/// (quit) are bare_app's, never the game's. false: the common buttons.
+ bool BareAppLink::onUltraButton(int button, bool pressed)
+ {
+-	switch(button)
+-	{
+-		case GP_F1:
+-		case GP_F6:
+-			return true;
+-		case GP_F2:
+-			ctrl = pressed;
+-			return true;
+-		case GP_F3:
+-			shift = pressed;
+-			return true;
+-		case GP_F5:
+-			// the release goes to what the press was, also if the map has gone meanwhile
+-			if(pressed)
+-				f5EndsTurn = adventureInt && adventureInt->isActive()
+-					&& adventureInt->getAdventureShortcuts().optionCanEndTurn();
+-			if(f5EndsTurn)
+-				pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed);
+-			else
+-				pushKey(SDL_SCANCODE_ESCAPE, pressed);
+-			return true;
+-		default:
+-			return false;
+-	}
++	(void)pressed;
++	return button == GP_F5 || button == GP_F6;
+ }
+ 
+ /// The right stick (the GO Ultra has one) does what the D-pad does
