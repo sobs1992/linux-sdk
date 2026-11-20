@@ -168,6 +168,22 @@ bare_app показывает лишь игры, файлы которых ес�
   каталога игры; в `overlay/save` — готовый профиль «player» (имя с консоли не
   набрать); левый стик — аналоговый руль через геймпад Wine (`stick = pad`, патч
   0026); ~43 fps в гонке; `nfsu/README.md`.
+- **syberia** — Syberia, русское издание 1.0 (Wine, Direct3D 7, ролики Bink): как
+  установлено, без правок; 800×600 целиком, 30 fps; стик — курсор, A/B — кнопки
+  мыши; `syberia/README.md`.
+- **corsairs** — «Корсары: Пираты Карибского моря» (Storm, Direct3D 8, ролики WMV
+  через GStreamer; Wine): `prepare.sh` кладёт русскую озвучку и ролики (то, что
+  делает `sound_video_on.bat`), снимает Intel Fix (полное море, fps тот же) и
+  переписывает управление в `options` под геймпад (левый стик — W A S D);
+  ~50 fps; `corsairs/README.md`.
+- **bardstale** — The Bard's Tale (ремастер GOG; Wine, XInput): `prepare.sh` ставит
+  русский язык в миниманифест GOG (`goggame-*.info`), текст русский, речь
+  английская (русской в издании нет); профиль с `settings.bin`, где включён
+  геймпад; 60 fps; `bardstale/README.md`.
+- **ssam1**, **ssam2** — Serious Sam: The First / The Second Encounter (1.05/1.07,
+  русские .gro) под Serious Engine 1.10 (пакет `serious-engine`,
+  `bare-app.SERIOUSSAM=y`): `serioussam/prepare.sh` пишет управление геймпада
+  (`controls.py`) и пункт «Помощь в прицеливании»; ~60 fps; `serioussam/README.md`.
 
 - **doom3** — DOOM 3 BFG Edition (GOG) под RBDOOM-3-BFG: `base/` без
   сетевых карт, все три кампании (с Resurrection of Evil и The Lost Mission) —
