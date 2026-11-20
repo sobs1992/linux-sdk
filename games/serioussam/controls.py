@@ -13,6 +13,7 @@ X Y the left stick, Z R the right one). L2 and R2 are buttons paddle3 (18)
 and paddle2 (17), as the game.ini's "gamepad" makes them: the engine reads
 a trigger only as an axis.
 """
+import os
 import re
 import sys
 
@@ -40,6 +41,24 @@ BUTTONS_TFE = {
     "Tommygun/Minigun": 14,         # D-pad right
 }
 
+# The GO Advance (SSAM_LAYOUT=oga: oga.manifest's env): one stick. The
+# stick looks (turn, look up/down), the D-pad walks; the bomb, the
+# third-person view and the sniper's zoom have no button there
+BUTTONS_OGA = {
+    "Move Forward": 11,             # D-pad up
+    "Move Backward": 12,            # D-pad down
+    "Strafe Left": 13,              # D-pad left
+    "Strafe Right": 14,             # D-pad right
+}
+DPAD_ACTIONS = ("Serious Bomb", "3rd Person View", "Sniper Zoom -", "Sniper Zoom +",
+                "Cannon", "Knife", "Tommygun/Minigun")
+AXES_OGA = {
+    "move f/b": ("None", 50, 0, False),
+    "move l/r": ("None", 50, 0, False),
+    "turn l/r": ("Joy 1 Axis X", 45, 15, False),
+    "look u/d": ("Joy 1 Axis Y", 40, 15, True),
+}
+
 # axis -> (control, sensitivity, dead zone %, inverted)
 AXES = {
     "move f/b": ("Joy 1 Axis Y", 100, 20, True),
@@ -62,6 +81,12 @@ def main():
     buttons = dict(BUTTONS)
     if "Serious Bomb" not in names:
         buttons.update(BUTTONS_TFE)
+    axes = dict(AXES)
+    if os.environ.get("SSAM_LAYOUT") == "oga":
+        for n in DPAD_ACTIONS:
+            buttons.pop(n, None)
+        buttons.update(BUTTONS_OGA)
+        axes.update(AXES_OGA)
     done, out, name = set(), [], None
     for line in lines:
         s = line.strip()
@@ -71,13 +96,13 @@ def main():
             line = " Key2: Joy 1 Button %d" % buttons[name]
             done.add(name)
         m = re.match(r'Axis "([^"]+)" "[^"]*" \d+ \d+ (\w+) (\w+) (\w+)$', s)
-        if m and m.group(1) in AXES:
-            control, sens, dead, inv = AXES[m.group(1)]
+        if m and m.group(1) in axes:
+            control, sens, dead, inv = axes[m.group(1)]
             line = 'Axis "%s" "%s" %d %d %s Relative NotSmooth' % (
                 m.group(1), control, sens, dead, "Inverted" if inv else "NotInverted")
             done.add(m.group(1))
         out.append(line)
-    missing = [n for n in buttons if n not in done and n in names] + [a for a in AXES if a not in done]
+    missing = [n for n in buttons if n not in done and n in names] + [a for a in axes if a not in done]
     if missing:
         sys.exit("controls.py: %s: not set: %s" % (path, ", ".join(missing)))
     with open(path, "wb") as f:

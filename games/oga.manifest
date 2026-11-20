@@ -72,3 +72,65 @@ run = games/neighbours/prepare.sh
 source = lab/games/NeighborsFromHell2
 overlay = games/neighbours2/overlay-oga
 run = games/neighbours2/prepare.sh
+
+[ssam1]
+; as games.manifest's [ssam1], with the GO Advance's game.ini (overlay-oga)
+; and controls
+; Serious Sam: The First Encounter, the Russian edition (1C) patched to
+; 1.05 (the game's own .gro files carry the Russian text and voices), by
+; Serious Engine 1.10 (bare-app.SERIOUSSAM=y). Without the Windows
+; programs (Bin), the editors' help, the uninstaller, the mods (their
+; libraries are Windows ones), the PC's saved games and players' controls
+; (the engine keeps those in the game's data directory). prepare.sh: the
+; gamepad's controls and the aim assist option (games/serioussam)
+source = lab/games/Serious Sam - The First Encounter
+exclude = Bin
+exclude = Backup
+exclude = Uninstall
+exclude = Help
+exclude = Mods
+exclude = SaveGame
+exclude = Controls/Controls?.ctl
+exclude = *.log
+overlay = games/ssam1/overlay-oga
+run = games/serioussam/prepare.sh
+; one stick: it looks, the D-pad walks (controls.py)
+env = SSAM_LAYOUT=oga
+; cover: the game's splash screen as the engine draws it on the GO Ultra
+cover = lab/games/Serious Sam - The First Encounter/cover.png
+; the bomb and Sam whole (a 1024x768 start of the engine: no title cut)
+cover_crop = 236 60 420
+
+[ssam2]
+; as games.manifest's [ssam2], with the GO Advance's game.ini (overlay-oga)
+; and controls
+; Serious Sam: The Second Encounter, the Russian edition patched to 1.07,
+; as [ssam1] (the mod Warped left out with the other mods; Steam's shader
+; cache too)
+source = lab/games/Serious Sam - The Second Encounter
+exclude = Bin
+exclude = Backup
+exclude = Uninstall
+exclude = Help
+exclude = Mods
+exclude = SaveGame
+exclude = steam_shader_cache
+exclude = Controls/Controls?.ctl
+exclude = *.log
+overlay = games/ssam2/overlay-oga
+run = games/serioussam/prepare.sh
+; one stick: it looks, the D-pad walks (controls.py)
+env = SSAM_LAYOUT=oga
+cover = lab/games/Serious Sam - The Second Encounter/cover.png
+; the bomb and Sam (the title, cut by the 16:9 screen, left out)
+cover_crop = 215 85 360
+
+[syberia]
+; as games.manifest's [syberia] (its wine.ini: the stick is the cursor,
+; the GO Advance's one stick too)
+source = lab/games/Syberia
+exclude = Uninstall
+exclude = debug.log
+overlay = games/syberia/overlay
+cover = lab/games/Syberia/cover.png
+cover_crop = 200 70 340

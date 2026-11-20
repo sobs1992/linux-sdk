@@ -257,14 +257,14 @@ VCMI остаются в `/data/config/vcmi`.
 ## Игры с GO Ultra
 
 `oga_defconfig` собирает и движки игр GO Ultra, которые тянет RK3326 (4×A35, 1 ГБ,
-Mali-G31): `bare-app.SDL=y bare-app.RTCW=y bare-app.WINE=y`. Файлы игр кладёт на
+Mali-G31): `bare-app.SDL=y bare-app.RTCW=y bare-app.WINE=y bare-app.SERIOUSSAM=y`. Файлы игр кладёт на
 карту манифест `games/oga.manifest` — те же источники, что у GO Ultra, со своими
 `wine.ini`/`game.ini` из `games/<игра>/overlay-oga` (экран 480×320, один стик):
 
 ```sh
 scripts/games-image.py -m games/oga.manifest --card lab/images/work-oga/games
 ssh root@192.168.50.61 mount -o remount,rw /games
-tar -C lab/images/work-oga/games -cf - rtcw fallout fallout2 neighbours neighbours2 \
+tar -C lab/images/work-oga/games -cf - rtcw fallout fallout2 neighbours neighbours2 ssam1 ssam2 syberia \
   | ssh root@192.168.50.61 tar -xf - -C /games
 ssh root@192.168.50.61 mount -o remount,ro /games
 ```
@@ -274,9 +274,11 @@ ssh root@192.168.50.61 mount -o remount,ro /games
 | Return to Castle Wolfenstein (iortcw) | 27–30 fps в первом уровне; стик — обзор, крестовина — ходьба (`main/gamepad-device.cfg` на карте); F2 сохранение, F3 режим оружия, F4 блокнот |
 | Fallout, Fallout 2 (Wine) | hi-res патч на 720×480 с панелью 640 — ровно ⅔ экрана; крестовина прокручивает карту, L2 — лупа 1:1 для мелкого текста; игре ~400 МБ памяти (Fallout 1) |
 | Как достать соседа 1, 2 (Wine) | как на GO Ultra (верхние 480 строк 800×600), уменьшено до 480×288 |
+| Serious Sam 1, 2 (Serious Engine) | ~27–30 fps (лимит 30) в первом уровне; стик — обзор, крестовина — ходьба (`SSAM_LAYOUT=oga` для `controls.py`); `PAN_MESA_DEBUG=linear`, как у RTCW. Один раз игра упала (SIGSEGV при загрузке уровня), повторить не удалось |
+| Syberia (Wine) | играбельна, 800×600 уменьшено до 426×320; вступительный ролик Bink на OGA чёрный и первая загрузка ~2 мин — F1 пропускает ролик |
 
 Не перенесены: игры Wine с 3D (Pirates!, Daemonica, Monkey Island, Knights of the
-Temple, Prince of Persia, Shade, NFSU) — на GO Ultra они упираются в процессор A73,
+Temple, Prince of Persia, Shade, NFSU, Корсары, The Bard's Tale) — на GO Ultra они упираются в процессор A73,
 A35 в несколько раз медленнее; DOOM 3 BFG — нужно больше 1 ГБ памяти; HotA под Wine —
 Герои уже есть в VCMI.
 

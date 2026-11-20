@@ -60,9 +60,12 @@ scripts/games-image.py -m МАНИФЕСТ --reuse --games doom  # осталь�
 ## Карта GO Advance
 
 `games/oga.manifest` — игры GO Ultra, которые тянет GO Advance (RTCW, Fallout 1 и 2,
-«Как достать соседа» 1 и 2), с теми же источниками и своими настройками из
-`games/<игра>/overlay-oga` (экран 480×320, один стик; Fallout — `FALLOUT_SCREEN` и
-`FALLOUT_BAR` для `fallout/prepare.sh`). Раздел `GAMES` у OGA — p4 его единственной
+«Как достать соседа» 1 и 2, Serious Sam 1 и 2, Syberia), с теми же источниками и своими
+настройками из `games/<игра>/overlay-oga` (экран 480×320, один стик; Fallout —
+`FALLOUT_SCREEN` и `FALLOUT_BAR` для `fallout/prepare.sh`; Serious Sam —
+`SSAM_LAYOUT=oga` для `serioussam/controls.py`: стик смотрит, крестовина ходит, ~27–30 fps;
+Syberia — с `wine.ini` GO Ultra: стик — курсор, вступительный ролик на OGA чёрный —
+F1 пропускает). Раздел `GAMES` у OGA — p4 его единственной
 SD-карты, поэтому `--card` указывает на сам `<work>/games`, а на плату игры идут по
 ssh (`tar`, `/games` перемонтируется на запись). Подробности и что не перенесено —
 [docs/boards/oga.md](../docs/boards/oga.md), «Игры с GO Ultra».
