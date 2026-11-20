@@ -27,10 +27,11 @@ Notes:
   start (also on Windows); harmless.
 - In the game's screens A (Space) highlights a button, X (Enter) presses
   it; the main menu's highlight wraps around and skips disabled entries.
-- F1 is the game's F2: the menu of its screens (character, ship, hold,
-  passengers, journal, trade book, nations, items: the inventory), moved
-  through by the D-pad (not in a fight nor on the world map: the game's
-  rule). The game's main menu is on Esc (B) as well as on its F1.
+- F1 is the game's main menu (its own F1; Esc, B, opens it too), as in
+  every game of the SDK. F4 is the game's F2: the menu of its screens
+  (character, ship, hold, passengers, journal, trade book, nations, items:
+  the inventory), moved through by the D-pad (not in a fight nor on the
+  world map: the game's rule).
 - Saved games in SAVE/, settings in options, both in the writable copy
   (/data/wine/games/corsairs).
 - The GO Ultra unit with the older Wine build (unit 1 before its update)

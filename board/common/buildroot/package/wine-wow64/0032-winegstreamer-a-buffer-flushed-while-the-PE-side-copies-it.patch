@@ -1,0 +1,82 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] winegstreamer: a buffer flushed while the PE side copies it
+
+The PE side takes a stream's buffer (get_buffer: its size), copies it
+piece by piece (copy_buffer) and releases it. A flush in between (a seek:
+DirectShow reads a file's start to find its format and seeks back to 0)
+unmapped that buffer, and the next one could take its place before the
+PE side went on: it then copied from the new buffer by the old one's size
+and released the new one unsent. With buffers all of one size that went
+unseen; the first WMA buffer after the seek is shorter since gst1-libav's
+patch 0001 drops the samples FFmpeg asks to skip, and Корсары (Pirates of
+the Caribbean) died on its first WMV video:
+
+  wg_parser_stream_copy_buffer: Assertion `offset + size <=
+  stream->map_info.size' failed.
+
+A flush now marks a buffer given out as stale: copying from it is
+refused as from a flushed pin (the PE side already handles that), and its
+release leaves the buffer now in its place alone, to be got next.
+---
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -116,6 +116,12 @@
+     GstMapInfo map_info;
+ 
+     bool flushing, eos, enabled, has_tags, has_buffer, no_more_pads;
++    /* handed_out: the buffer was given to the PE side (get_buffer), which
++     * copies from it and then releases it. stale: a flush took that buffer
++     * away meanwhile; another one may already be in its place, and the PE
++     * side must neither copy from that one by the old buffer's offsets and
++     * size nor release it. */
++    bool handed_out, stale;
+ 
+     uint64_t duration;
+     gchar *tags[WG_PARSER_TAG_COUNT];
+@@ -376,6 +382,8 @@
+     wg_buffer->delta = GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+     wg_buffer->size = gst_buffer_get_size(buffer);
+     wg_buffer->stream = stream->number;
++    stream->handed_out = true;
++    stream->stale = false;
+ 
+     pthread_mutex_unlock(&parser->mutex);
+     return S_OK;
+@@ -391,7 +399,8 @@
+ 
+     pthread_mutex_lock(&parser->mutex);
+ 
+-    if (!stream->buffer)
++    /* stale: flushed after get_buffer, as when nothing is there */
++    if (!stream->buffer || stream->stale)
+     {
+         pthread_mutex_unlock(&parser->mutex);
+         return VFW_E_WRONG_STATE;
+@@ -412,6 +421,14 @@
+ 
+     pthread_mutex_lock(&parser->mutex);
+ 
++    /* the buffer given out went with a flush: the one there now is not it */
++    if (stream->stale)
++    {
++        stream->stale = false;
++        pthread_mutex_unlock(&parser->mutex);
++        return S_OK;
++    }
++    stream->handed_out = false;
+     if (stream->buffer)
+     {
+         gst_buffer_unmap(stream->buffer, &stream->map_info);
+@@ -659,6 +676,12 @@
+                 gst_buffer_unmap(stream->buffer, &stream->map_info);
+                 gst_buffer_unref(stream->buffer);
+                 stream->buffer = NULL;
++                /* the PE side may still be copying from it (Корсары' WMV
++                 * videos: the first WMA buffer after DirectShow's seek back
++                 * to 0 is shorter, patch gst1-libav 0001, and the copy by
++                 * the old size ran past the new one) */
++                stream->stale = stream->handed_out;
++                stream->handed_out = false;
+             }
+ 
+             pthread_mutex_unlock(&parser->mutex);
