@@ -1,0 +1,225 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] dsound: a look-ahead limiter, and a mix gain per game
+
+Patch 0030's limiter dropped the gain at the loudest frame itself: no
+sample went over full scale, but the wave had a corner at every peak. NFS
+Underground's race (music, engines, crashes, nitrous) is that loud all the
+time: in 85 of 89 seconds the mix stood at the ceiling (14096 samples),
+the limiter acted like a clipper and it was heard as clipping whenever
+sounds piled up.
+
+The gain a frame needs is now reached by a ramp over the 64 frames before
+it (the output lags the mix by 1.3 ms at 48 kHz): the release envelope's
+least value over the last 65 frames, averaged over the last 64. Every
+average that a frame's gain takes in holds the envelope at that frame, so
+it stays under the ceiling; the gain moves at most ~1% a frame.
+
+"MixGain" (the DirectSound key of HKCU\Software\Wine or the application's
+AppDefaults), in dB, scales the mix before the limiter, for a game whose
+buffers add up far over full scale. NFS Underground with -6: no sample
+over 31500 in three minutes of racing (99.9% under 15200), heard clean.
+---
+--- a/dlls/dsound/dsound_main.c
++++ b/dlls/dsound/dsound_main.c
+@@ -33,6 +33,7 @@
+  */
+ 
+ #include <stdarg.h>
++#include <math.h>
+ 
+ #define COBJMACROS
+ #include "windef.h"
+@@ -82,6 +83,7 @@
+ /* All default settings, you most likely don't want to touch these, see wiki on UsefulRegistryKeys */
+ int ds_hel_buflen = 32768 * 2;
+ enum ds_resampler ds_resampler = DS_RESAMPLER_SINC;
++float ds_mix_gain = 1.0f;
+ 
+ /*
+  * Get a config key from either the app-specific or the default config
+@@ -145,11 +147,24 @@
+         else ds_resampler = DS_RESAMPLER_SINC;
+     }
+ 
++    /* "MixGain": the mix's level before the limiter, in dB ("-6": half),
++     * for a game whose buffers add up far over full scale (NFS Underground
++     * in a race): the limiter then has less to take away */
++    if (!get_config_key( hkey, appkey, "MixGain", buffer, MAX_PATH ))
++    {
++        double db = atof(buffer);
++
++        if (db < -40.0) db = -40.0;
++        if (db > 12.0) db = 12.0;
++        ds_mix_gain = pow(10.0, db / 20.0);
++    }
++
+     if (appkey) RegCloseKey( appkey );
+     if (hkey) RegCloseKey( hkey );
+ 
+     TRACE("ds_hel_buflen = %d, resampler %s\n", ds_hel_buflen, ds_resampler == DS_RESAMPLER_FIR ? "fir" :
+           ds_resampler == DS_RESAMPLER_LINEAR ? "linear" : "sinc");
++    TRACE("mix gain %f\n", ds_mix_gain);
+ }
+ 
+ static const char * get_device_id(LPCGUID pGuid)
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -37,6 +37,7 @@
+ extern int ds_hel_buflen;
+ enum ds_resampler { DS_RESAMPLER_SINC, DS_RESAMPLER_LINEAR, DS_RESAMPLER_FIR };
+ extern enum ds_resampler ds_resampler;
++extern float ds_mix_gain;
+ 
+ /*****************************************************************************
+  * Predeclare the interface implementation structures
+@@ -97,8 +98,16 @@
+     DSVOLUMEPAN                 volpan;
+ 
+     normfunc normfunction;
+-    /* the output limiter: how far its gain is down from 1 (0 at the start) */
+-    float                       limiter_cut;
++    /* the output limiter (mixer.c, DSOUND_Limit): set up for
++     * limiter_channels (0 at the start), its release envelope, the frames
++     * held back, the least envelope over the look-ahead (a deque of
++     * values and their frame numbers) and the gains averaged over it */
++    UINT                        limiter_channels, limiter_pos, limiter_head, limiter_count, limiter_frame;
++    float                       limiter_env, limiter_sum;
++    float                       limiter_delay[64 * 8];
++    float                       limiter_min[64];
++    float                       limiter_dq[65];
++    UINT                        limiter_dq_frame[65];
+ 
+     /* DirectSound3DListener fields */
+     DS3DLISTENER                ds3dl;
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -852,42 +852,112 @@
+  */
+ /*
+  * The mix kept under full scale, as Windows' audio engine keeps it with a
+- * limiter: where a frame's loudest channel would pass LIMIT_CEILING, the
+- * gain drops at once to bring it there; it comes back towards 1 over about
+- * LIMIT_RELEASE_S. Without it the sum of a game's buffers was cut off at
+- * full scale: NFS Underground's music, engine and crashes in a race, ~10
+- * cuts a second, heard as clicks.
++ * limiter. Without it the sum of a game's buffers was cut off at full
++ * scale (NFS Underground's music, engine and crashes in a race). The gain
++ * needed to keep a frame's loudest channel under LIMIT_CEILING is reached
++ * by a ramp over the LIMIT_AHEAD frames before it (the output lags the mix
++ * by as many, 1.3 ms at 48 kHz) and comes back towards 1 over about
++ * LIMIT_RELEASE_S: no corner in the wave at the peak, which a gain dropped
++ * at the peak itself made (heard as clipping when sounds piled up, as they
++ * do all through a race). The ramp: the release envelope's least value over
++ * the last LIMIT_AHEAD + 1 frames (a deque), averaged over the last
++ * LIMIT_AHEAD of those; every average a frame's gain takes in holds the
++ * envelope's value at the frame. ds_mix_gain ("MixGain") scales the mix
++ * first.
+  */
+ #define LIMIT_CEILING 0.977f	/* -0.2 dBFS */
+ #define LIMIT_RELEASE_S 0.1f
++#define LIMIT_AHEAD 64
++#define LIMIT_CHANNELS 8
++#define LIMIT_DQ (LIMIT_AHEAD + 1)
+ 
+ static void DSOUND_Limit(DirectSoundDevice *device, float *buf, DWORD frames)
+ {
+-    UINT channels = device->pwfx->nChannels, c;
+-    float gain = 1.0f - device->limiter_cut;
++    UINT channels = device->pwfx->nChannels, c, k;
+     float release = 1.0f / (LIMIT_RELEASE_S * device->pwfx->nSamplesPerSec);
++    float env, gain, scale = ds_mix_gain;
+     DWORD i;
+ 
++    if (channels > LIMIT_CHANNELS)
++    {
++        for (i = 0; i < frames * channels; i++)
++            buf[i] *= scale;
++        return;
++    }
++    if (device->limiter_channels != channels)
++    {
++        device->limiter_channels = channels;
++        device->limiter_pos = device->limiter_head = device->limiter_count = 0;
++        device->limiter_frame = 0;
++        device->limiter_env = 1.0f;
++        memset(device->limiter_delay, 0, sizeof(device->limiter_delay));
++        for (k = 0; k < LIMIT_AHEAD; k++)
++            device->limiter_min[k] = 1.0f;
++        device->limiter_sum = LIMIT_AHEAD;
++    }
++    env = device->limiter_env;
++
+     for (i = 0; i < frames; i++, buf += channels)
+     {
+-        float peak = 0.0f;
++        float *held = device->limiter_delay + device->limiter_pos * LIMIT_CHANNELS;
++        UINT frame = device->limiter_frame++, tail;
++        float peak = 0.0f, need, least;
+ 
+         for (c = 0; c < channels; c++)
+         {
+-            float v = buf[c] < 0 ? -buf[c] : buf[c];
++            float v;
++
++            buf[c] *= scale;
++            v = buf[c] < 0 ? -buf[c] : buf[c];
+             if (v > peak) peak = v;
+         }
+-        if (peak * gain > LIMIT_CEILING)
+-            gain = LIMIT_CEILING / peak;
+-        if (gain < 1.0f)
++        need = peak > LIMIT_CEILING ? LIMIT_CEILING / peak : 1.0f;
++        env += (1.0f - env) * release;
++        if (env > 0.9999f) env = 1.0f;
++        if (need < env) env = need;
++
++        /* the deque: increasing values, the oldest first; at most
++         * LIMIT_DQ frames from frame - LIMIT_AHEAD on */
++        if (device->limiter_count &&
++            frame - device->limiter_dq_frame[device->limiter_head] >= LIMIT_AHEAD + 1)
++        {
++            device->limiter_head = (device->limiter_head + 1) % LIMIT_DQ;
++            device->limiter_count--;
++        }
++        while (device->limiter_count)
++        {
++            tail = (device->limiter_head + device->limiter_count - 1) % LIMIT_DQ;
++            if (device->limiter_dq[tail] < env) break;
++            device->limiter_count--;
++        }
++        tail = (device->limiter_head + device->limiter_count) % LIMIT_DQ;
++        device->limiter_dq[tail] = env;
++        device->limiter_dq_frame[tail] = frame;
++        device->limiter_count++;
++        least = device->limiter_dq[device->limiter_head];
++
++        device->limiter_sum += least - device->limiter_min[device->limiter_pos];
++        device->limiter_min[device->limiter_pos] = least;
++        gain = device->limiter_sum / LIMIT_AHEAD;
++        if (gain > 1.0f) gain = 1.0f;
++
++        for (c = 0; c < channels; c++)
++        {
++            float v = buf[c];
++
++            buf[c] = held[c] * gain;
++            held[c] = v;
++        }
++        if (++device->limiter_pos == LIMIT_AHEAD)
+         {
+-            for (c = 0; c < channels; c++)
+-                buf[c] *= gain;
+-            gain += (1.0f - gain) * release;
+-            if (gain > 0.9999f) gain = 1.0f;
++            /* the sum afresh, against the floats' drift */
++            device->limiter_pos = 0;
++            device->limiter_sum = 0.0f;
++            for (k = 0; k < LIMIT_AHEAD; k++)
++                device->limiter_sum += device->limiter_min[k];
+         }
+     }
+-    device->limiter_cut = 1.0f - gain;
++    device->limiter_env = env;
+ }
+ 
+ static void DSOUND_PerformMix(DirectSoundDevice *device)

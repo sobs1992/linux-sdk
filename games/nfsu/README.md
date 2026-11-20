@@ -39,9 +39,15 @@ entry.
   device's 48 kHz, since patch 0029 by a 16-point windowed sinc. Patch
   0005's linear interpolation left a hiss over it (images of the music
   20-30 dB under it above 11 kHz). In a race the music, engine and crashes
-  together go over full scale (~10 times a second): patch 0030's limiter
-  keeps the mix under it, as Windows' audio engine does; cut off, the
-  peaks were heard as clicks.
+  together go over full scale all the time: patch 0030's limiter keeps
+  the mix under it, as Windows' audio engine does (cut off, the peaks were
+  heard as clicks). Its gain dropped at the peak itself, which in a race
+  (85 s of 89 at the ceiling) still sounded clipped when sounds piled up:
+  patch 0031 ramps the gain down over 1.3 ms before a peak, and wine.ini
+  sets the game's `MixGain` to -6 dB (HKCU\Software\Wine\AppDefaults\
+  Speed.exe\DirectSound), so the limiter seldom acts at all (no sample
+  over 31500 in three minutes of racing). The sound is 6 dB quieter than
+  before at the same volume.
 - **Profile.** The console cannot type a name, so `overlay/save` holds a
   fresh profile "player" (made by the game). The widescreen fix's
   `CustomUserFilesDirectoryInGameDir = save` puts profiles and saved
