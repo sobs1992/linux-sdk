@@ -29,9 +29,10 @@ pictures for the buttons: its triangle is A (choose), the circle B (back).
 The game saves its settings when it quits by its own menu (Exit game), not
 when bare_app ends it.
 
-Short presses (under ~150 ms, as ogu-ctl sends them) are often missed in the
-menus, longer ones repeat; a hand's presses are longer. The same was seen
-with NFSU and Shade's pad (bare_app_wine's pad path), not looked into yet.
+Presses of any length reach the game whole (60-250 ms measured in XInput,
+one menu step per press). Missed and doubled presses seen while testing
+were ogu-ctl's writes into gpio-keys-polled, cut by its 16 ms poll; ogu-ctl
+now presses through bare_app's FIFO.
 
 ## Notes
 
