@@ -1,0 +1,72 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] engine: a newer version of the device's gamepad preset replaces the older
+
+bare_app names the device's preset (patch 0011), applied once. When the
+device's layout changes, the preset gets a new name with "_<n>" after it
+(odroid_go_advance_2 for odroid_go_advance): applied over the older
+version, whatever the gamepad's keys are, as the layout of the device.
+
+--- a/engine/client/input/in_joy.c	2026-11-20 18:49:10.958830975 +0100
++++ b/engine/client/input/in_joy.c	2026-11-20 18:49:10.982892696 +0100
+@@ -872,6 +872,40 @@
+ 
+ /*
+ ============
++Joy_PresetReplaces
++
++A newer version of the same preset: its name the older one's with "_<n>"
++after it, or both with one, the newer's bigger (odroid_go_advance_2
++replaces odroid_go_advance)
++============
++*/
++static int Joy_PresetVersion( const char *name, size_t *baselen )
++{
++	const char *p = Q_strrchr( name, '_' );
++
++	*baselen = Q_strlen( name );
++	if( !p || !p[1] )
++		return 1;
++	for( const char *d = p + 1; *d; d++ )
++	{
++		if( *d < '0' || *d > '9' )
++			return 1;
++	}
++	*baselen = p - name;
++	return Q_atoi( p + 1 );
++}
++
++static qboolean Joy_PresetReplaces( const char *newer, const char *older )
++{
++	size_t newlen, oldlen;
++	int newver = Joy_PresetVersion( newer, &newlen );
++	int oldver = Joy_PresetVersion( older, &oldlen );
++
++	return newlen == oldlen && !Q_strnicmp( newer, older, newlen ) && newver > oldver;
++}
++
++/*
++============
+ Joy_AutoPreset
+ 
+ ============
+@@ -883,11 +917,17 @@
+ 	if( s_tried || !joy_initialized || !host.config_executed || !Joy_IsActive( ))
+ 		return;
+ 
+-	// only pick once, user changes it from the menu afterwards
+-	if( COM_StringEmptyOrNULL( joy_suggested_preset ) || !COM_StringEmptyOrNULL( joy_preset.string ))
++	if( COM_StringEmptyOrNULL( joy_suggested_preset ))
+ 		return;
+ 
+-	if( Joy_IsCustomized( ))
++	// only pick once, user changes it from the menu afterwards; a newer
++	// version of the preset applied replaces it (the device's layout changed)
++	if( !COM_StringEmptyOrNULL( joy_preset.string ))
++	{
++		if( !Joy_PresetReplaces( joy_suggested_preset, joy_preset.string ))
++			return;
++	}
++	else if( Joy_IsCustomized( ))
+ 		return;
+ 
+ 	// don't spam errors on every gamepad switch if presets are missing

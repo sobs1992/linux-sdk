@@ -45,23 +45,8 @@ BUTTONS_TFE = {
 }
 
 # The GO Advance (SSAM_LAYOUT=oga: oga.manifest's env): one stick. The
-# stick looks (turn, look up/down), the D-pad walks; its buttons as they
-# were before the GO Ultra's took DOOM 3's
-BUTTONS_OGA = {
-    "Fire": 17,                     # R2
-    "Use/Sniper Zoom": 18,          # L2 (The Second Encounter)
-    "Use": 18,                      # L2 (The First Encounter)
-    "Up/Jump": 0,                   # A
-    "Down/Duck": 1,                 # B
-    "Flip Weapon": 2,               # X
-    "Invoke NETRICSA": 3,           # Y
-    "Previous Weapon": 9,           # L1
-    "Next Weapon": 10,              # R1
-    "Move Forward": 11,             # D-pad up
-    "Move Backward": 12,            # D-pad down
-    "Strafe Left": 13,              # D-pad left
-    "Strafe Right": 14,             # D-pad right
-}
+# stick looks (turn, look up/down), the D-pad walks; the buttons as the GO
+# Ultra's (and RTCW's on the GO Advance)
 AXES_OGA = {
     "move f/b": ("None", 50, 0, False),
     "move l/r": ("None", 50, 0, False),
@@ -75,7 +60,9 @@ AXES_OGA = {
 # 138, as DOOM 3 BFG's joy_yawSpeed 240 and joy_pitchSpeed 130
 AXES = {
     "move f/b": ("Joy 1 Axis Y", 100, 20, True),
-    "move l/r": ("Joy 1 Axis X", 100, 20, False),
+    # the engine moves right on a negative "move l/r" (Game.cpp
+    # CreateAction): the stick's X inverted
+    "move l/r": ("Joy 1 Axis X", 100, 20, True),
     "turn l/r": ("Joy 1 Axis Z", 60, 15, False),
     "look u/d": ("Joy 1 Axis R", 56, 15, True),
     # the mouse (bare_app's motion sensor too) on the view's axes: the
@@ -92,8 +79,8 @@ def main():
     lines = text.split("\r\n")
     names = [l.strip()[len("Name: TTRS "):] for l in lines if l.strip().startswith("Name: TTRS ")]
     oga = os.environ.get("SSAM_LAYOUT") == "oga"
-    buttons = dict(BUTTONS_OGA if oga else BUTTONS)
-    if "Serious Bomb" not in names and not oga:
+    buttons = dict(BUTTONS)
+    if "Serious Bomb" not in names:
         buttons.update(BUTTONS_TFE)
     axes = dict(AXES)
     if oga:

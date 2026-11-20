@@ -46,11 +46,13 @@ entries, `fallout/prepare.sh` serves both.
   the card), and `fallout.cfg` / `fallout2.cfg` are writable copies under
   `/data/wine/games/<game>`. Without the maps a save fails ("Ошибка при
   сохранении игры").
-- **Controls.** Left stick the cursor, D-pad the cursor slowly, right
-  stick scrolls the map (the arrow keys), A click, B right click (the
-  cursor's mode), X inventory, Y end the turn (Space), L1 the other hand,
-  R1 combat, L2 the map (Tab), R2 the character, F1 menu (Esc), F2
-  Pip-Boy, F3 save (F4), F4 load (F5). Fallout 2 FE ignores F6, its quick
-  save, so both games use the save and load screens.
+- **Controls.** As the SDK's other mouse games: left stick the cursor,
+  D-pad the cursor slowly, right stick scrolls the map (the arrow keys), A
+  click, B back (Esc: closes a screen, else the menu), Y right click (the
+  cursor's mode), X inventory, R1 end the turn (Space), L1 the other hand,
+  L2 the map (Tab), R2 the character, F1 menu (Esc), F2 load (F5), F3 save
+  (F4), F4 Pip-Boy. Fallout 2 FE ignores F6, its quick save, so both games
+  use the save and load screens. Combat starts with an attack (the
+  cursor's mode, then a click on the target): its key A has no button.
 - **Kept out.** The uninstaller, DirectX's installer, the manuals and FE's
   documents (`!docs`), sfall's log.

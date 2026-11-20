@@ -1,0 +1,74 @@
+From: OdroidLinux SDK
+Subject: [PATCH] client: bare_app: B back, X accept, F4 end turn, as the SDK's other mouse games
+
+The SDK's mouse games share a layout: A the left button, Y the right
+one, B back (Escape). Here B is the keyboard's Escape (cancel, also back
+in the main menu's pages), X accepts and opens the selected hero (it
+ended the turn), F4 ends the turn on both boards (the GO Ultra's F4
+accepted, the OGA's opened the options: those are on F3 there now).
+
+--- a/client/renderSDL/BareAppLink.cpp	2026-11-20 18:53:26.139004707 +0100
++++ b/client/renderSDL/BareAppLink.cpp	2026-11-20 18:53:40.647720178 +0100
+@@ -889,25 +889,27 @@
+ 		return;
+ 	}
+ 
+-	// As in VCMI's controller bindings (config/keyBindingsConfig.json):
+-	// x, y: mouse left and right; a: accept, open the selected hero;
+-	// b: cancel; back: end turn; start: options; left shoulder: next hero.
+-	// The OGA has F1..F6 instead of Start and Select (F5, F6 are bare_app's);
+-	// bare_app keeps L2 and R2 for the volume. F1 and F2 are held as the
+-	// keyboard's Ctrl and Shift: a click on a stack then splits it as in
+-	// HotA (one creature off, into equal parts).
++	// As the SDK's other mouse games: A and Y the mouse's left and right
++	// buttons (the controller's x, y), B back (the keyboard's Escape:
++	// cancel, also back in the main menu's pages, where the controller's
++	// b is not), X accept and open the selected hero (the controller's a),
++	// F4 end turn (back), F3 options (start), R1 the next hero (left
++	// shoulder). The OGA has F1..F6 instead of Start and Select (F5, F6 are
++	// bare_app's); bare_app keeps L2 and R2 for the volume. F1 and F2 are
++	// held as the keyboard's Ctrl and Shift: a click on a stack then splits
++	// it as in HotA (one creature off, into equal parts).
+ 	if(ultraKeys && onUltraButton(button, pressed))
+ 		return;
+ 	switch(button)
+ 	{
+ 		case GP_A:      pushButton(SDL_CONTROLLER_BUTTON_X, pressed); break;
+ 		case GP_Y:      pushButton(SDL_CONTROLLER_BUTTON_Y, pressed); break;
+-		case GP_B:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
+ 		case GP_SELECT:
+-		case GP_F3:     pushButton(SDL_CONTROLLER_BUTTON_B, pressed); break;
+-		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
++		case GP_B:      pushKey(SDL_SCANCODE_ESCAPE, pressed); break;
++		case GP_X:      pushButton(SDL_CONTROLLER_BUTTON_A, pressed); break;
++		case GP_F4:     pushButton(SDL_CONTROLLER_BUTTON_BACK, pressed); break;
+ 		case GP_START:
+-		case GP_F4:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
++		case GP_F3:     pushButton(SDL_CONTROLLER_BUTTON_START, pressed); break;
+ 		case GP_F1:     ctrl = pressed; break;
+ 		case GP_F2:     shift = pressed; break;
+ 		case GP_R1:     pushButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, pressed); break;
+@@ -939,10 +941,9 @@
+ }
+ 
+ /// The ODROID-GO Ultra's row of F1..F6: F1 (minimise) and F6 (quit) are
+-/// bare_app's, F2 and F3 are held as Ctrl and Shift, F4 accepts, F5 ends
+-/// the turn on the adventure map, elsewhere it is Escape: cancel, also
+-/// back in the main menu's pages (the controller's b is not). The options
+-/// stay on the map's own button. false: as on the OGA.
++/// bare_app's, F2 and F3 are held as Ctrl and Shift, F4 ends the turn (as
++/// on the OGA), F5 too on the adventure map, elsewhere it is Escape (as B).
++/// The options stay on the map's own button. false: as on the OGA.
+ bool BareAppLink::onUltraButton(int button, bool pressed)
+ {
+ 	switch(button)
+@@ -956,9 +957,6 @@
+ 		case GP_F3:
+ 			shift = pressed;
+ 			return true;
+-		case GP_F4:
+-			pushButton(SDL_CONTROLLER_BUTTON_A, pressed);
+-			return true;
+ 		case GP_F5:
+ 			// the release goes to what the press was, also if the map has gone meanwhile
+ 			if(pressed)

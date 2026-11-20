@@ -37,10 +37,11 @@ the Russian edition patched to 1.05) and `ssam2` (The Second Encounter,
   the gamepad as each action's second key, the sticks as the axes, the
   mouse (and the motion sensor) on the view axes, which aim assist leaves
   alone. L2 and R2 are buttons paddle3 and paddle2 (game.ini `gamepad`):
-  the engine reads triggers only as axes. On the GO Ultra the layout is
-  DOOM 3 BFG's: A use, B jump, X crouch, L1 reload, R1 fire, L2/R2
-  previous/next weapon, the D-pad walks, F4 (Back) NETRICSA, Y the Serious
-  Bomb (Flip Weapon in The First Encounter). A player made before a layout
+  the engine reads triggers only as axes. The layout is DOOM 3 BFG's (as
+  the SDK's other shooters): A use, B jump, X crouch, L1 reload, R1 fire,
+  L2/R2 previous/next weapon, the D-pad walks, F4 (Back) NETRICSA, Y the
+  Serious Bomb (Flip Weapon in The First Encounter); the GO Advance's one
+  stick looks. A player made before a layout
   change keeps the old one (Controls/ControlsN.ctl in the data directory):
   copy the new 00-Default.ctl over those.
 - The sticks turn at a rate (engine patch 0009; the engine turned by an

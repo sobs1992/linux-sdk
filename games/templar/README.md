@@ -30,8 +30,9 @@ bare_app.
   - left stick: walk and menus;
   - D-pad: sword, axe, mace, bow;
   - right stick: free camera;
-  - A: attack and Enter, X: strong attack, B: block, Y: use;
-  - L1/R1: target, L2: combo, R2: divine power;
+  - R1: attack, L1: block, A: use and Enter, Y: strong attack (as the
+    SDK's other action games, DOOM 3's layout);
+  - X/B: target to the left/right, L2: combo, R2: divine power;
   - F1: pause (Esc), F2: status, F3: no target.
 
   The D-pad does not move through the menus: the game reads it as weapon
