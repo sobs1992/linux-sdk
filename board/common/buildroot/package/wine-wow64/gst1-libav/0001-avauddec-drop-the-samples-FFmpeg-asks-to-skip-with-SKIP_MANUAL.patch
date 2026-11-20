@@ -1,0 +1,85 @@
+From: OdroidLinux SDK
+Subject: [PATCH] avauddec: drop the samples FFmpeg asks to skip with SKIP_MANUAL
+
+For WMA the decoder sets AV_CODEC_FLAG2_SKIP_MANUAL, so FFmpeg leaves the
+samples to drop in the frame's AV_FRAME_DATA_SKIP_SAMPLES side data, but
+nothing dropped them. After a flush FFmpeg's WMA decoder asks for its first
+two frames (4096 samples at 44.1 kHz) to go: their overlap still holds the
+audio from before the seek. Wine's DirectShow reads a file's start to find
+its format and seeks back to 0, so every WMA sound began with ~35 ms of its
+own later audio and ~60 ms of silence (Daemonica's dialogue lines: a
+piece of the line heard before the line). The samples are dropped now, the
+start and the end padding as the side data says.
+
+--- a/ext/libav/gstavauddec.c	2026-11-20 20:19:17.226111222 +0100
++++ b/ext/libav/gstavauddec.c	2026-11-20 20:19:17.240541260 +0100
+@@ -460,9 +460,10 @@
+   res = avcodec_receive_frame (ffmpegdec->context, ffmpegdec->frame);
+ 
+   if (res >= 0) {
+-    gint nsamples, channels, byte_per_sample;
++    gint nsamples, channels, byte_per_sample, skip = 0, discard = 0;
+     gsize output_size;
+     gboolean planar;
++    AVFrameSideData *side;
+ 
+     if (!gst_ffmpegauddec_negotiate (ffmpegdec, ffmpegdec->context,
+             ffmpegdec->frame, FALSE)) {
+@@ -478,6 +479,25 @@
+     byte_per_sample = ffmpegdec->info.finfo->width / 8;
+     planar = av_sample_fmt_is_planar (ffmpegdec->frame->format);
+ 
++    /* With AV_CODEC_FLAG2_SKIP_MANUAL (set for WMA above) FFmpeg leaves the
++     * samples to drop to us, in the frame's side data. After a flush its
++     * WMA decoder asks for the first two frames to go: their overlap still
++     * holds the audio from before the seek (a piece of the stream's later
++     * audio, heard before its start when a stream is seeked back to 0). */
++    if ((ffmpegdec->context->flags2 & AV_CODEC_FLAG2_SKIP_MANUAL)
++        && (side = av_frame_get_side_data (ffmpegdec->frame,
++                AV_FRAME_DATA_SKIP_SAMPLES)) && side->size >= 10) {
++      skip = MIN (MAX ((gint) GST_READ_UINT32_LE (side->data), 0), nsamples);
++      discard = MIN (MAX ((gint) GST_READ_UINT32_LE (side->data + 4), 0),
++          nsamples - skip);
++      GST_DEBUG_OBJECT (ffmpegdec, "dropping %d + %d of %d samples", skip,
++          discard, nsamples);
++    }
++    if (skip + discard == nsamples) {
++      *outbuf = NULL;
++      goto beach;
++    }
++
+     g_return_val_if_fail (ffmpegdec->info.layout == (planar ?
+             GST_AUDIO_LAYOUT_NON_INTERLEAVED : GST_AUDIO_LAYOUT_INTERLEAVED),
+         GST_FLOW_NOT_NEGOTIATED);
+@@ -485,7 +505,7 @@
+     GST_DEBUG_OBJECT (ffmpegdec, "Creating output buffer");
+ 
+     /* ffmpegdec->frame->linesize[0] might contain padding, allocate only what's needed */
+-    output_size = nsamples * byte_per_sample * channels;
++    output_size = (nsamples - skip - discard) * byte_per_sample * channels;
+ 
+     *outbuf =
+         gst_audio_decoder_allocate_output_buffer (GST_AUDIO_DECODER
+@@ -495,15 +515,18 @@
+       gint i;
+       GstAudioMeta *meta;
+ 
+-      meta = gst_buffer_add_audio_meta (*outbuf, &ffmpegdec->info, nsamples,
+-          NULL);
++      meta = gst_buffer_add_audio_meta (*outbuf, &ffmpegdec->info,
++          nsamples - skip - discard, NULL);
+ 
+       for (i = 0; i < channels; i++) {
+         gst_buffer_fill (*outbuf, meta->offsets[i],
+-            ffmpegdec->frame->extended_data[i], nsamples * byte_per_sample);
++            ffmpegdec->frame->extended_data[i] + skip * byte_per_sample,
++            (nsamples - skip - discard) * byte_per_sample);
+       }
+     } else {
+-      gst_buffer_fill (*outbuf, 0, ffmpegdec->frame->data[0], output_size);
++      gst_buffer_fill (*outbuf, 0,
++          ffmpegdec->frame->data[0] + skip * byte_per_sample * channels,
++          output_size);
+     }
+ 
+     GST_DEBUG_OBJECT (ffmpegdec, "Buffer created. Size: %" G_GSIZE_FORMAT,

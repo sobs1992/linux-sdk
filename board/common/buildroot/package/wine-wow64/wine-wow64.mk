@@ -129,6 +129,13 @@ FFMPEG_CONF_OPTS += \
 	--enable-decoder=cinepak,msvideo1,msrle,indeo2,indeo3,indeo4,indeo5 \
 	--enable-decoder=truemotion1,truemotion2
 
+# gst1-libav's fixes (gst1-libav/*.patch): WMA sounds without a piece of
+# their later audio at the start
+define WINE_WOW64_PATCH_GST1_LIBAV
+	$(APPLY_PATCHES) $(GST1_LIBAV_DIR) $(WINE_WOW64_PKGDIR)/gst1-libav \*.patch
+endef
+GST1_LIBAV_POST_PATCH_HOOKS += WINE_WOW64_PATCH_GST1_LIBAV
+
 # OpenGL through EGL (opengl32 needs no libGL)
 ifeq ($(BR2_PACKAGE_MESA_PANFROST),y)
 WINE_WOW64_DEPENDENCIES += mesa-panfrost
