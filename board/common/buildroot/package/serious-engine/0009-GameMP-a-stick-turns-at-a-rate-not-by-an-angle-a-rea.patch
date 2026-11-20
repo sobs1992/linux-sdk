@@ -1,0 +1,131 @@
+From 65287d68ce53d096cc531a1fec1dc8181974edc1 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Fri, 20 Nov 2026 18:24:57 +0100
+Subject: [PATCH] GameMP: a stick turns at a rate, not by an angle a reading
+
+The turn's angle is added up from every reading of the controls (each
+frame's and each tick's), so a stick's turn was as fast as the frame
+rate: 0.5 degrees a reading at sensitivity 45, some 40 degrees a second
+at full deflection at 60 fps, half that at 30. A relative joystick axis
+that turns or looks now gives its share of the time since its last
+reading: the sensitivity's angle 60 times a second at full deflection,
+the reading squared (as DOOM 3 BFG's joy_powerScale 2). A pause counts
+as 0.1 s at most. The mouse and the moving axes are as they were.
+---
+ SamTFE/Sources/GameMP/Controls.cpp |  1 +
+ SamTFE/Sources/GameMP/Game.cpp     | 18 ++++++++++++++++++
+ SamTFE/Sources/GameMP/Game.h       |  1 +
+ SamTSE/Sources/GameMP/Controls.cpp |  1 +
+ SamTSE/Sources/GameMP/Game.cpp     | 18 ++++++++++++++++++
+ SamTSE/Sources/GameMP/Game.h       |  1 +
+ 6 files changed, 40 insertions(+)
+
+diff --git a/SamTFE/Sources/GameMP/Controls.cpp b/SamTFE/Sources/GameMP/Controls.cpp
+index c432e0b..b6bf685 100644
+--- a/SamTFE/Sources/GameMP/Controls.cpp
++++ b/SamTFE/Sources/GameMP/Controls.cpp
+@@ -88,6 +88,7 @@ void CControls::SwitchAxesToDefaults(void)
+     ctrl_aaAxisActions[ iAxisAction].aa_bRelativeControler = TRUE;
+     ctrl_aaAxisActions[ iAxisAction].aa_bSmooth = FALSE;
+     ctrl_aaAxisActions[ iAxisAction].aa_fLastReading = 0.0f;
++    ctrl_aaAxisActions[ iAxisAction].aa_dLastRead = 0.0;
+   }
+   // set default controlers for some axis-type actions
+   // mouse left/right motion
+diff --git a/SamTFE/Sources/GameMP/Game.cpp b/SamTFE/Sources/GameMP/Game.cpp
+index 025a6e9..f462faf 100644
+--- a/SamTFE/Sources/GameMP/Game.cpp
++++ b/SamTFE/Sources/GameMP/Game.cpp
+@@ -756,6 +756,24 @@ FLOAT CControls::GetAxisValue(INDEX iAxis)
+     }
+   }
+ 
++  // a stick that turns or looks: a turning rate, not an angle. The turn's
++  // angle is added up from every reading (each frame's and each tick's), so
++  // a stick's reading made the turn as fast as the frame rate: 0.5 degrees a
++  // reading at sensitivity 45, some 40 degrees a second at full deflection
++  // at 60 fps, half that at 30. Now the angle of a reading is its share of
++  // the time since the last one: the sensitivity's angle (the one it used
++  // to give a reading) 60 times a second at full deflection, the reading
++  // squared (as DOOM 3 BFG's joy_powerScale 2: fine aim near the middle)
++  if (aa.aa_bRelativeControler && aa.aa_iAxisAction>=FIRST_JOYAXIS
++   && iAxis>=AXIS_TURN_UD && iAxis<=AXIS_LOOK_BK) {
++    const DOUBLE dNow = _pTimer->GetHighPrecisionTimer().GetSeconds();
++    DOUBLE dDelta = dNow-aa.aa_dLastRead;
++    aa.aa_dLastRead = dNow;
++    // a pause (the menu, a load) does not turn by the time it lasted
++    dDelta = Clamp(dDelta, 0.0, 0.1);
++    fReading = fReading*Abs(fReading)*FLOAT(dDelta*60.0);
++  }
++
+   // apply sensitivity and inversion
+   return fReading*aa.aa_fAxisInfluence;
+ }
+diff --git a/SamTFE/Sources/GameMP/Game.h b/SamTFE/Sources/GameMP/Game.h
+index 5821ae2..fc80d0c 100644
+--- a/SamTFE/Sources/GameMP/Game.h
++++ b/SamTFE/Sources/GameMP/Game.h
+@@ -69,6 +69,7 @@ public:
+   FLOAT aa_fAxisInfluence;
+ 
+   FLOAT aa_fLastReading;    // last reading of this axis (for smoothing)
++  DOUBLE aa_dLastRead;        // when a stick's turn was read last (seconds), see GetAxisValue()
+   FLOAT aa_fAbsolute;       // absolute value of the axis (integrated from previous readings)
+ };
+ 
+diff --git a/SamTSE/Sources/GameMP/Controls.cpp b/SamTSE/Sources/GameMP/Controls.cpp
+index c432e0b..b6bf685 100644
+--- a/SamTSE/Sources/GameMP/Controls.cpp
++++ b/SamTSE/Sources/GameMP/Controls.cpp
+@@ -88,6 +88,7 @@ void CControls::SwitchAxesToDefaults(void)
+     ctrl_aaAxisActions[ iAxisAction].aa_bRelativeControler = TRUE;
+     ctrl_aaAxisActions[ iAxisAction].aa_bSmooth = FALSE;
+     ctrl_aaAxisActions[ iAxisAction].aa_fLastReading = 0.0f;
++    ctrl_aaAxisActions[ iAxisAction].aa_dLastRead = 0.0;
+   }
+   // set default controlers for some axis-type actions
+   // mouse left/right motion
+diff --git a/SamTSE/Sources/GameMP/Game.cpp b/SamTSE/Sources/GameMP/Game.cpp
+index dcdf72f..a8d8ee8 100644
+--- a/SamTSE/Sources/GameMP/Game.cpp
++++ b/SamTSE/Sources/GameMP/Game.cpp
+@@ -518,6 +518,24 @@ FLOAT CControls::GetAxisValue(INDEX iAxis)
+     }
+   }
+ 
++  // a stick that turns or looks: a turning rate, not an angle. The turn's
++  // angle is added up from every reading (each frame's and each tick's), so
++  // a stick's reading made the turn as fast as the frame rate: 0.5 degrees a
++  // reading at sensitivity 45, some 40 degrees a second at full deflection
++  // at 60 fps, half that at 30. Now the angle of a reading is its share of
++  // the time since the last one: the sensitivity's angle (the one it used
++  // to give a reading) 60 times a second at full deflection, the reading
++  // squared (as DOOM 3 BFG's joy_powerScale 2: fine aim near the middle)
++  if (aa.aa_bRelativeControler && aa.aa_iAxisAction>=FIRST_JOYAXIS
++   && iAxis>=AXIS_TURN_UD && iAxis<=AXIS_LOOK_BK) {
++    const DOUBLE dNow = _pTimer->GetHighPrecisionTimer().GetSeconds();
++    DOUBLE dDelta = dNow-aa.aa_dLastRead;
++    aa.aa_dLastRead = dNow;
++    // a pause (the menu, a load) does not turn by the time it lasted
++    dDelta = Clamp(dDelta, 0.0, 0.1);
++    fReading = fReading*Abs(fReading)*FLOAT(dDelta*60.0);
++  }
++
+   // apply sensitivity and inversion
+   return fReading*aa.aa_fAxisInfluence;
+ }
+diff --git a/SamTSE/Sources/GameMP/Game.h b/SamTSE/Sources/GameMP/Game.h
+index 5821ae2..fc80d0c 100644
+--- a/SamTSE/Sources/GameMP/Game.h
++++ b/SamTSE/Sources/GameMP/Game.h
+@@ -69,6 +69,7 @@ public:
+   FLOAT aa_fAxisInfluence;
+ 
+   FLOAT aa_fLastReading;    // last reading of this axis (for smoothing)
++  DOUBLE aa_dLastRead;        // when a stick's turn was read last (seconds), see GetAxisValue()
+   FLOAT aa_fAbsolute;       // absolute value of the axis (integrated from previous readings)
+ };
+ 
+-- 
+2.53.0
+

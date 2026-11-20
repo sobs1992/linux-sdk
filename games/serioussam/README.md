@@ -37,7 +37,17 @@ the Russian edition patched to 1.05) and `ssam2` (The Second Encounter,
   the gamepad as each action's second key, the sticks as the axes, the
   mouse (and the motion sensor) on the view axes, which aim assist leaves
   alone. L2 and R2 are buttons paddle3 and paddle2 (game.ini `gamepad`):
-  the engine reads triggers only as axes.
+  the engine reads triggers only as axes. On the GO Ultra the layout is
+  DOOM 3 BFG's: A use, B jump, X crouch, L1 reload, R1 fire, L2/R2
+  previous/next weapon, the D-pad walks, F4 (Back) NETRICSA, Y the Serious
+  Bomb (Flip Weapon in The First Encounter). A player made before a layout
+  change keeps the old one (Controls/ControlsN.ctl in the data directory):
+  copy the new 00-Default.ctl over those.
+- The sticks turn at a rate (engine patch 0009; the engine turned by an
+  angle a frame, slower the lower the frame rate): sensitivity s gives
+  60 * 2^((s - 50) / 5) degrees a second at full deflection, the reading
+  squared; "turn l/r" 60 (240 degrees a second) and "look u/d" 56 (138), as
+  DOOM 3 BFG's joy_yawSpeed and joy_pitchSpeed.
 - `SPOptions.cfg` and `translation.txt`: the "Aim assist" option and its
   Russian, as loose files (they go before the .gro files; The Second
   Encounter has its own loose `Scripts/menu`, used in whatever case it is).

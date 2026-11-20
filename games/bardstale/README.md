@@ -34,6 +34,12 @@ one menu step per press). Missed and doubled presses seen while testing
 were ogu-ctl's writes into gpio-keys-polled, cut by its 16 ms poll; ogu-ctl
 now presses through bare_app's FIFO.
 
+## The cursor
+
+The game leaves the Windows cursor shown over its world (a white arrow in
+the middle of the picture; its menus hide it). It is played by the gamepad
+alone: wine.ini's `cursor = hidden` keeps bare_app_wine from drawing it.
+
 ## Notes
 
 - Its videos (WMV through DirectShow) play by Wine's GStreamer.

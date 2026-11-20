@@ -19,7 +19,35 @@ import sys
 
 # action name (as the .ctl names it, "TTRS " left out) -> gamepad button.
 # The first action of a name gets it (00-Default.ctl names Strafe twice).
+# The GO Ultra: as DOOM 3 BFG's handheld layout (rbdoom3-bfg 0019): A use,
+# B jump, X crouch, L1 reload, R1 fire, L2/R2 previous/next weapon, the
+# D-pad walks, Back (F4) NETRICSA as DOOM 3's PDA; Y, DOOM 3's flashlight,
+# the Serious Bomb (The Second Encounter) or Flip Weapon (The First)
 BUTTONS = {
+    "Use/Sniper Zoom": 0,           # A (The Second Encounter)
+    "Use": 0,                       # A (The First Encounter)
+    "Up/Jump": 1,                   # B
+    "Down/Duck": 2,                 # X
+    "Serious Bomb": 3,              # Y (The Second Encounter)
+    "Invoke NETRICSA": 4,           # Back: F4 (game.ini's gamepad f4=back)
+    "Reload": 9,                    # L1
+    "Fire": 10,                     # R1
+    "Previous Weapon": 18,          # L2
+    "Next Weapon": 17,              # R2
+    "Move Forward": 11,             # D-pad up
+    "Move Backward": 12,            # D-pad down
+    "Strafe Left": 13,              # D-pad left
+    "Strafe Right": 14,             # D-pad right
+}
+# The First Encounter has no bomb: Y flips the weapon there
+BUTTONS_TFE = {
+    "Flip Weapon": 3,               # Y
+}
+
+# The GO Advance (SSAM_LAYOUT=oga: oga.manifest's env): one stick. The
+# stick looks (turn, look up/down), the D-pad walks; its buttons as they
+# were before the GO Ultra's took DOOM 3's
+BUTTONS_OGA = {
     "Fire": 17,                     # R2
     "Use/Sniper Zoom": 18,          # L2 (The Second Encounter)
     "Use": 18,                      # L2 (The First Encounter)
@@ -29,42 +57,27 @@ BUTTONS = {
     "Invoke NETRICSA": 3,           # Y
     "Previous Weapon": 9,           # L1
     "Next Weapon": 10,              # R1
-    "Serious Bomb": 11,             # D-pad up (The Second Encounter)
-    "3rd Person View": 12,          # D-pad down
-    "Sniper Zoom -": 13,            # D-pad left (The Second Encounter)
-    "Sniper Zoom +": 14,            # D-pad right
-}
-# The First Encounter has no bomb nor sniper: other weapons there
-BUTTONS_TFE = {
-    "Cannon": 11,                   # D-pad up
-    "Knife": 13,                    # D-pad left
-    "Tommygun/Minigun": 14,         # D-pad right
-}
-
-# The GO Advance (SSAM_LAYOUT=oga: oga.manifest's env): one stick. The
-# stick looks (turn, look up/down), the D-pad walks; the bomb, the
-# third-person view and the sniper's zoom have no button there
-BUTTONS_OGA = {
     "Move Forward": 11,             # D-pad up
     "Move Backward": 12,            # D-pad down
     "Strafe Left": 13,              # D-pad left
     "Strafe Right": 14,             # D-pad right
 }
-DPAD_ACTIONS = ("Serious Bomb", "3rd Person View", "Sniper Zoom -", "Sniper Zoom +",
-                "Cannon", "Knife", "Tommygun/Minigun")
 AXES_OGA = {
     "move f/b": ("None", 50, 0, False),
     "move l/r": ("None", 50, 0, False),
-    "turn l/r": ("Joy 1 Axis X", 45, 15, False),
-    "look u/d": ("Joy 1 Axis Y", 40, 15, True),
+    "turn l/r": ("Joy 1 Axis X", 60, 15, False),
+    "look u/d": ("Joy 1 Axis Y", 56, 15, True),
 }
 
-# axis -> (control, sensitivity, dead zone %, inverted)
+# axis -> (control, sensitivity, dead zone %, inverted). A stick's turn
+# (serious-engine 0009): 60 * 2^((sensitivity - 50) / 5) degrees a second
+# at full deflection, the reading squared: 60 is 240 degrees a second, 56
+# 138, as DOOM 3 BFG's joy_yawSpeed 240 and joy_pitchSpeed 130
 AXES = {
     "move f/b": ("Joy 1 Axis Y", 100, 20, True),
     "move l/r": ("Joy 1 Axis X", 100, 20, False),
-    "turn l/r": ("Joy 1 Axis Z", 45, 15, False),
-    "look u/d": ("Joy 1 Axis R", 40, 15, True),
+    "turn l/r": ("Joy 1 Axis Z", 60, 15, False),
+    "look u/d": ("Joy 1 Axis R", 56, 15, True),
     # the mouse (bare_app's motion sensor too) on the view's axes: the
     # player's turn adds them, and aim assist slows only the stick's
     "view l/r": ("mouse X", 50, 0, False),
@@ -78,14 +91,12 @@ def main():
         text = f.read().decode("latin-1")
     lines = text.split("\r\n")
     names = [l.strip()[len("Name: TTRS "):] for l in lines if l.strip().startswith("Name: TTRS ")]
-    buttons = dict(BUTTONS)
-    if "Serious Bomb" not in names:
+    oga = os.environ.get("SSAM_LAYOUT") == "oga"
+    buttons = dict(BUTTONS_OGA if oga else BUTTONS)
+    if "Serious Bomb" not in names and not oga:
         buttons.update(BUTTONS_TFE)
     axes = dict(AXES)
-    if os.environ.get("SSAM_LAYOUT") == "oga":
-        for n in DPAD_ACTIONS:
-            buttons.pop(n, None)
-        buttons.update(BUTTONS_OGA)
+    if oga:
         axes.update(AXES_OGA)
     done, out, name = set(), [], None
     for line in lines:
