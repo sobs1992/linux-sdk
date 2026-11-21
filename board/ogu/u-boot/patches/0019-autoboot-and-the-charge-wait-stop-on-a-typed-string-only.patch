@@ -1,0 +1,98 @@
+From: OdroidLinux SDK
+Subject: [PATCH] autoboot and the charge wait: stop on a typed string only
+
+With the UART lines connected to the ODROID-GO Ultra but the adapter not
+plugged into a computer (RX left open), the line picks up noise: U-Boot
+read it as keys. Its wait for the power key on USB power stopped at the
+prompt ("Key on the console: stopping here", then a screen of garbage
+commands; first GO Ultra, 2026-11-21), and with CONFIG_BOOTDELAY=0 any
+byte waiting at the autoboot check stops the boot as well.
+
+Both stop on "stop" typed on the console now (CONFIG_AUTOBOOT_KEYED,
+CONFIG_AUTOBOOT_STOP_STR in board/ogu/u-boot/ogu.config); noise does not
+send those four bytes in a row. The keyed check read one byte per 10 ms
+pass, and a boot delay of 0 gives it one pass: it reads all that is
+waiting in the UART's FIFO now, so that "stop" typed while the board
+starts still stops it.
+---
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -189,7 +189,7 @@
+ static void ogu_charge_wait(void)
+ {
+ 	struct udevice *rk817, *rk818, *backlight;
+-	int on818, irq818, sts;
++	int on818, irq818, sts, stop_seen = 0;
+ 	ulong start;
+ 
+ 	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@20", &rk817) ||
+@@ -231,9 +231,15 @@
+ 			backlight_set_brightness(backlight, BACKLIGHT_OFF);
+ 			backlight = NULL;
+ 		}
+-		if (tstc()) {
+-			getchar();
+-			printf("Key on the console: stopping here\n");
++		/* "stop" typed on the console: noise on a loose UART line
++		 * (RX left open) sends bytes too, never those four in a row */
++		while (tstc()) {
++			stop_seen = getchar() == "stop"[stop_seen] ? stop_seen + 1 : 0;
++			if (stop_seen == 4)
++				break;
++		}
++		if (stop_seen == 4) {
++			printf("\"stop\" on the console: stopping here\n");
+ 			env_set("bootdelay", "-1");
+ 			break;
+ 		}
+--- a/common/autoboot.c
++++ b/common/autoboot.c
+@@ -282,7 +282,10 @@
+ 	 * when catch up.
+ 	 */
+ 	do {
+-		if (tstc()) {
++		/* all that came, not one key a pass: with a boot delay of 0
++		 * there is one pass, and the stop string typed in it waits in
++		 * the UART's FIFO (ODROID-GO Ultra) */
++		while (!abort && tstc()) {
+ 			if (presskey_len < presskey_max) {
+ 				presskey[presskey_len++] = getchar();
+ 			} else {
+@@ -291,22 +294,22 @@
+ 
+ 				presskey[i] = getchar();
+ 			}
+-		}
+ 
+-		for (i = 0; i < sizeof(delaykey) / sizeof(delaykey[0]); i++) {
+-			if (delaykey[i].len > 0 &&
+-			    presskey_len >= delaykey[i].len &&
+-				memcmp(presskey + presskey_len -
+-					delaykey[i].len, delaykey[i].str,
+-					delaykey[i].len) == 0) {
+-					debug_bootkeys("got %skey\n",
+-						delaykey[i].retry ? "delay" :
+-						"stop");
++			for (i = 0; i < sizeof(delaykey) / sizeof(delaykey[0]); i++) {
++				if (delaykey[i].len > 0 &&
++				    presskey_len >= delaykey[i].len &&
++					memcmp(presskey + presskey_len -
++						delaykey[i].len, delaykey[i].str,
++						delaykey[i].len) == 0) {
++						debug_bootkeys("got %skey\n",
++							delaykey[i].retry ? "delay" :
++							"stop");
+ 
+-				/* don't retry auto boot */
+-				if (!delaykey[i].retry)
+-					bootretry_dont_retry();
+-				abort = 1;
++					/* don't retry auto boot */
++					if (!delaykey[i].retry)
++						bootretry_dont_retry();
++					abort = 1;
++				}
+ 			}
+ 		}
+ 		udelay(10000);
