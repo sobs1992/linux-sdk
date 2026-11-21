@@ -1,0 +1,154 @@
+From: OdroidLinux SDK
+Subject: [PATCH] board: odroid-go-ultra: tell the gauge what happened in the
+ wait
+
+Linux (the SDK's rk818_battery.c, 0036) reads what happened between two
+of its runs instead of guessing it. Plugged in while off, or powered off
+by Linux with USB in, the board comes up here on USB power and waits,
+charging; the PMIC's counter counts that charge (3104 -> 3336 mAh in 10
+min of 1.3 A on the first GO Ultra). In the RK818's MISC_MARK (0xee),
+next to what Linux wrote at its shutdown:
+- WAITED: this code waited here: a change of the counter is a charge;
+- FIRST_WAIT: the first wait since Linux ran: the OCV sample of this
+  power-up, if the PMIC took a new one (Linux knows: its VB_MON field and
+  how it went down), is from before any charge counted (Linux learns from
+  it and adds the charge to it);
+- STASHED: that sample kept in OCV_USED when the PMIC was reset (VB_MON's
+  low-voltage field not Linux's 3.0/3.4 V; a panic leaves it): after a
+  power lost Linux bounds the level by it and the charge, also after a
+  later power-up by the key;
+- at its power-off when the charger is pulled: the PMIC goes off, the
+  next power-up takes a new sample (clears OFF_CHARGER, FIRST_WAIT);
+- leaving the wait (the key, its power-off): the counter's bits 23:16 in
+  0xea, so that Linux can tell something ran after it: then none of these
+  marks stands (Linux moves it away at its boot: a wait left without it,
+  the key held there, matches no old one).
+Each rule here has its counterpart in scripts/rk818-sim's model of this
+code, mutated there in turn (scripts/rk818-sim/mutate.py).
+---
+--- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
++++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
+@@ -46,6 +46,35 @@
+ #define RK817_INT_PWRON_FALL	BIT(0)	/* power key pressed */
+ #define RK817_INT_PWRON_RISE	BIT(1)	/* power key released */
+ #define DEV_OFF			BIT(0)
++/*
++ * What happened between two runs of Linux's gauge driver (rk818_battery.c
++ * 0036), in MISC_MARK: Linux writes how it went down (a reboot, a power-off
++ * on USB power: the PMIC stays on) and clears it at its boot; this code
++ * writes that it waited here, charging (the PMIC's counter counted that
++ * charge), whether this is the first wait since Linux ran (then the OCV
++ * sample of this power-up, if new, is from before any charge counted; with
++ * the PMIC reset it is kept in OCV_USED), that it powered the PMIC off, and
++ * where the counter was when it left the wait.
++ */
++#define RK818_BOOT_STATE	0xee
++#define RK818_BOOT_MAGIC_MSK	0xe0
++#define RK818_BOOT_MAGIC	0xc0
++#define RK818_BOOT_REBOOT	BIT(0)
++#define RK818_BOOT_OFF_CHARGER	BIT(1)
++#define RK818_BOOT_WAITED	BIT(2)
++#define RK818_BOOT_STASHED	BIT(3)
++#define RK818_BOOT_FIRST_WAIT	BIT(4)
++#define RK818_VB_MON		0x21
++#define RK818_VBAT_LOW_MSK	0x07
++#define RK818_VBAT_LOW_3V0	0x02
++#define RK818_VBAT_LOW_3V4	0x06
++#define RK818_BAT_OCV_REGH	0xc2
++#define RK818_BAT_OCV_REGL	0xc3
++#define RK818_OCV_USED_REGH	0xeb
++#define RK818_OCV_USED_REGL	0xec
++#define RK818_GASCNT3		0xb8
++#define RK818_GASCNT2		0xb9
++#define RK818_BOOT_GAS		0xea	/* the counter's bits 23:16 when leaving */
+ 
+ /*
+  * Light the panel as early as U-Boot can: right after relocation and the
+@@ -89,8 +118,31 @@
+ 	return 0;
+ }
+ 
++/*
++ * Leaving the wait: where the counter is, for Linux to tell whether another
++ * system ran after this (its marks stand only if the counter is still there)
++ */
++static void ogu_mark_leave(struct udevice *rk818)
++{
++	int g;
++
++	pmic_reg_read(rk818, RK818_GASCNT3);	/* latches the counter */
++	g = pmic_reg_read(rk818, RK818_GASCNT2);
++	if (g >= 0)
++		pmic_reg_write(rk818, RK818_BOOT_GAS, g);
++}
++
+ static void ogu_power_off(struct udevice *rk817, struct udevice *rk818)
+ {
++	int bs = pmic_reg_read(rk818, RK818_BOOT_STATE);
++
++	/* the PMIC goes off: after Linux's power-off on USB (OFF_CHARGER) the
++	 * next power-up takes a new OCV sample; and no first wait any more */
++	if (bs >= 0 && (bs & RK818_BOOT_MAGIC_MSK) == RK818_BOOT_MAGIC) {
++		pmic_reg_write(rk818, RK818_BOOT_STATE, bs &
++			       ~(RK818_BOOT_OFF_CHARGER | RK818_BOOT_FIRST_WAIT));
++		ogu_mark_leave(rk818);
++	}
+ 	printf("Power off\n");
+ 	mdelay(10);
+ 	pmic_clrsetbits(rk817, RK817_SYS_CFG3,
+@@ -101,6 +153,38 @@
+ 	printf("Still powered\n");
+ }
+ 
++/*
++ * Waiting here, charging: say so for Linux, and whether this is the first
++ * wait since Linux ran: then the OCV sample the PMIC took at this power-up,
++ * if it took one (Linux knows whether: VB_MON and how it went down), is
++ * from before any charge counted. When the PMIC was reset (VB_MON's
++ * low-voltage field not Linux's 3.0/3.4 V: a panic leaves it), keep that
++ * sample in OCV_USED: after a power lost Linux bounds the level by it and
++ * the charge, also after a later power-up by the key.
++ */
++static void ogu_mark_wait(struct udevice *rk818)
++{
++	int bs = pmic_reg_read(rk818, RK818_BOOT_STATE);
++	int vb = pmic_reg_read(rk818, RK818_VB_MON);
++	int h = pmic_reg_read(rk818, RK818_BAT_OCV_REGH);
++	int l = pmic_reg_read(rk818, RK818_BAT_OCV_REGL);
++	int f;
++
++	if (bs < 0 || vb < 0 || h < 0 || l < 0 ||
++	    (bs & RK818_BOOT_MAGIC_MSK) != RK818_BOOT_MAGIC)
++		return;
++	if (!(bs & RK818_BOOT_WAITED)) {
++		bs |= RK818_BOOT_FIRST_WAIT;
++		f = vb & RK818_VBAT_LOW_MSK;
++		if (f != RK818_VBAT_LOW_3V0 && f != RK818_VBAT_LOW_3V4) {
++			pmic_reg_write(rk818, RK818_OCV_USED_REGH, h);
++			pmic_reg_write(rk818, RK818_OCV_USED_REGL, l);
++			bs |= RK818_BOOT_STASHED;
++		}
++	}
++	pmic_reg_write(rk818, RK818_BOOT_STATE, bs | RK818_BOOT_WAITED);
++}
++
+ /* Woken by USB power: wait, charging, for the power key */
+ static void ogu_charge_wait(void)
+ {
+@@ -138,6 +222,7 @@
+ 	}
+ 
+ 	printf("Woken by USB power: charging, press the power key to start\n");
++	ogu_mark_wait(rk818);
+ 	/* The message stays on the panel for a while, then it goes dark */
+ 	backlight = ogu_backlight();
+ 	start = get_timer(0);
+@@ -170,6 +255,8 @@
+ 		mdelay(50);
+ 	}
+ 
++	ogu_mark_leave(rk818);
++
+ 	/* Lit again (no-op if it never went off) */
+ 	backlight = ogu_backlight();
+ 	if (backlight)

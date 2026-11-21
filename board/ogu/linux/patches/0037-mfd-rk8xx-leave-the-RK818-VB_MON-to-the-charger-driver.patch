@@ -1,0 +1,22 @@
+From: OdroidLinux SDK
+Subject: [PATCH] mfd: rk8xx: leave the RK818 VB_MON to the charger driver
+
+The RK818 charger driver (rk818_battery.c) sets the low-voltage monitor
+itself (3.0 V awake, 3.4 V asleep, 0013) and reads the field at its probe:
+any reset of the PMIC puts it back to its 3.2 V, a reset of the SoC alone
+(a panic) leaves it, so it tells the driver whether the PMIC was reset
+since it ran (0036). The MFD core wrote 3.5 V over it first.
+---
+--- a/drivers/mfd/rk8xx-core.c
++++ b/drivers/mfd/rk8xx-core.c
+@@ -302,8 +302,8 @@
+ 	{ RK818_H5V_EN_REG,	  BIT(1),	    RK818_REF_RDY_CTRL },
+ 	/* enable HDMI 5V */
+ 	{ RK818_H5V_EN_REG,	  BIT(0),	    RK818_H5V_EN },
+-	{ RK808_VB_MON_REG,	  MASK_ALL,	    VB_LO_ACT |
+-						    VB_LO_SEL_3500MV },
++	/* VB_MON: the charger driver's (rk818_battery.c): its field tells it
++	 * whether the PMIC was reset since it ran */
+ };
+ 
+ static const struct regmap_irq rk801_irqs[] = {
