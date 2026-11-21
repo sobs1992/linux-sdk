@@ -1,0 +1,107 @@
+# The Book of Unwritten Tales
+
+The Book of Unwritten Tales (2009, KING Art; Ogre 3D 1.7, Direct3D 9, Cg
+shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
+(1.0.2.0: Russian text and voices), under Wine on the GO Ultra (manifest
+`[bout]`, wine.ini in `overlay/`).
+
+- Runs on the GO Ultra (ogu2, 2026-11-21): menus, the prologue video and
+  the first scenes of chapter 1 at a steady 30 fps (the frame limit), the
+  game's own quality "high" (measured at 1024x576). The game ~650 MB, ~800 MB of the
+  device's memory left. Sound and voices through OpenAL Soft.
+- Display: Ogre's mode 854x480, the screen's own (wine.ini `mode`; 1024x576
+  also offered for an older ogre.cfg); the game draws its scenes 16:10
+  inside it, narrow bars at the sides. Text 1.3 times bigger: "Text size".
+- WineD3D's video memory raised to 2048 MB (`VideoMemorySize` in
+  WINE_D3D_CONFIG, wine.ini): WineD3D takes the GPU for a GeForce 6800
+  with 128 MB, Ogre keeps all textures of a chapter, and the loading of
+  chapter 1 stopped with "Out of video memory" (at 1024 the prologue hung).
+- OpenAL: OpenAL Soft 1.23.1 (`lab/redist/openal-soft-1.23.1`, its Win32
+  `soft_oal.dll` as the game's `OpenAL32.dll`). With Creative's router and
+  wrap_oal (as Daemonica) the game found a device but stayed silent: the
+  sound card never opened.
+- 1C's activation (`ActivationLib.dll`) passes with the repack's patched
+  `bout.exe`; the installer's InstallFlag DWORDs are not needed, wine.ini
+  sets its string values (`reg`).
+- Settings (`config.xml`, `ogre.cfg`), saved games and logs (`bout.log`,
+  Ogre's log) in My Documents\Book of Unwritten Tales in the Wine prefix:
+  nothing written into the game's directory (`/games` stays read-only).
+- Controls: the left stick is the cursor, A the click, Y the right click,
+  X held marks the scene's hotspots (Space), B and F1 Esc. Videos and
+  dialogue lines are skipped by a click (Esc does not skip the prologue).
+  The inventory opens with the cursor at the screen's bottom edge (the left
+  stick pushed down all the way); the right click does not open it in this
+  edition. An item is taken by a click and hangs on the cursor, used by a
+  click on its target, put back by the right click.
+- Saving: B, "Сохранение", the "пусто" line, the "Сохранение" button (no
+  name needed: an empty one is saved as "new game"; Enter does not save).
+  Loading: B, "Загрузка", a line, "Загрузка". No quick save (F keys do
+  nothing). Tester's review: docs/game-controls-audit-2026-11-20.md, 6.20.
+
+## Text size
+
+The game sizes all its text as a share of the screen's height (Ogre
+overlays in relative metrics, CEGUI auto-scaled, the menu book's
+`fontsize` fractions in `kagedata/interface/original_Bookpages.kad`), so no
+display mode makes it bigger on the 480-row screen: 854x480 (wine.ini
+`mode`) only makes it sharp, one pixel a pixel. `textsize.py` (manifest
+`run`) makes the subtitles, dialogue choices and the other in-game text
+1.3 times bigger by three numbers of `bout.exe`, lets the game's settings
+list 854x480 and makes the menu book darker and bigger:
+
+| Where | Was | Is | What |
+|---|---|---|---|
+| float at 0x5bd9f4 | 0.0275 | 0.03575 | char_height of the FormalOutline text areas (LogIngame_msg, the centred one); its only 4 users |
+| float at 0x5bddc8 | 0.03375 | 0.043875 | char_height of the Dauphin text (`_pups`); its only user |
+| `fld` at 0x4dbeb5 | 0x5bd994 (0.0375) | 0x5bdd20 (0.048667) | the default char_height of the game's text class; 0.0375 is shared with unrelated code, so the load points to another existing constant |
+
+| `cmp` at 0x4e55cb and 0x4f250b | 1024 | 854 | the settings' resolution list takes modes at least this wide (two functions fill it): 854x480 was left out and the line showed 1024x576 (OK there would have set it) |
+
+Checked on the GO Ultra (2026-11-21): a guard's line in chapter 2 wraps to
+three lines across the screen, the three dialogue choices fit the panel.
+The menu book (`original_Bookpages.kad`, the only `.kad` with
+`<mainmenu>`) is patched by `textsize.py` too:
+
+- colours: the items' grey from 60% to 95% opacity, the greyed-out ones
+  from 30% to 45%, the one under the cursor dark red (it was the 100% grey
+  the others now nearly are);
+- its italic 1.2 times bigger (every `fontsize` but the chapter's title over
+  a saved game: "Глава 5 - Возвращение в Дикие земли..." fills the left
+  page at its own size); the two-line labels of the settings and the hint
+  on their left page get their line pitch ×1.2; the menus' items 0.09
+  apart (were 0.08), the settings' rows from "Качество" down 0.02-0.035
+  lower, a saved game's name 0.01 lower (`BOOK_TOPS`);
+- a comment in `<mainmenu>` marks the file as patched.
+
+Checked on the GO Ultra: the settings show 854 x 480 and OK keeps it in
+`ogre.cfg`; main menu, in-game menu, settings, save and load pages: no
+text runs into another or off its page. The lists of saved games and of
+chapters are drawn by the game's code (unchanged). The patcher checks the bytes first and leaves an
+already patched file as it is.
+
+## Source
+
+`lab/games/BookOfUnwrittenTales`: the game's directory taken from the
+Linux repack `TheBookOfUnwrittenTales_RUS.tar.xz` (Kron4ek's Wine wrapper,
+x86_64 Wine 7.0: not used here; the archive is kept on the T7 disk,
+`Games/!Installs`), plus `cover-art.jpg` (the game's key art, 1280x720,
+given by the user: the cover is a square of its left part, Nate and
+Critter). What else was in the repack:
+
+- `lab/redist/SysWOW64/d3dx9_42.dll`: the D3DX that Ogre's Direct3D 9
+  render system imports (Microsoft's, from the repack's `game_info/dlls`).
+  Its other DLLs (DXVK's d3d9, every other d3dx9_*/d3dcompiler_*) are not
+  needed.
+- `lab/wip/bout-repack/`: its start.sh, game_info.txt and registry files
+  (regs/), for reference.
+
+6.1 GB: `kagedata/lang/ru` 2.9 GB (voices), `common` 1.1 GB, `video`
+416 MB (`*.ogm`, Theora: decoded by the game itself, no GStreamer). Not
+copied: the uninstaller, `support/` (Windows redistributables).
+
+## Not checked yet
+
+- Chapters 3 and 4 (chapter 2: 760 MB; chapter 5: 594 MB, 30 fps), hibernation.
+- The game's log has errors of its own data (old `.material` syntax,
+  `kAGE_phong.cgfx` without a supported technique); what they change on
+  the screen, if anything, is not known.

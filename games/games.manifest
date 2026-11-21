@@ -434,3 +434,28 @@ run = games/bardstale/prepare.sh
 ; cover: the Bard on the game's character page, as the GO Ultra shows it
 cover = lab/games/The Bard's Tale/cover.png
 cover_crop = 160 60 240
+
+[bout]
+; The Book of Unwritten Tales (2009), the Russian edition of 1C-SoftClub
+; (Russian text and voices) from a Linux repack (its Wine not used); under
+; Wine (games/bout/README.md). Ogre's Direct3D 9 render system imports
+; D3DX 9.42. Without the uninstaller and the Windows redistributables.
+source = lab/games/BookOfUnwrittenTales
+exclude = unins000.*
+exclude = support
+exclude = clientpm.old
+exclude = cover-art.jpg
+overlay = games/bout/overlay
+; readable on 854x480: in-game text x1.3 and the settings' 854x480 (bout.exe),
+; the menu book darker and x1.2 (its .kad): games/bout/README.md "Text size"
+run = games/bout/textsize.py
+file = lab/redist/SysWOW64/d3dx9_42.dll
+; OpenAL Soft (LGPL, openal-soft.org) for the game's OpenAL: Creative's
+; router (Daemonica's) reported a device here, but the game stayed
+; silent: wrap_oal was unloaded again, DirectSound never loaded, the sound
+; card never opened
+file = lab/redist/openal-soft-1.23.1/soft_oal.dll -> OpenAL32.dll
+; cover: the game's key art (Nate and Critter; the title on the right and its
+; first letter's curl left out), the user's choice
+cover = lab/games/BookOfUnwrittenTales/cover-art.jpg
+cover_crop = 0 40 630
