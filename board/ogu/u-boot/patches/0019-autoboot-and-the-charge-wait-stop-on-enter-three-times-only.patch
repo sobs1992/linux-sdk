@@ -1,5 +1,5 @@
 From: OdroidLinux SDK
-Subject: [PATCH] autoboot and the charge wait: stop on a typed string only
+Subject: [PATCH] autoboot and the charge wait: stop on Enter three times only
 
 With the UART lines connected to the ODROID-GO Ultra but the adapter not
 plugged into a computer (RX left open), the line picks up noise: U-Boot
@@ -8,12 +8,13 @@ prompt ("Key on the console: stopping here", then a screen of garbage
 commands; first GO Ultra, 2026-11-21), and with CONFIG_BOOTDELAY=0 any
 byte waiting at the autoboot check stops the boot as well.
 
-Both stop on "stop" typed on the console now (CONFIG_AUTOBOOT_KEYED,
-CONFIG_AUTOBOOT_STOP_STR in board/ogu/u-boot/ogu.config); noise does not
-send those four bytes in a row. The keyed check read one byte per 10 ms
-pass, and a boot delay of 0 gives it one pass: it reads all that is
-waiting in the UART's FIFO now, so that "stop" typed while the board
-starts still stops it.
+Both stop on Enter pressed three times in a row now (CR CR CR; a
+terminal's LF after its CR is skipped): held down, Enter repeats, as
+before; noise hardly sends three CRs in a row. The autoboot is keyed
+(CONFIG_AUTOBOOT_KEYED, CONFIG_AUTOBOOT_STOP_STR in
+board/ogu/u-boot/ogu.config); its check read one byte per 10 ms pass,
+and a boot delay of 0 gives it one pass: it reads all that is waiting in
+the UART's FIFO now.
 ---
 --- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
 +++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
@@ -26,28 +27,33 @@ starts still stops it.
  	ulong start;
  
  	if (uclass_get_device_by_name(UCLASS_PMIC, "pmic@20", &rk817) ||
-@@ -231,9 +231,15 @@
+@@ -231,9 +231,20 @@
  			backlight_set_brightness(backlight, BACKLIGHT_OFF);
  			backlight = NULL;
  		}
 -		if (tstc()) {
 -			getchar();
 -			printf("Key on the console: stopping here\n");
-+		/* "stop" typed on the console: noise on a loose UART line
-+		 * (RX left open) sends bytes too, never those four in a row */
++		/* Enter three times in a row on the console (a terminal's
++		 * LF after its CR skipped): noise on a loose UART line (RX
++		 * left open) sends bytes too, hardly three CRs in a row */
 +		while (tstc()) {
-+			stop_seen = getchar() == "stop"[stop_seen] ? stop_seen + 1 : 0;
-+			if (stop_seen == 4)
++			int c = getchar();
++
++			if (c == '\n')
++				continue;
++			stop_seen = c == '\r' ? stop_seen + 1 : 0;
++			if (stop_seen == 3)
 +				break;
 +		}
-+		if (stop_seen == 4) {
-+			printf("\"stop\" on the console: stopping here\n");
++		if (stop_seen == 3) {
++			printf("Enter on the console: stopping here\n");
  			env_set("bootdelay", "-1");
  			break;
  		}
 --- a/common/autoboot.c
 +++ b/common/autoboot.c
-@@ -282,7 +282,10 @@
+@@ -282,31 +282,39 @@
  	 * when catch up.
  	 */
  	do {
@@ -56,12 +62,20 @@ starts still stops it.
 +		 * there is one pass, and the stop string typed in it waits in
 +		 * the UART's FIFO (ODROID-GO Ultra) */
 +		while (!abort && tstc()) {
++			int c = getchar();
++
++			/* a terminal's LF after its CR: Enter is CR alone */
++			if (c == '\n')
++				continue;
  			if (presskey_len < presskey_max) {
- 				presskey[presskey_len++] = getchar();
+-				presskey[presskey_len++] = getchar();
++				presskey[presskey_len++] = c;
  			} else {
-@@ -291,22 +294,22 @@
+ 				for (i = 0; i < presskey_max - 1; i++)
+ 					presskey[i] = presskey[i + 1];
  
- 				presskey[i] = getchar();
+-				presskey[i] = getchar();
++				presskey[i] = c;
  			}
 -		}
  
