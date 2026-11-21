@@ -29,6 +29,10 @@ at once in a dip: no voltage tells empty. The charge drawn does.
 - The counter running out keeps the level at 0 and counts on below it
   (set to 0 when charging starts): the voltage estimate is gone.
 - Discharging, the level never goes up (also on resume).
+- Asleep on the charger the counter drifts (the first unit counted
+  3 Ah out of a full battery in 5 h of s2idle on USB, then showed 50%):
+  such a cycle teaches nothing, and a battery full before the sleep and
+  full by its voltage after it is set full again.
 - The FCC may be up to 150% of the design capacity, and is writable
   (charge_full) to seed it from a measurement.
 - The device tree: the OCV table and 160 mOhm from the fit.
@@ -481,7 +485,7 @@ at once in a dip: no voltage tells empty. The charge drawn does.
  	rk818_set_low_voltage_irq(di, true);
  
  	dev_info(di->dev,
-@@ -1627,7 +1781,7 @@
+@@ -1627,22 +1781,50 @@
  	di->current_avg_ma = rk818_read_cur(di, RK818_BAT_CUR_AVG_REGH);
  	di->voltage_avg_mv = rk818_read_vol(di, RK818_BAT_VOL_REGH);
  	di->remain_cap_mah = rk818_get_coulomb_cap(di);
@@ -490,7 +494,35 @@ at once in a dip: no voltage tells empty. The charge drawn does.
  
  	sleep_sec = ktime_ms_delta(ktime_get_boottime(), di->suspend_time) /
  		    MSEC_PER_SEC;
-@@ -1637,12 +1791,14 @@
+ 
+ 	/*
++	 * Asleep on the charger the counter drifts: the first GO Ultra, full
++	 * on USB, counted 3040 mAh out in 5 h of s2idle (3998 -> 958 mAh) and
++	 * woke at 4076 mV under 632 mA, the cell still full; the level then
++	 * fell to 50% and climbed back. What such a cycle drew is not known
++	 * (a full latch starts a new one), and a battery full before and full
++	 * by its voltage now is full again.
++	 */
++	if (di->sleep_chrg_online || rk818_charger_online(di)) {
++		int ocv_mv = di->voltage_avg_mv -
++			     (int)(di->info->factory_internal_resistance_uohm / 1000) *
++			     di->current_avg_ma / 1000;
++		int full_cap = di->fcc_mah * rk818_limit_pct(di) / 100;
++
++		di->learn_valid = false;
++		if (di->full_latched && rk818_charger_online(di) &&
++		    vol_to_soc(di, ocv_mv) >= 95 && di->remain_cap_mah < full_cap) {
++			dev_info(di->dev,
++				 "resume: full on the charger, %d mV at %d mA: cap %d -> %d mAh\n",
++				 di->voltage_avg_mv, di->current_avg_ma,
++				 di->remain_cap_mah, full_cap);
++			rk818_set_coulomb_cap(di, full_cap);
++			di->rsoc = rk818_cap_to_soc(di, di->remain_cap_mah);
++		}
++	}
++
++	/*
+ 	 * The coulomb counter runs through suspend, so remain_cap_mah already
  	 * accounts for actual consumption.  We only apply a conservative
  	 * minimum-consumption correction to dsoc so it does not appear to
  	 * lag behind reality after a long sleep without a charger attached.
@@ -507,7 +539,7 @@ at once in a dip: no voltage tells empty. The charge drawn does.
  
  		dev_info(di->dev,
  			 "resume: slept %d s, est. drop %d%%, dsoc=%d rsoc=%d\n",
-@@ -2241,6 +2397,19 @@
+@@ -2241,6 +2423,19 @@
  	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
  		return rk818_charger_set_current_max(di, val->intval);
  
@@ -527,7 +559,7 @@ at once in a dip: no voltage tells empty. The charge drawn does.
  	default:
  		return -EINVAL;
  	}
-@@ -2254,6 +2423,7 @@
+@@ -2254,6 +2449,7 @@
  	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
  	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
  	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
@@ -535,7 +567,7 @@ at once in a dip: no voltage tells empty. The charge drawn does.
  		return 1;
  
  	default:
-@@ -2824,13 +2994,16 @@
+@@ -2824,13 +3020,16 @@
  
  	cancel_delayed_work_sync(&di->work);
  
