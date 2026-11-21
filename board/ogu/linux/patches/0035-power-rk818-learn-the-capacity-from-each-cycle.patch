@@ -1,0 +1,601 @@
+From: OdroidLinux SDK
+Subject: [PATCH] power: supply: rk818: learn the capacity from each cycle
+
+On the second GO Ultra the level counted down to 0% with the battery
+still running a game for minutes, then the counter's underflow path took
+an estimate from the voltage (the generic OCV table, 40% low mid-range)
+and the level climbed 0, 7, 24... 61% on the battery. A logged discharge
+from full (scripts/battery-fit.py) ran 4.8 Ah to the brown-out where the
+driver had the design 4000 mAh, and the FCC it could store was capped at
+that. Under a game's 2.3 A the loaded voltage is the same 3.3 V at 13%
+and at the end, the OCV is flat from 15% to 3%, and the board browns out
+at once in a dip: no voltage tells empty. The charge drawn does.
+
+- The charge drawn since the last full charge is counted (differences of
+  the coulomb counter, so the driver's own writes to it never count;
+  charging in between takes back what it puts in) and kept with the
+  saved state in spare data registers (CALC_REST, SAVE_DATA19), with
+  whether the cycle began full at no charge limit and how the boot ended
+  (a clean shutdown, at 0% or not).
+- The FCC is the charge from full to the brown-out; 0% is 3% of it still
+  in the battery, where bare_app powers the device off.
+- At the next power-on: a cycle that ended at a brown-out (no clean
+  shutdown, the OCV the PMIC took at most 5%) measured the FCC, which is
+  set to it. One that ended at 0% and rested 30 min: the OCV tells what
+  was left, and half the difference to drawn + left goes in.
+  A simulation of the driver over the logged discharge: from 4000 mAh
+  4376, 4580, 4685, 4739, 4766 in five cycles (true about 4790 to the
+  reserve), from 5900 one brown-out and then 4832, 4809 (scripts/rk818-sim).
+- The counter running out keeps the level at 0 and counts on below it
+  (set to 0 when charging starts): the voltage estimate is gone.
+- Discharging, the level never goes up (also on resume).
+- The FCC may be up to 150% of the design capacity, and is writable
+  (charge_full) to seed it from a measurement.
+- The device tree: the OCV table and 160 mOhm from the fit.
+---
+--- a/drivers/power/supply/rk818_battery.c
++++ b/drivers/power/supply/rk818_battery.c
+@@ -157,8 +157,37 @@
+ 
+ /* SoC / capacity */
+ #define MIN_FCC				500	/* mAh */
+-/* Monitor cycles the OCV estimate must stay below vmin to report empty */
+-#define VMIN_EMPTY_CYCLES		3
++/* a learnt FCC: up to this share of the design capacity (%) */
++#define FCC_MAX_PCT			150
++/*
++ * 0% is this share of the FCC still in the battery (%): bare_app powers
++ * the device off at 0%, before the battery browns it out. The FCC is the
++ * charge from full to that brown-out, not a voltage: under a game's 2.3 A
++ * the loaded voltage is the same 3.3 V at 13% and at the end (the OCV is
++ * flat from 15% down to 3%), and the board browns out at once in a dip.
++ */
++#define RESERVE_PCT			3
++/* learning from the OCV at a power-on: the battery off at least (min) */
++#define LEARN_REST_MIN			30
++/* no clean shutdown and the OCV at most this (%): a brown-out */
++#define BROWNOUT_PCT			5
++
++/*
++ * Capacity learning state, in data registers the vendor driver used for
++ * other things and this one did not: the charge drawn since the last full
++ * charge (mAh), whether that cycle began full at no charge limit and how
++ * the last boot ended (rk818_learn_at_boot()). Like
++ * the other saved state it survives PMIC resets (reboots, hibernation) and
++ * an emptied battery, not a disconnected one.
++ */
++#define LEARN_DRAWN_REGH		RK818_CALC_REST_REGH
++#define LEARN_DRAWN_REGL		RK818_CALC_REST_REGL
++#define LEARN_FLAGS_REG			RK818_SAVE_DATA19
++#define LEARN_MAGIC			0xa0
++#define LEARN_MAGIC_MSK			0xf0
++#define LEARN_VALID			BIT(0)
++#define LEARN_RUNNING			BIT(1)	/* no clean shutdown since */
++#define LEARN_ZERO			BIT(2)	/* it shut down at 0% */
+ 
+ /*
+  * Coulomb counter LSB denominator.
+@@ -271,8 +300,18 @@
+ 	int	fcc_mah;
+ 	int	rsoc;
+ 	int	dsoc;
+-	/* Monitor cycles with the OCV estimate below the design minimum */
+-	int	vmin_cycles;
++
++	/*
++	 * Capacity learning (rk818_account(), rk818_update_soc()): the charge
++	 * drawn since the last full charge, net of what charges in between
++	 * put back. A cycle that began full and ended at a brown-out or at 0%
++	 * measured the FCC (rk818_learn_at_boot()).
++	 */
++	int	cc_last_mah;	/* the counter when drawn_mah was last updated */
++	bool	cc_tracking;	/* cc_last_mah is valid */
++	int	drawn_mah;
++	bool	learn_valid;	/* the cycle began full, at no charge limit */
++	bool	cc_underflow;	/* the counter ran out: logged */
+ 
+ 	int	chrg_status;
+ 	bool	is_charging;
+@@ -427,16 +466,35 @@
+ 	return (raw / CC_LSB_DENOM) * di->res_div;
+ }
+ 
++/*
++ * Adds what the battery gave since the last call to drawn_mah (charging
++ * takes it back): the difference of two counter readings, so that the
++ * counter's own changes (rk818_set_coulomb_cap()) never count.
++ */
++static void rk818_account(struct rk818_battery *di)
++{
++	int now = rk818_get_coulomb_cap(di);
++
++	if (di->cc_tracking)
++		di->drawn_mah = clamp(di->drawn_mah + di->cc_last_mah - now,
++				      0, 0xffff);
++	di->cc_last_mah = now;
++}
++
+ static void rk818_set_coulomb_cap(struct rk818_battery *di, int cap_mah)
+ {
+ 	u32 raw = (u32)cap_mah * CC_LSB_DENOM / DIV(di->res_div);
+ 
++	rk818_account(di);	/* what was drawn up to the new value */
++
+ 	rk818_write(di, RK818_GASCNT_CAL_REG3, (raw >> 24) & 0xff);
+ 	rk818_write(di, RK818_GASCNT_CAL_REG2, (raw >> 16) & 0xff);
+ 	rk818_write(di, RK818_GASCNT_CAL_REG1, (raw >>  8) & 0xff);
+ 	rk818_write(di, RK818_GASCNT_CAL_REG0,  raw        & 0xff);
+ 
+ 	di->remain_cap_mah = cap_mah;
++	/* as rk818_get_coulomb_cap() will read it back */
++	di->cc_last_mah = cap_mah / DIV(di->res_div) * di->res_div;
+ 	dev_dbg(di->dev, "coulomb cap set to %d mAh\n", cap_mah);
+ }
+ 
+@@ -658,6 +716,12 @@
+  * FCC (fully-charged capacity) persistence
+  * ------------------------------------------------------------------------- */
+ 
++/* a cell often holds more than its label says: the learnt FCC may */
++static int rk818_fcc_max(struct rk818_battery *di)
++{
++	return di->info->charge_full_design_uah / 1000 * FCC_MAX_PCT / 100;
++}
++
+ static int rk818_read_fcc(struct rk818_battery *di)
+ {
+ 	u32 fcc = 0;
+@@ -669,14 +733,14 @@
+ 
+ 	u32 design_mah = di->info->charge_full_design_uah / 1000;
+ 
+-	if (fcc < MIN_FCC || fcc > design_mah) {
++	if (fcc < MIN_FCC || fcc > rk818_fcc_max(di)) {
+ 		dev_info(di->dev,
+ 			 "stored FCC %u mAh out of range, using design capacity\n",
+ 			 fcc);
+ 		fcc = design_mah;
+ 	}
+ 
+-	return (int)clamp(fcc, (u32)MIN_FCC, design_mah);
++	return (int)clamp(fcc, (u32)MIN_FCC, (u32)rk818_fcc_max(di));
+ }
+ 
+ static void rk818_save_fcc(struct rk818_battery *di, u32 fcc)
+@@ -699,8 +763,7 @@
+ 
+ static void rk818_save_remain_cap(struct rk818_battery *di)
+ {
+-	int cap = clamp(di->remain_cap_mah, 0,
+-			(int)(di->info->charge_full_design_uah / 1000));
++	int cap = clamp(di->remain_cap_mah, 0, rk818_fcc_max(di));
+ 
+ 	rk818_write(di, RK818_REMAIN_CAP_REG3, (cap >> 24) & 0xff);
+ 	rk818_write(di, RK818_REMAIN_CAP_REG2, (cap >> 16) & 0xff);
+@@ -720,6 +783,41 @@
+ 	return cap;
+ }
+ 
++/* running: false at a clean shutdown (rk818_battery_shutdown()) */
++static void rk818_save_learn(struct rk818_battery *di, bool running)
++{
++	rk818_write(di, LEARN_DRAWN_REGH, (di->drawn_mah >> 8) & 0xff);
++	rk818_write(di, LEARN_DRAWN_REGL,  di->drawn_mah       & 0xff);
++	rk818_write(di, LEARN_FLAGS_REG,
++		    LEARN_MAGIC | (di->learn_valid ? LEARN_VALID : 0) |
++		    (running ? LEARN_RUNNING : 0) |
++		    (!running && di->dsoc == 0 ? LEARN_ZERO : 0));
++}
++
++/* the flags the last boot left, 0 none */
++static u8 rk818_read_learn(struct rk818_battery *di)
++{
++	u8 flags = rk818_read(di, LEARN_FLAGS_REG);
++
++	if ((flags & LEARN_MAGIC_MSK) != LEARN_MAGIC) {
++		di->drawn_mah = 0;
++		di->learn_valid = false;
++		return 0;
++	}
++	di->drawn_mah = rk818_read(di, LEARN_DRAWN_REGH) << 8 |
++			rk818_read(di, LEARN_DRAWN_REGL);
++	di->learn_valid = flags & LEARN_VALID;
++	return flags;
++}
++
++/* The level of a charge in the counter: 0 at the reserve (RESERVE_PCT) */
++static int rk818_cap_to_soc(struct rk818_battery *di, int cap_mah)
++{
++	int res = di->fcc_mah * RESERVE_PCT / 100;
++
++	return clamp((cap_mah - res) * 100 / DIV(di->fcc_mah - res), 0, 100);
++}
++
+ /* -------------------------------------------------------------------------
+  * Hardware configuration
+  * ------------------------------------------------------------------------- */
+@@ -944,6 +1042,63 @@
+ }
+ 
+ /*
++ * The FCC from how the last cycle ended, at the power-on after it: a cycle
++ * that began full (at no charge limit) and
++ *  - ended at a brown-out (no clean shutdown, and the OCV the PMIC took at
++ *    this power-on is at most BROWNOUT_PCT: not a crash with charge left;
++ *    the one after the brown-out of 2026-11-21 read 3610 mV, 0%) drew the
++ *    FCC: the board ran until the battery could not hold it up;
++ *  - ended at 0% (bare_app powers the device off there) and the battery
++ *    rested since (LEARN_REST_MIN): the OCV says what was left, and the
++ *    FCC is what was drawn and that. At a FCC right that is the reserve.
++ * A brown-out sets the FCC at once: the next one would come at the same
++ * level again. From 0% half the difference goes in, as the OCV is flat
++ * there (15% to 3% in 45 mV) and one odd reading moves it only halfway;
++ * it comes up to a larger capacity in a few cycles.
++ */
++static void rk818_learn_at_boot(struct rk818_battery *di, u8 flags, int ocv_mv)
++{
++	int ocv_pct = vol_to_soc(di, ocv_mv);
++	int meas, fcc;
++	const char *how;
++
++	if (!(flags & LEARN_VALID))
++		return;
++	if (flags & LEARN_RUNNING) {
++		if (ocv_pct > BROWNOUT_PCT) {
++			dev_info(di->dev,
++				 "no clean shutdown, OCV %d mV (%d%%): not a brown-out, FCC stays %d mAh\n",
++				 ocv_mv, ocv_pct, di->fcc_mah);
++			return;
++		}
++		how = "a brown-out";
++		meas = di->drawn_mah;
++	} else if (flags & LEARN_ZERO) {
++		if (di->pwroff_min < LEARN_REST_MIN || ocv_pct >= 50)
++			return;
++		how = "0%";
++		meas = di->drawn_mah * 100 / (100 - ocv_pct);
++	} else {
++		return;
++	}
++	di->learn_valid = false;	/* the cycle is used */
++	if (meas < MIN_FCC || meas > rk818_fcc_max(di)) {
++		dev_warn(di->dev,
++			 "%d mAh drawn from full to %s, OCV %d mV (%d%%) after %u min: FCC %d mAh out of range, stays %d mAh\n",
++			 di->drawn_mah, how, ocv_mv, ocv_pct, di->pwroff_min,
++			 meas, di->fcc_mah);
++		return;
++	}
++	fcc = (flags & LEARN_RUNNING) ? meas : (di->fcc_mah + meas) / 2;
++	dev_info(di->dev,
++		 "%d mAh drawn from full to %s, OCV %d mV (%d%%) after %u min: FCC %d mAh, %d -> %d mAh\n",
++		 di->drawn_mah, how, ocv_mv, ocv_pct, di->pwroff_min, meas,
++		 di->fcc_mah, fcc);
++	di->fcc_mah = fcc;
++	rk818_save_fcc(di, fcc);
++}
++
++/*
+  * rk818_init_soc - choose the correct starting dsoc / remain_cap on boot.
+  *
+  * Decision priority:
+@@ -965,9 +1120,10 @@
+ {
+ 	int ocv_vol, ocv_soc, ocv_cap;
+ 	int saved_dsoc, saved_cap;
+-	u8 cur, last;
++	u8 cur, last, flags;
+ 
+ 	di->fcc_mah           = rk818_read_fcc(di);
++	flags                 = rk818_read_learn(di);
+ 	di->is_first_power_on = rk818_is_first_power_on(di);
+ 	di->is_initialized    = rk818_was_warm_initialized(di);
+ 
+@@ -977,8 +1133,9 @@
+ 	di->pwroff_min = (cur != last) ? cur : 0;
+ 
+ 	ocv_vol = rk818_read_vol(di, RK818_BAT_OCV_REGH);
+-	ocv_soc = vol_to_soc(di, ocv_vol);
++	rk818_learn_at_boot(di, flags, ocv_vol);
+ 	ocv_cap = vol_to_cap(di, ocv_vol);
++	ocv_soc = rk818_cap_to_soc(di, ocv_cap);
+ 
+ 	saved_dsoc = rk818_read(di, RK818_SOC_REG);
+ 	saved_cap  = rk818_read_saved_cap(di);
+@@ -989,6 +1146,9 @@
+ 		di->dsoc           = ocv_soc;
+ 		di->remain_cap_mah = ocv_cap;
+ 		rk818_save_fcc(di, (u32)di->fcc_mah);
++		/* the saved state is gone: no cycle to learn from */
++		di->drawn_mah   = 0;
++		di->learn_valid = false;
+ 		dev_info(di->dev,
+ 			 "first power-on: dsoc=%d cap=%d mAh ocv=%d mV\n",
+ 			 di->dsoc, di->remain_cap_mah, ocv_vol);
+@@ -1038,11 +1198,13 @@
+ 	di->remain_cap_mah = max(0, di->remain_cap_mah);
+ 
+ 	rk818_set_coulomb_cap(di, di->remain_cap_mah);
++	di->cc_tracking = true;
+ 	di->rsoc = di->dsoc;
+ 
+ 	dev_info(di->dev,
+-		 "init done: dsoc=%d rsoc=%d cap=%d mAh fcc=%d mAh\n",
+-		 di->dsoc, di->rsoc, di->remain_cap_mah, di->fcc_mah);
++		 "init done: dsoc=%d rsoc=%d cap=%d mAh fcc=%d mAh, %d mAh drawn since %s\n",
++		 di->dsoc, di->rsoc, di->remain_cap_mah, di->fcc_mah,
++		 di->drawn_mah, di->learn_valid ? "full" : "a partial charge");
+ }
+ 
+ /* -------------------------------------------------------------------------
+@@ -1117,17 +1279,6 @@
+  * ------------------------------------------------------------------------- */
+ 
+ /*
+- * Estimate OCV from the average terminal voltage by compensating for the
+- * drop on the battery internal resistance (discharge current is negative).
+- */
+-static int rk818_est_ocv(struct rk818_battery *di)
+-{
+-	return di->voltage_avg_mv -
+-	       (di->info->factory_internal_resistance_uohm / 1000) *
+-	       di->current_avg_ma / 1000;
+-}
+-
+-/*
+  * rk818_update_soc - recompute rsoc from the coulomb counter and step dsoc
+  * toward it by at most DSOC_DELTA_MAX per call.
+  *
+@@ -1135,12 +1286,15 @@
+  *   - RK818_CHG_STS_TERMINATED: snap remain_cap to the limit's share of
+  *     fcc so rsoc hits the limit (100% without one) cleanly.
+  *   - Valid relaxed voltage: re-anchor the coulomb counter to the OCV cap.
+- *   - OCV estimate below shutdown threshold: force dsoc to 0.
++ *   - rsoc is 0 at the reserve (rk818_cap_to_soc()).
++ *   - Discharging, dsoc never goes up: a re-anchor or a larger FCC shows
++ *     when the battery is charged again, not as 0 -> 60% on the battery.
+  */
+ static void rk818_update_soc(struct rk818_battery *di)
+ {
+ 	int limit = rk818_limit_pct(di);
+ 	int full_cap = di->fcc_mah * limit / 100;	/* what a charge ends at */
++	int step;
+ 
+ 	di->remain_cap_mah = rk818_get_coulomb_cap(di);
+ 
+@@ -1169,7 +1323,7 @@
+ 	}
+ 
+ 	di->remain_cap_mah = rk818_get_coulomb_cap(di);
+-	di->rsoc = clamp(di->remain_cap_mah * 100 / DIV(di->fcc_mah), 0, 100);
++	di->rsoc = rk818_cap_to_soc(di, di->remain_cap_mah);
+ 
+ 	/*
+ 	 * With the charger plugged in, once the charge finished the RK818 lets
+@@ -1191,33 +1345,18 @@
+ 		di->full_latched = false;
+ 	}
+ 	if (di->full_latched) {
++		/* a new cycle: what it draws down to the end is the FCC */
++		di->drawn_mah    = 0;
++		di->learn_valid  = limit >= 100;
++		di->cc_underflow = false;
+ 		di->dsoc = limit;
+ 		return;
+ 	}
+ 
+-	/*
+-	 * Report an empty battery only when the IR compensated OCV estimate
+-	 * stays below the design minimum for several monitor cycles.  Bare
+-	 * terminal voltage dips below the threshold under high load with
+-	 * plenty of charge left in the battery.
+-	 */
+-	if (rk818_est_ocv(di) < di->info->voltage_min_design_uv / 1000) {
+-		if (++di->vmin_cycles >= VMIN_EMPTY_CYCLES) {
+-			dev_dbg(di->dev,
+-				"OCV estimate %d mV below shutdown threshold %u mV\n",
+-				rk818_est_ocv(di),
+-				di->info->voltage_min_design_uv / 1000);
+-			di->dsoc = 0;
+-			return;
+-		}
+-	} else {
+-		di->vmin_cycles = 0;
+-	}
+-
+-	di->dsoc = clamp(di->dsoc +
+-			 clamp(di->rsoc - di->dsoc,
+-			       -DSOC_DELTA_MAX, DSOC_DELTA_MAX),
+-			 0, 100);
++	step = clamp(di->rsoc - di->dsoc, -DSOC_DELTA_MAX, DSOC_DELTA_MAX);
++	if (di->current_avg_ma < 0 && step > 0)
++		step = 0;
++	di->dsoc = clamp(di->dsoc + step, 0, 100);
+ }
+ 
+ /* -------------------------------------------------------------------------
+@@ -1453,6 +1592,9 @@
+ 	di->current_avg_ma = rk818_read_cur(di, RK818_BAT_CUR_AVG_REGH);
+ 	di->chrg_status    = rk818_get_chrg_status(di);
+ 	di->charger_online = rk818_charger_online(di);
++	rk818_account(di);
++	if (di->current_avg_ma > 0)
++		di->cc_underflow = false;
+ 	rk818_update_temperature(di);
+ 	rk818_keep_chg_volt(di);
+ 
+@@ -1485,17 +1627,26 @@
+ 	/* Clamp coulomb counter to [0, fcc] */
+ 	if (di->remain_cap_mah > di->fcc_mah) {
+ 		rk818_set_coulomb_cap(di, di->fcc_mah);
+-	} else if (di->remain_cap_mah < 0) {
++	} else if (di->remain_cap_mah < 0 && di->current_avg_ma > 0) {
++		/* charging after the counter ran out: from 0 */
++		rk818_set_coulomb_cap(di, 0);
++	} else if (di->remain_cap_mah < 0 && !di->cc_underflow) {
+ 		/*
+-		 * Estimate from terminal voltage when the counter underflows.
+-		 * Subtract the resistive drop to get a rough OCV.
++		 * The counter ran out: 0% was at the reserve before, and the
++		 * device still runs (no bare_app to power it off). The level
++		 * stays at 0 and the counter goes on below it, so what is
++		 * drawn still counts in full (rk818_learn_at_boot()): setting
++		 * it to 0 every cycle lost the part of a count each time, 88
++		 * mAh of 740. The estimate from the voltage used here once
++		 * made the level climb from 0 to 61% on the battery: the OCV
++		 * table is flat mid-range, and under load nothing tells 13%
++		 * from 1%.
+ 		 */
+-		int est_cap = max(0, vol_to_cap(di, rk818_est_ocv(di)));
+-
+ 		dev_info(di->dev,
+-			 "counter underflow, voltage estimate: %d mAh\n",
+-			 est_cap);
+-		rk818_set_coulomb_cap(di, est_cap);
++			 "counter ran out at %d mV (%d mA), %d mAh drawn since %s\n",
++			 di->voltage_avg_mv, di->current_avg_ma, di->drawn_mah,
++			 di->learn_valid ? "full" : "a partial charge");
++		di->cc_underflow = true;
+ 	}
+ 
+ 	if (di->chrg_status == RK818_CHG_STS_TERMINATED && rk818_charger_online(di))
+@@ -1505,6 +1656,7 @@
+ 
+ 	rk818_save_dsoc(di);
+ 	rk818_save_remain_cap(di);
++	rk818_save_learn(di, true);
+ 
+ 	/* the status property follows chrg_status: report its changes too */
+ 	if (di->charger_psy && (di->dsoc != prev_dsoc ||
+@@ -1604,11 +1756,13 @@
+ 	di->sleep_chrg_online = rk818_charger_online(di);
+ 	di->current_avg_ma    = rk818_read_cur(di, RK818_BAT_CUR_AVG_REGH);
+ 	di->remain_cap_mah    = rk818_get_coulomb_cap(di);
+-	di->rsoc = di->remain_cap_mah * 100 / DIV(di->fcc_mah);
++	di->rsoc = rk818_cap_to_soc(di, di->remain_cap_mah);
+ 	di->suspend_time = ktime_get_boottime();
+ 
++	rk818_account(di);
+ 	rk818_save_dsoc(di);
+ 	rk818_save_remain_cap(di);
++	rk818_save_learn(di, true);
+ 	rk818_set_low_voltage_irq(di, true);
+ 
+ 	dev_info(di->dev,
+@@ -1627,7 +1781,7 @@
+ 	di->current_avg_ma = rk818_read_cur(di, RK818_BAT_CUR_AVG_REGH);
+ 	di->voltage_avg_mv = rk818_read_vol(di, RK818_BAT_VOL_REGH);
+ 	di->remain_cap_mah = rk818_get_coulomb_cap(di);
+-	di->rsoc = di->remain_cap_mah * 100 / DIV(di->fcc_mah);
++	di->rsoc = rk818_cap_to_soc(di, di->remain_cap_mah);
+ 
+ 	sleep_sec = ktime_ms_delta(ktime_get_boottime(), di->suspend_time) /
+ 		    MSEC_PER_SEC;
+@@ -1637,12 +1791,14 @@
+ 	 * accounts for actual consumption.  We only apply a conservative
+ 	 * minimum-consumption correction to dsoc so it does not appear to
+ 	 * lag behind reality after a long sleep without a charger attached.
+-	 * Clamp to rsoc so we never push dsoc below what the counter reports.
++	 * Clamp to rsoc so we never push dsoc below what the counter reports,
++	 * and never above where it was: no rise on the battery.
+ 	 */
+ 	if (!di->sleep_chrg_online && sleep_sec > 0) {
+ 		sleep_mah = SLP_CURR_MA * sleep_sec / 3600;
+ 		sleep_soc_drop = sleep_mah * 100 / DIV(di->fcc_mah);
+-		di->dsoc = max(di->dsoc - sleep_soc_drop, max(di->rsoc, 0));
++		di->dsoc = min(di->dsoc,
++			       max(di->dsoc - sleep_soc_drop, max(di->rsoc, 0)));
+ 
+ 		dev_info(di->dev,
+ 			 "resume: slept %d s, est. drop %d%%, dsoc=%d rsoc=%d\n",
+@@ -2241,6 +2397,19 @@
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 		return rk818_charger_set_current_max(di, val->intval);
+ 
++	case POWER_SUPPLY_PROP_CHARGE_FULL:
++		/* the FCC measured elsewhere (a fit of a logged discharge):
++		 * the gauge goes on learning from there */
++		if (val->intval / 1000 < MIN_FCC ||
++		    val->intval / 1000 > rk818_fcc_max(di))
++			return -EINVAL;
++		dev_info(di->dev, "FCC %d -> %d mAh (set)\n",
++			 di->fcc_mah, val->intval / 1000);
++		di->fcc_mah = val->intval / 1000;
++		rk818_save_fcc(di, di->fcc_mah);
++		mod_delayed_work(di->wq, &di->work, 0);
++		return 0;
++
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -2254,6 +2423,7 @@
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
+ 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++	case POWER_SUPPLY_PROP_CHARGE_FULL:
+ 		return 1;
+ 
+ 	default:
+@@ -2824,13 +2994,16 @@
+ 
+ 	cancel_delayed_work_sync(&di->work);
+ 
++	rk818_account(di);
+ 	rk818_save_dsoc(di);
+ 	rk818_save_remain_cap(di);
++	rk818_save_learn(di, false);	/* a clean end: no brown-out */
+ 
+ 	dev_info(di->dev,
+-		 "shutdown: dsoc=%d rsoc=%d i=%d mA v=%d mV cap=%d mAh\n",
++		 "shutdown: dsoc=%d rsoc=%d i=%d mA v=%d mV cap=%d mAh, %d mAh drawn since %s\n",
+ 		 di->dsoc, di->rsoc, di->current_avg_ma,
+-		 di->voltage_avg_mv, di->remain_cap_mah);
++		 di->voltage_avg_mv, di->remain_cap_mah, di->drawn_mah,
++		 di->learn_valid ? "full" : "a partial charge");
+ }
+ 
+ static const struct of_device_id rk818_battery_of_match[] = {
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -73,7 +73,16 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
+-	/* 3.7 V 4000 mAh Li-Po, charged by the RK818 */
++	/*
++	 * 3.7 V 4000 mAh Li-Po, charged by the RK818. The OCV table and the
++	 * resistance are a fit of a logged discharge of the second unit
++	 * (2026-11-21, scripts/battery-fit.py: 4.8 Ah from full to the
++	 * brown-out at 1-2.3 A, the ends of 10 min phases at a steady load
++	 * less 160 mOhm times the current); the generic table read 40% low
++	 * mid-range. 0% is the OCV at that brown-out under 2.3 A, the cell
++	 * read 3610 mV at rest after it. The FCC the driver learns from each
++	 * cycle, up to 150% of charge-full-design (rk818_learn_at_boot()).
++	 */
+ 	bat: battery {
+ 		compatible = "simple-battery";
+ 		voltage-min-design-microvolt = <3500000>;
+@@ -84,16 +93,16 @@
+ 		charge-term-current-microamp = <200000>;
+ 		constant-charge-current-max-microamp = <2000000>;
+ 		constant-charge-voltage-max-microvolt = <4200000>;
+-		factory-internal-resistance-micro-ohms = <180000>;
+-		resistance-temp-table = <20 180>;
++		factory-internal-resistance-micro-ohms = <160000>;
++		resistance-temp-table = <20 100>;	/* % of the above */
+ 		ocv-capacity-celsius = <20>;
+ 		ocv-capacity-table-0 =
+-			<4146950 100>, <4001920 95>, <3967900 90>, <3919950 85>,
+-			<3888450 80>, <3861850 75>, <3831540 70>, <3799130 65>,
+-			<3768190 60>, <3745650 55>, <3726610 50>, <3711630 45>,
+-			<3696720 40>, <3685660 35>, <3674950 30>, <3663050 25>,
+-			<3649470 20>, <3635260 15>, <3616920 10>, <3592440 5>,
+-			<3574170 0>;
++			<4175000 100>, <4129770 95>, <4095880 90>, <4048040 85>,
++			<4021150 80>, <3971030 75>, <3942980 70>, <3900010 65>,
++			<3880530 60>, <3865230 55>, <3827770 50>, <3805240 45>,
++			<3778450 40>, <3770830 35>, <3747940 30>, <3744450 25>,
++			<3742390 20>, <3728410 15>, <3711170 10>, <3696890 5>,
++			<3663180 0>;
+ 	};
+ 
+ 	codec_clk: codec-clk {

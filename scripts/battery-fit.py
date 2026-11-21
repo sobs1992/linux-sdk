@@ -104,6 +104,61 @@ def fit(soc, v, i_a):
     return centres, x[:-1], x[-1], float(np.sqrt(np.mean(resid ** 2)))
 
 
+PHASE_S = 300           # a steady load at least this long gives an OCV point
+STEP_A = 0.4            # a load step: the 30 s mean current moves this much
+
+
+def plateaus(t, v, i_a, soc):
+    """Phases of a steady load: the mean of each one's last minute (SoC, V,
+    I) and R of the steps between them (V and I 20 s either side). Under a
+    steady load the polarisation has settled: V - R*I of a phase's end is
+    the OCV, the 5 s readings of a varying load are not (bin fit)."""
+    m30 = np.array([i_a[(t >= x - 30) & (t <= x)].mean() for x in t])
+    segs, s0 = [], 0
+    for n in range(1, len(t)):
+        if abs(m30[n] - m30[s0:n].mean()) > STEP_A:
+            segs.append((s0, n))
+            s0 = n
+    segs.append((s0, len(t)))
+    pts, rs = [], []
+    prev = None
+    for a, b in segs:
+        k = np.arange(a, b)
+        if t[b - 1] - t[a] < 60:
+            prev = None
+            continue
+        if prev is not None:
+            first = k[t[k] - t[a] < 20]
+            di = i_a[first].mean() - i_a[prev].mean()
+            if abs(di) >= STEP_A:
+                rs.append((v[first].mean() - v[prev].mean()) / di)
+        last = k[t[k] >= t[b - 1] - 60]
+        if t[b - 1] - t[a] >= PHASE_S or b == len(t):
+            pts.append((soc[last].mean(), v[last].mean(), i_a[last].mean()))
+        prev = k[t[k] >= t[b - 1] - 20]
+    return pts, rs
+
+
+def smooth_table(points, lam=0.3):
+    """OCV at 0, 5 ... 100 %: piecewise linear through the points (SoC, V)
+    by least squares, its second differences kept small, never falling with
+    the SoC; listed 100 % first, strictly falling, as the DT has it."""
+    knots = np.arange(0, 101, 5.0)
+    xs = np.array([p[0] for p in points])
+    ys = np.array([p[1] for p in points])
+    h = np.clip(1 - np.abs(xs[:, None] - knots[None, :]) / 5.0, 0, None)
+    d = np.zeros((len(knots) - 2, len(knots)))
+    for n in range(len(knots) - 2):
+        d[n, n:n + 3] = [1, -2, 1]
+    x, *_ = np.linalg.lstsq(np.r_[h, lam * d], np.r_[ys, np.zeros(len(d))], rcond=None)
+    x = np.maximum.accumulate(x)
+    pts = [(int(round(o * 1e5)) * 10, int(c)) for c, o in zip(knots[::-1], x[::-1])]
+    for n in range(1, len(pts)):
+        if pts[n][0] >= pts[n - 1][0]:
+            pts[n] = (pts[n - 1][0] - 10, pts[n][1])
+    return pts, float(np.sqrt(np.mean((ys - h @ x) ** 2)))
+
+
 def table(centres, ocv):
     """OCV at 100, 95 ... 0 %: interpolated, extrapolated at the ends,
     never falling with the SoC."""
@@ -144,6 +199,15 @@ def analyse(rows):
     keep = (v > 0) & (i_a < 0)
     centres, ocv, r_ohm, rms = fit(soc[keep], v[keep], i_a[keep])
     pts = table(centres, ocv)
+    t = np.array([r["mono_ms"] for r in run]) / 1000.0
+    phases, steps = plateaus(t[keep], v[keep], i_a[keep], soc[keep])
+    method = "bins of 5 s readings"
+    if len(phases) >= 6 and steps:
+        r_ohm = float(np.median(steps))
+        pts, rms = smooth_table([(s_, v_ - r_ohm * i_) for s_, v_, i_ in phases])
+        centres = np.array([p[0] for p in phases])
+        ocv = np.array([v_ - r_ohm * i_ for _, v_, i_ in phases])
+        method = "%d steady phases, R the median of %d load steps" % (len(phases), len(steps))
     err = drv - soc
     t0, t1 = first["real_ms"] / 1000, run[-1]["real_ms"] / 1000
     awake_ms = sum(r["mono_ms"] - p["mono_ms"] for p, r in zip([first] + run[:-1], run)
@@ -168,7 +232,7 @@ def analyse(rows):
         "capacity_mah": cap, "mean_ma": cap / (awake_ms / 3.6e6) if awake_ms else 0,
         "end_mv": int(run[-1]["mv"]), "end_ma": int(run[-1]["ma"]), "end_driver_pct": int(drv[-1]),
         "r_mohm": r_ohm * 1000, "fit_rms_mv": rms * 1000,
-        "ocv_table": pts,
+        "ocv_table": pts, "method": method,
         "driver_err_max": float(np.max(np.abs(err))), "driver_err_mean": float(np.mean(err)),
         "driver_zero_at_soc": float(soc[np.argmax(drv <= 0)]) if (drv <= 0).any() else None,
         "dt_table_err_max": float(np.max(np.abs(dt_err[keep]))),
@@ -194,7 +258,8 @@ def report(res, out, sources):
         "| End | %d mV at %d mA, driver %d %%%s |" % (
             res["end_mv"], res["end_ma"], res["end_driver_pct"],
             ", then the charger" if res["ended_on_charger"] else ""),
-        "| R (5 s readings) | %.0f mOhm, fit rms %.1f mV |" % (res["r_mohm"], res["fit_rms_mv"]),
+        "| R | %.0f mOhm, fit rms %.1f mV |" % (res["r_mohm"], res["fit_rms_mv"]),
+        "| OCV table from | %s |" % res["method"],
         "| Driver's level vs true SoC | max %.1f %%, mean %+.1f %% |" % (
             res["driver_err_max"], res["driver_err_mean"]),
         "| Driver showed 0 %% at true SoC | %s |" % (
