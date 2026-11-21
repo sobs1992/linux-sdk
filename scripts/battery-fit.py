@@ -16,6 +16,7 @@ when the battery turns full on the charger, the cycle before is kept as
   battery-fit.py --host 192.168.8.2            fetch from the device and fit
   battery-fit.py FILE [FILE...]                 fit local files (.raw.prev first)
   battery-fit.py --selftest                     fit a made-up battery, check it
+  battery-fit.py --current-offset-ma 578 FILE   the same with the readings' zero corrected
 
 The results go to --out (default lab/wip/battery-<host>/<date>/): the raw files,
 report.md, fit.json, fit.png.
@@ -38,11 +39,11 @@ BIN = 1.0               # % of the SoC per OCV unknown
 STATES = ["menu", "game", "screen off", "sleep", "off"]
 
 # the device tree's table now (meson-g12b-odroid-go-ultra.dts), uV -> %
-DT_OCV = [(4146950, 100), (4001920, 95), (3967900, 90), (3919950, 85), (3888450, 80),
-          (3861850, 75), (3831540, 70), (3799130, 65), (3768190, 60), (3745650, 55),
-          (3726610, 50), (3711630, 45), (3696720, 40), (3685660, 35), (3674950, 30),
-          (3663050, 25), (3649470, 20), (3635260, 15), (3616920, 10), (3592440, 5),
-          (3574170, 0)]
+DT_OCV = [(4082960, 100), (4045980, 95), (4009010, 90), (3972010, 85), (3934350, 80),
+          (3895710, 75), (3862500, 70), (3841170, 65), (3818400, 60), (3780330, 55),
+          (3739860, 50), (3714430, 45), (3700410, 40), (3684780, 35), (3664670, 30),
+          (3648220, 25), (3640160, 20), (3634280, 15), (3624410, 10), (3617000, 5),
+          (3610000, 0)]
 
 
 def load(paths):
@@ -106,6 +107,10 @@ def fit(soc, v, i_a):
 
 PHASE_S = 300           # a steady load at least this long gives an OCV point
 STEP_A = 0.4            # a load step: the 30 s mean current moves this much
+# the OCV table from the phases of a light load when there are enough: the
+# driver reads it at rest, and V - R*I of a phase at 1.6 A is still some
+# polarisation below that (fit rms 8.8 mV over all phases, 1.7 over these)
+LIGHT_A = 0.6
 
 
 def plateaus(t, v, i_a, soc):
@@ -204,10 +209,14 @@ def analyse(rows):
     method = "bins of 5 s readings"
     if len(phases) >= 6 and steps:
         r_ohm = float(np.median(steps))
+        light = [p for p in phases if abs(p[2]) <= LIGHT_A]
+        if len(light) >= 6:
+            phases = light
         pts, rms = smooth_table([(s_, v_ - r_ohm * i_) for s_, v_, i_ in phases])
         centres = np.array([p[0] for p in phases])
         ocv = np.array([v_ - r_ohm * i_ for _, v_, i_ in phases])
-        method = "%d steady phases, R the median of %d load steps" % (len(phases), len(steps))
+        method = "%d steady phases%s, R the median of %d load steps" % (
+            len(phases), " of a light load" if phases is light else "", len(steps))
     err = drv - soc
     t0, t1 = first["real_ms"] / 1000, run[-1]["real_ms"] / 1000
     awake_ms = sum(r["mono_ms"] - p["mono_ms"] for p, r in zip([first] + run[:-1], run)
@@ -359,6 +368,9 @@ def main():
     ap.add_argument("--host")
     ap.add_argument("--out")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--current-offset-ma", type=int, default=0,
+                    help="add this to every current reading: the error of the gauge's zero "
+                         "found afterwards (the driver's charge balance, rk818 0036)")
     a = ap.parse_args()
     if a.selftest:
         selftest()
@@ -368,7 +380,10 @@ def main():
                                 datetime.date.today().isoformat())
     os.makedirs(out, exist_ok=True)
     files = fetch(a.host, out) if a.host else a.files
-    print(report(analyse(load(files)), out, files))
+    rows = load(files)
+    for r in rows:
+        r["ma"] += a.current_offset_ma
+    print(report(analyse(rows), out, files))
     print("saved in", out)
 
 
