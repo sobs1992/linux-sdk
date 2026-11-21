@@ -1479,6 +1479,23 @@ static bool B50_brownout_charger_key_held_in_wait(void)
 			}
 	return true;
 }
+/* full under 0035 with its FCC 4800 (the counter at 4800) and still on the
+ * charger, a reboot into this driver, the charger out at once: the level
+ * follows the battery, not 100 for half of it (OGU2, 2026-11-21) */
+static bool B51_first_boot_after_0035_full(void)
+{
+	world(3060, 50, 30, 30, true, 4800, false);
+	charge_full();
+	system_state = SYSTEM_RESTART; rk818_battery_shutdown(&pdev); system_state = SYSTEM_RUNNING;
+	regs[RK818_MISC_MARK_REG] = 0;
+	pmic_reset(); physics(5); k_probe(); run(10);
+	online = 0; load_ma = 1000;
+	for (int k = 0; k < 6; k++) {
+		run(600);
+		CHECK(cap_pct() <= true_level() + 3, "after the first boot from 0035 at full: level %d, true %.0f", cap_pct(), true_level());
+	}
+	return true;
+}
 static bool B6_new_console(void)
 {
 	world(3060, 60, 30, 0, false, 0, true);
@@ -2191,7 +2208,7 @@ static struct { const char *name; bool (*fn)(void); } cells[] = {
 	C(B25_counter_set_by_another_system), C(B26_off_on_charger_replugged),
 	C(B27_off_on_charger_key_at_once_after_rest), C(B28_counter_set_high_by_another_system),
 	C(B29_panic_right_after_kept_ocv), C(B30_game_off_on_charger_short_charge), C(B31_reboot_back_from_another_system), C(B33_panic_low_after_brownout_boot), C(B34_fcc_register_far_off), C(B35_panic_with_the_charger_in), C(B36_off_on_charger_unplugged_long_rest_wrong_fcc),
-	C(B42_first_boot_after_0035), C(B43_boot_crosses_a_counter_step), C(B44_forced_off_in_the_wait), C(B45_old_uboot_plug_in_wrong_fcc), C(B46_key_held_then_charger), C(B47_hang_then_key), C(B48_sleep_stuck_then_key), C(B49_stale_counter_mark), C(B50_brownout_charger_key_held_in_wait), C(B37_other_system_after_wait_high), C(B38_other_system_after_wait_low), C(B39_panic_asleep_after_brownout_boot),
+	C(B42_first_boot_after_0035), C(B43_boot_crosses_a_counter_step), C(B44_forced_off_in_the_wait), C(B45_old_uboot_plug_in_wrong_fcc), C(B46_key_held_then_charger), C(B47_hang_then_key), C(B48_sleep_stuck_then_key), C(B49_stale_counter_mark), C(B50_brownout_charger_key_held_in_wait), C(B51_first_boot_after_0035_full), C(B37_other_system_after_wait_high), C(B38_other_system_after_wait_low), C(B39_panic_asleep_after_brownout_boot),
 	C(B40_reboot_back_last_up_on_usb), C(B41_reboot_other_system_draws), C(D23_old_uboot_brownout_two_plug_ins),
 	C(D24_old_uboot_brownout_plug_unplug_key), C(D25_cycle_from_0035), C(D26_fcc_far_too_small), C(D27_zero_rest_and_once), C(E15_hibernate_then_sleep),
 	C(C1_up_on_charger_reading_negative), C(C5_inhibit_after_charge), C(C6_full_then_game_on_weak_charger), C(C2_no_rise_on_battery), C(C3_step_at_charge_end), C(C4_full_on_weak),

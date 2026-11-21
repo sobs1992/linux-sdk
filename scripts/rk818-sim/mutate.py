@@ -102,6 +102,7 @@ M = [
     ("0% learns without a rest", "\tbool zero = !(flags & LEARN_RUNNING) && (flags & LEARN_ZERO) && rested;", "\tbool zero = !(flags & LEARN_RUNNING) && (flags & LEARN_ZERO);"),
     ("0% learns only below 50%", "\tbool zero = !(flags & LEARN_RUNNING) && (flags & LEARN_ZERO) && rested;", "\tbool zero = !(flags & LEARN_RUNNING) && (flags & LEARN_ZERO) && rested && ocv_pct < 50;"),
     ("a cycle learnt from twice", "\tdi->learn_valid = false;\t/* the cycle is used */\n", ""),
+    ("the counter left above the FCC", "\t/* Clamp coulomb counter to [0, fcc] */\n\tif (di->remain_cap_mah > di->fcc_mah) {", "\t/* Clamp coulomb counter to [0, fcc] */\n\tif (0) {"),
     ("FCC_MAX_PCT 400", "#define FCC_MAX_PCT\t\t\t150", "#define FCC_MAX_PCT\t\t\t400"),
     ("no charge added to a rest OCV of a plug-in", "\t\tdi->remain_cap_mah = ocv_cap + (before ? charged : 0);", "\t\tdi->remain_cap_mah = ocv_cap;"),
     ("the charge added to a rest OCV by the key", "\t\tdi->remain_cap_mah = ocv_cap + (before ? charged : 0);", "\t\tdi->remain_cap_mah = ocv_cap + charged;"),
