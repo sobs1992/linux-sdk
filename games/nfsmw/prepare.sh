@@ -10,6 +10,10 @@
 #     game's original 1024 and none of its costlier extras
 #   - Settings.ini: the lowest graphics (the game's own options screen
 #     writes the same values)
+#   - the movies (MOVIES/*.vp6, 1920x1088 VP6: the game decoded ~13 of
+#     their 30 frames a second) made again at 848x480 by
+#     scripts/ea-vp6-shrink.py (key frames, the audio as it was; their
+#     frames are 1920x1080 between 4 black rows, cropped first)
 set -e
 : "${GAME_DIR:?}"
 ini=$GAME_DIR/SCRIPTS/NFSMostWanted.WidescreenFix.ini
@@ -36,3 +40,6 @@ for kv in g_CarEnvironmentMapEnable=0 g_CarEnvironmentMapUpdateData=0 \
 	g_ShadowDetail=0 g_VisualTreatment=0; do
 	set_ini "$set" "${kv%%=*}" "${kv#*=}"
 done
+
+"${SDK_DIR:?}/scripts/ea-vp6-shrink.py" --crop 1920:1080:0:4 --size 848x480 --quant 52 \
+	"$GAME_DIR/MOVIES"

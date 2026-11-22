@@ -18,6 +18,16 @@ loaded by the ASI loader, the game's `dinput8.dll`). `[nfsmw]` in
 - **Frame rate.** Menus 130-150 fps; a race 30-35, both busy threads (the
   game's ~57 %, WineD3D's ~75 %) as in NFSU. `fps_limit = 30` holds it
   even.
+- **Movies.** This edition's `MOVIES/*.vp6` (story, Blacklist, tutorials,
+  the attract movie: 32 files, 2.2 GB) are 1920x1088 VP6 at ~12 Mbit/s;
+  the game decodes them in its own x86 code (Box64), one thread at 100 %,
+  and showed ~13 of their 30 frames a second. `prepare.sh` makes them
+  again at 848x480 with `scripts/ea-vp6-shrink.py` (crop to the
+  1920x1080 picture between 4 black rows, lanczos, `scripts/vp6enc.c`:
+  VP6.0 key frames at quantiser 52, PSNR 40-42 dB; the audio chunks as
+  they were, byte for byte, checked): 1.6 GB, 30 fps steady, still 30
+  with the big cores capped at 1 GHz. The first run takes ~4 minutes
+  (16 threads), later ones copy from `lab/images/cache/ea-vp6`.
 - **Profile.** The game asks for a profile's name at the first start (the
   console cannot type one): `overlay/SAVES/NFS Most Wanted/player/player`
   is a profile "player" made on the device. `writable = SAVES`: it lives
