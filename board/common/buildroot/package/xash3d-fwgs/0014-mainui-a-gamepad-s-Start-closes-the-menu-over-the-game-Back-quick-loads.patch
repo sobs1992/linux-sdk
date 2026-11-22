@@ -1,0 +1,62 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] mainui: over a game the menu opens on Resume; Start closes it, Back quick loads
+
+The main menu over a game had no item chosen: A did nothing, Start (a
+handheld's F1, which opened it) did not close it and Up went round to
+Quit. Now Resume Game is chosen when it opens over a game, Start closes
+it as on a console, and Back (the handheld's F2, the quick load in the
+game) loads the quick save from the menu too, also before a game, in the
+main menu of a game just started.
+
+--- a/3rdparty/mainui/menus/Main.cpp
++++ b/3rdparty/mainui/menus/Main.cpp
+@@ -44,6 +44,7 @@
+ 	CMenuMain() : CMenuFramework( "CMenuMain" ) { }
+ 
+ 	bool KeyDown( int key ) override;
++	void Show() override;
+ 
+ 	void QuitDialogCb();
+ 
+@@ -126,6 +127,19 @@
+ */
+ bool CMenuMain::KeyDown( int key )
+ {
++	// a gamepad's Start (a handheld's F1) opened the menu over the game and
++	// closes it again, as on a console; Back (F2) is the quick load there,
++	// before a game too (the main menu of a game just started)
++	if( key == K_START_BUTTON && CL_IsActive() && !dialog.IsVisible() )
++	{
++		UI_CloseMenu();
++		return true;
++	}
++	if( key == K_BACK_BUTTON && !dialog.IsVisible() )
++	{
++		EngFuncs::ClientCmd( false, "loadquick\n" );
++		return true;
++	}
+ 	if( UI::Key::IsEscape( key ) )
+ 	{
+ 		if ( CL_IsActive( ))
+@@ -143,6 +157,21 @@
+ }
+ 
+ /*
++=================
++CMenuMain::Show
++
++Over a game: Resume Game chosen, so A goes back to it (the cursor was on
++nothing: A did nothing, and Up went round to Quit)
++=================
++*/
++void CMenuMain::Show()
++{
++	CMenuFramework::Show();
++	if( CL_IsActive() && resumeGame.IsVisible() )
++		SetCursorToItem( resumeGame );
++}
++
++/*
+ =================
+ UI_Main_HazardCourse
+ =================
