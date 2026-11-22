@@ -30,12 +30,18 @@ the menu entry.
 - **Saves.** `save/` and `settings.cfg` are writable copies under
   `/data/wine/games/shade`; its logs (`console.log` and the like) are
   written next to them.
-- **Controls.** The PC's keys (`Readme.txt`): left stick W A S D, right
-  stick the camera (the mouse), A attack, R1 block (left and right
-  button), B jump, X use (E), Y crouch, L1 the demon (R), L2/R2 slower and
-  faster (the wheel: walk, run, sprint), D-pad the weapons 1-4, F1 menu,
-  F2 inventory (Q), F3 holster (V), F4 the claw (5). The menus take A only
-  when it is held a little (a frame or two). The game's joystick setting
+- **Controls.** The PC's keys (`Readme.txt`), laid out as the SDK's
+  shooters (`overlay/wine.ini`): left stick W A S D, right stick the camera
+  (the mouse) and the menus' pointer, R1 and A attack (the left button; A
+  also clicks in the menus), L1 block (the right button), B jump (Space),
+  X use (E), Y the demon (R), L2/R2 slower and faster (the wheel: walk,
+  run, sprint), D-pad the weapons 1-4 (up fist, right sword, down pistol,
+  left crossbow; their spells in the demon), F1 menu (Esc), F2 crouch (C),
+  F3 the claw, the skull of death (5), F4 inventory (Q). Holster (V) has
+  no button: a rare action. The menus take A only when it is held a
+  little (a frame or two). Esc in the main menu quits the game at once:
+  `esc_delay = 30` holds the gamepad's Esc back for the first 30 s, over
+  the videos (A skips them). The game's joystick setting
   (`Joypad` in `settings.cfg`: the pace by the left stick's tilt, a
   gamepad's through Wine patch 0026) was tried and left off, the user
   preferring the keys.
