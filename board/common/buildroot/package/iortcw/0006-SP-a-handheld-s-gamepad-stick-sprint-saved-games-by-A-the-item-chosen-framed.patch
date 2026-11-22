@@ -19,7 +19,9 @@ Subject: [PATCH] SP: a handheld's gamepad: the stick sprints, saved games
   games and the autosaves (an item "autosave": the Load menus) flips it.
 - While the gamepad drives the menus the pointer is not drawn and the item
   the keys chose has a frame (the menus only lit an item up a little);
-  the pointer comes back when it moves (the right stick, a mouse).
+  the pointer comes back when it moves (the right stick, a mouse). A menu
+  of saved games opened then has its list chosen: Up and Down pick a row,
+  A loads it (the keys started on the autosave switch).
 ---
 diff --git a/SP/code/client/cl_input.c b/SP/code/client/cl_input.c
 --- a/SP/code/client/cl_input.c
@@ -94,17 +96,6 @@ diff --git a/SP/code/qcommon/common.c b/SP/code/qcommon/common.c
  		Cbuf_ExecuteText(EXEC_NOW, "exec autoexec.cfg\n");
  		Cbuf_Execute();
  	}
-diff --git a/SP/code/ui/ui_local.h b/SP/code/ui/ui_local.h
---- a/SP/code/ui/ui_local.h
-+++ b/SP/code/ui/ui_local.h
-@@ -814,6 +814,7 @@
- 
- typedef struct {
- 	displayContextDef_t uiDC;
-+	qboolean padDriven;		// the gamepad drives the menus: no pointer drawn
- 	int newHighScoreTime;
- 	int newBestTime;
- 	int showPostGameTime;
 diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
 --- a/SP/code/ui/ui_main.c
 +++ b/SP/code/ui/ui_main.c
@@ -113,7 +104,7 @@ diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
  	if (Menu_Count() > 0 && (trap_Key_GetCatcher() & KEYCATCH_UI)) {
  		uiMenuCommand_t mymenu = _UI_GetActiveMenu();
 -		if ( mymenu != UIMENU_BRIEFING ) {
-+		if ( uiInfo.padDriven ) {
++		if ( g_gamepadDriven ) {
 +			Menu_PaintGamepadFocus();
 +		} else if ( mymenu != UIMENU_BRIEFING ) {
  			UI_DrawHandlePic( uiInfo.uiDC.cursorx - 16, uiInfo.uiDC.cursory - 16, 32, 32, uiInfo.uiDC.Assets.cursor );
@@ -128,7 +119,7 @@ diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
 +	if ( down && key >= K_PAD0_A && key <= K_PAD0_RIGHTTRIGGER &&
 +		 key != K_PAD0_RIGHTSTICK_LEFT && key != K_PAD0_RIGHTSTICK_RIGHT &&
 +		 key != K_PAD0_RIGHTSTICK_UP && key != K_PAD0_RIGHTSTICK_DOWN ) {
-+		uiInfo.padDriven = qtrue;
++		g_gamepadDriven = qtrue;
 +	}
 +
  	key = Menu_GamepadKey( key );
@@ -139,7 +130,7 @@ diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
  */
  void _UI_MouseEvent( int dx, int dy ) {
 +	if ( dx || dy ) {
-+		uiInfo.padDriven = qfalse;	// the pointer is shown again
++		g_gamepadDriven = qfalse;	// the pointer is shown again
 +	}
  	// update mouse screen position
  	uiInfo.uiDC.cursorx += dx;
@@ -162,7 +153,7 @@ diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
  		// mouse hit
  		if ( key == K_MOUSE1 || key == K_MOUSE2 ) {
  			if ( item->window.flags & WINDOW_LB_LEFTARROW ) {
-@@ -3151,6 +3159,37 @@
+@@ -3151,6 +3159,39 @@
  	menu->window.flags |= WINDOW_HASFOCUS;
  }
  
@@ -174,6 +165,8 @@ diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
 +menus only light an item up a little, when the pointer is over it)
 +==================
 +*/
++qboolean g_gamepadDriven;
++
 +void Menu_PaintGamepadFocus( void ) {
 +	static const vec4_t gold = { 1.0f, 0.8f, 0.3f, 0.9f };
 +	menuDef_t *menu = Menu_GetFocused();
@@ -200,7 +193,7 @@ diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
  void Menu_PointerToCursorItem( void ) {
  	menuDef_t *menu = Menu_GetFocused();
  	itemDef_t *item;
-@@ -3276,6 +3315,21 @@
+@@ -3276,6 +3317,21 @@
  		return;
  	}
  
@@ -222,13 +215,56 @@ diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
  	// see if the mouse is within the window bounds and if so is this a mouse click
  	if ( down && !( menu->window.flags & WINDOW_POPUP ) && !Rect_ContainsPoint( &menu->window.rect, DC->cursorx, DC->cursory ) ) {
  		static qboolean inHandleKey = qfalse;
+@@ -4873,6 +4929,33 @@
+ 	return qfalse;
+ }
+ 
++/*
++==================
++Menu_FocusSavegames
++
++A menu of saved games opened while the gamepad drives the menus: its list
++has the keys and the pointer, Up and Down choose a row at once and A loads
++it (the keys started on the autosave switch, five presses from the list)
++==================
++*/
++static void Menu_FocusSavegames( menuDef_t *menu ) {
++	int i;
++
++	if ( !g_gamepadDriven ) {
++		return;
++	}
++	for ( i = 0; i < menu->itemCount; i++ ) {
++		itemDef_t *item = menu->items[i];
++
++		if ( item->type == ITEM_TYPE_LISTBOX && (int)item->special == FEEDER_SAVEGAMES &&
++			 ( item->window.flags & WINDOW_VISIBLE ) ) {
++			menu->cursorItem = i;
++			Menu_PointerToCursorItem();
++			return;
++		}
++	}
++}
++
+ menuDef_t *Menus_ActivateByName( const char *p ) {
+ 	int i;
+ 	menuDef_t *m = NULL;
+@@ -4884,6 +4967,7 @@
+ 				m->opener = focus;
+ 			}
+ 			Menus_Activate( m );
++			Menu_FocusSavegames( m );
+ 			if ( openMenuCount < MAX_OPEN_MENUS && focus != NULL ) {
+ 				menuStack[openMenuCount++] = focus;
+ 			}
 diff --git a/SP/code/ui/ui_shared.h b/SP/code/ui/ui_shared.h
 --- a/SP/code/ui/ui_shared.h
 +++ b/SP/code/ui/ui_shared.h
-@@ -479,6 +479,7 @@
+@@ -479,6 +479,8 @@
  
  int UI_SelectForKey(int key);
  int Menu_GamepadKey( int key );
++extern qboolean g_gamepadDriven;	// the gamepad drives the menus: no pointer drawn
 +void Menu_PaintGamepadFocus( void );
  void Menu_PointerToCursorItem( void );
  void Menus_FocusUnderPointer( void );
