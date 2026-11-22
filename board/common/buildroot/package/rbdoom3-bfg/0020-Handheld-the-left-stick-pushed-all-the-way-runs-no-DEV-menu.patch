@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 22 Nov 2026 01:30:00 +0100
+Subject: [PATCH 20/20] Handheld: the left stick pushed all the way runs; no DEV
+ menu
+
+A handheld has no stick to press: _speed was bound to L3 (JOY7) only, so
+there was no running at all. With HANDHELD_DEFAULTS the left stick pushed
+past joy_stickRun (0.85 of the way, 0: never) sets BUTTON_RUN, in single
+player too; the stamina limits it as for the key.
+
+The first entry of the main menu was the developer's list of maps (DEV,
+in builds without ID_RETAIL): a player pressing A by habit landed in it.
+Not with HANDHELD_DEFAULTS; Campaign is the first entry.
+---
+diff --git a/neo/framework/UsercmdGen.cpp b/neo/framework/UsercmdGen.cpp
+--- a/neo/framework/UsercmdGen.cpp
++++ b/neo/framework/UsercmdGen.cpp
+@@ -48,6 +48,9 @@
+ 
+ #if defined(HANDHELD_DEFAULTS)
+ idCVar in_useJoystick( "in_useJoystick", "1", CVAR_ARCHIVE | CVAR_BOOL, "enables/disables the gamepad for PC use" );
++// a handheld has no stick to press (L3, _speed): the left stick pushed this
++// far runs, in single player too, as long as the stamina lasts
++idCVar joy_stickRun( "joy_stickRun", "0.85", CVAR_ARCHIVE | CVAR_FLOAT, "the left stick pushed this far (0..1) runs, 0 never", 0.0f, 1.0f );
+ #else
+ idCVar in_useJoystick( "in_useJoystick", "0", CVAR_ARCHIVE | CVAR_BOOL, "enables/disables the gamepad for PC use" );
+ #endif
+@@ -1077,6 +1080,14 @@
+ 	{
+ 		cmd.buttons |= BUTTON_RUN;
+ 	}
++#if defined(HANDHELD_DEFAULTS)
++	if( in_useJoystick.GetBool() && joy_stickRun.GetFloat() > 0.0f &&
++			idVec2( joystickAxis[ AXIS_LEFT_X ], joystickAxis[ AXIS_LEFT_Y ] ).LengthSqr() >=
++			Square( joy_stickRun.GetFloat() ) )
++	{
++		cmd.buttons |= BUTTON_RUN;
++	}
++#endif
+ 	
+ 	// check the zoom button
+ 	if( toggled_zoom.on )
+diff --git a/neo/d3xp/menus/MenuHandler_Shell.cpp b/neo/d3xp/menus/MenuHandler_Shell.cpp
+--- a/neo/d3xp/menus/MenuHandler_Shell.cpp
++++ b/neo/d3xp/menus/MenuHandler_Shell.cpp
+@@ -831,7 +831,7 @@
+ 		}
+ 		else
+ 		{
+-#if !defined ( ID_RETAIL )
++#if !defined ( ID_RETAIL ) && !defined( HANDHELD_DEFAULTS ) // no DEV list of maps on a handheld
+ 			navOptions.Append( "DEV" );	// DEV
+ #endif
+ 			navOptions.Append( "#str_swf_campaign" );	// singleplayer
+@@ -843,7 +843,7 @@
+ 			
+ 			idMenuWidget_MenuButton* buttonWidget = NULL;
+ 			int index = 0;
+-#if !defined ( ID_RETAIL )
++#if !defined ( ID_RETAIL ) && !defined( HANDHELD_DEFAULTS ) // no DEV list of maps on a handheld
+ 			buttonWidget = dynamic_cast< idMenuWidget_MenuButton* >( &menuBar->GetChildByIndex( index ) );
+ 			if( buttonWidget != NULL )
+ 			{
+diff --git a/neo/d3xp/menus/MenuScreen_Shell_Root.cpp b/neo/d3xp/menus/MenuScreen_Shell_Root.cpp
+--- a/neo/d3xp/menus/MenuScreen_Shell_Root.cpp
++++ b/neo/d3xp/menus/MenuScreen_Shell_Root.cpp
+@@ -211,7 +211,7 @@
+ 		
+ 			idMenuWidget_Button* buttonWidget = NULL;
+ 			
+-#if !defined ( ID_RETAIL )
++#if !defined ( ID_RETAIL ) && !defined( HANDHELD_DEFAULTS ) // no DEV list of maps on a handheld
+ 			option.Append( "DEV" );	// DEV
+ 			menuOptions.Append( option );
+ 			options->GetChildByIndex( index ).ClearEventActions();
+-- 
+2.43.0
+
