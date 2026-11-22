@@ -16,6 +16,15 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
   WINE_D3D_CONFIG, wine.ini): WineD3D takes the GPU for a GeForce 6800
   with 128 MB, Ogre keeps all textures of a chapter, and the loading of
   chapter 1 stopped with "Out of video memory" (at 1024 the prologue hung).
+- Memory: `WINE_D3D9_MANAGED_EVICT=1` (wine.ini `env`, wine-wow64 patch
+  0033). Wine 11's d3d9 keeps a system memory copy of every managed
+  texture next to the GPU one; the game held ~900 MB of RAM next to
+  570-680 MB of GPU buffers, ~180 MB left, and after a long session a
+  heavier scene load ended in the OOM killer (ogu2, 2026-11-22). With
+  the variable the copies are freed once on the GPU: 551 MB instead of
+  781 MB at ~400 MB of textures (chapter 2), 30 fps as before.
+  Transparent huge pages were not the cause (`madvise` instead of
+  `always`: the game's RSS unchanged).
 - OpenAL: OpenAL Soft 1.23.1 (`lab/redist/openal-soft-1.23.1`, its Win32
   `soft_oal.dll` as the game's `OpenAL32.dll`). With Creative's router and
   wrap_oal (as Daemonica) the game found a device but stayed silent: the

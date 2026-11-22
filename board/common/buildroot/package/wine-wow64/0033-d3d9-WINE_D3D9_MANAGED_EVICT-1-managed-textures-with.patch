@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 22 Nov 2026 16:04:51 +0100
+Subject: [PATCH] d3d9: WINE_D3D9_MANAGED_EVICT=1: managed textures without a
+ lasting system memory copy.
+
+A D3DPOOL_MANAGED texture is a wined3d texture in system memory, which
+the program maps, plus a draw texture on the GPU, updated from it before
+draws: its whole contents stay in system memory for as long as it lives.
+The Book of Unwritten Tales keeps ~450 MB of such copies in its 32-bit
+address space (its RSS grows by 0.66 MB with each MB of GPU memory, 900 MB
+in all next to 570-680 MB of GPU buffers): on the 2 GB ODROID-GO Ultra a
+heavier scene load ran out of memory and the OOM killer ended the game.
+
+With the variable set, a managed texture is one wined3d texture with GPU
+and CPU access, as d3d9 made them before it had draw textures. wined3d
+frees its system memory once every sub-resource is on the GPU
+(wined3d_texture_evict_sysmem()) and reads it back from the GPU if the
+program maps it again (not after 50 such reads). It is made without
+dirty region recording, whose sub-resources start in system memory
+uncounted and would never be evicted. UpdateTexture() still refuses it,
+as it refuses managed textures now.
+
+Off by default: maps of evicted textures wait for the GPU, and a map
+with D3DLOCK_NO_DIRTY_UPDATE or AddDirtyRect() updates the whole
+sub-resource or layer, as before draw textures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/d3d9/d3d9_private.h |  8 ++++++++
+ dlls/d3d9/device.c       |  2 +-
+ dlls/d3d9/texture.c      | 39 +++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/d3d9/d3d9_private.h b/dlls/d3d9/d3d9_private.h
+index b559238..1da9d6e 100644
+--- a/dlls/d3d9/d3d9_private.h
++++ b/dlls/d3d9/d3d9_private.h
+@@ -44,6 +44,9 @@
+ #define D3DPRESENTFLAGS_MASK 0x00000fffu
+ 
+ #define D3D9_TEXTURE_MIPMAP_DIRTY 0x1
++/* A D3DPOOL_MANAGED texture made as one wined3d texture
++ * (WINE_D3D9_MANAGED_EVICT, texture.c): it has no draw_texture. */
++#define D3D9_TEXTURE_MANAGED 0x2
+ 
+ #define D3DFMT_RESZ MAKEFOURCC('R','E','S','Z')
+ #define D3D9_RESZ_CODE 0x7fa05000
+@@ -252,6 +255,11 @@ static inline struct wined3d_texture *d3d9_texture_get_draw_texture(struct d3d9_
+     return texture->draw_texture ? texture->draw_texture : texture->wined3d_texture;
+ }
+ 
++static inline BOOL d3d9_texture_is_managed(const struct d3d9_texture *texture)
++{
++    return texture->draw_texture || (texture->flags & D3D9_TEXTURE_MANAGED);
++}
++
+ struct d3d9_texture *unsafe_impl_from_IDirect3DBaseTexture9(IDirect3DBaseTexture9 *iface);
+ void d3d9_texture_flag_auto_gen_mipmap(struct d3d9_texture *texture);
+ void d3d9_texture_gen_auto_mipmap(struct d3d9_texture *texture);
+diff --git a/dlls/d3d9/device.c b/dlls/d3d9/device.c
+index c0f5ad7..4284ee5 100644
+--- a/dlls/d3d9/device.c
++++ b/dlls/d3d9/device.c
+@@ -2025,7 +2025,7 @@ static HRESULT WINAPI d3d9_device_UpdateTexture(IDirect3DDevice9Ex *iface,
+     src_impl = unsafe_impl_from_IDirect3DBaseTexture9(src_texture);
+     dst_impl = unsafe_impl_from_IDirect3DBaseTexture9(dst_texture);
+ 
+-    if (src_impl->draw_texture || dst_impl->draw_texture)
++    if (d3d9_texture_is_managed(src_impl) || d3d9_texture_is_managed(dst_impl))
+     {
+         WARN("Source or destination is managed; returning D3DERR_INVALIDCALL.\n");
+         return D3DERR_INVALIDCALL;
+diff --git a/dlls/d3d9/texture.c b/dlls/d3d9/texture.c
+index 4de7d2e..87c5e06 100644
+--- a/dlls/d3d9/texture.c
++++ b/dlls/d3d9/texture.c
+@@ -1233,10 +1233,39 @@ static const struct wined3d_parent_ops d3d9_texture_wined3d_parent_ops =
+     d3d9_texture_wined3d_object_destroyed,
+ };
+ 
++/* A D3DPOOL_MANAGED texture is a texture in system memory, which the
++ * program maps, plus a draw texture on the GPU, updated from it before
++ * draws: its whole contents stay in system memory as long as it lives.
++ * A 32-bit game with many textures runs out of memory with that on a
++ * 2 GB machine (The Book of Unwritten Tales: ~450 MB of such copies,
++ * killed by the OOM killer on the ODROID-GO Ultra).
++ *
++ * With WINE_D3D9_MANAGED_EVICT=1 a managed texture is one wined3d texture
++ * with both GPU and CPU access, as d3d9 made them before it had draw
++ * textures: wined3d frees its system memory once every sub-resource is on
++ * the GPU (wined3d_texture_evict_sysmem()) and reads it back from the GPU
++ * if the program maps it again. Off by default: such maps wait for the
++ * GPU, and a map with D3DLOCK_NO_DIRTY_UPDATE or AddDirtyRect() updates
++ * the whole sub-resource or layer. */
++static BOOL d3d9_managed_evict(void)
++{
++    static int managed_evict = -1;
++
++    if (managed_evict < 0)
++    {
++        char buf[8];
++
++        managed_evict = GetEnvironmentVariableA("WINE_D3D9_MANAGED_EVICT", buf, sizeof(buf))
++                && buf[0] == '1';
++    }
++    return managed_evict;
++}
++
+ static HRESULT d3d9_texture_init(struct d3d9_texture *texture, struct d3d9_device *device,
+         const struct wined3d_resource_desc *desc, D3DPOOL pool, DWORD usage,
+         unsigned int layer_count, unsigned int level_count)
+ {
++    BOOL managed_shadow = pool == D3DPOOL_MANAGED && !d3d9_managed_evict();
+     struct wined3d_adapter *wined3d_adapter;
+     unsigned int output_idx;
+     unsigned int flags = 0;
+@@ -1254,7 +1283,10 @@ static HRESULT d3d9_texture_init(struct d3d9_texture *texture, struct d3d9_devic
+ 
+     if (desc->resource_type == WINED3D_RTYPE_TEXTURE_2D && is_gdi_compat_wined3dformat(desc->format))
+         flags |= WINED3D_TEXTURE_CREATE_GET_DC;
+-    if (pool == D3DPOOL_SYSTEMMEM || pool == D3DPOOL_MANAGED)
++    /* Not for a single managed texture: its sub-resources would start in
++     * system memory without being counted as such, and wined3d would
++     * never evict it. */
++    if (pool == D3DPOOL_SYSTEMMEM || managed_shadow)
+         flags |= WINED3D_TEXTURE_CREATE_RECORD_DIRTY_REGIONS;
+ 
+     if (usage & D3DUSAGE_WRITEONLY)
+@@ -1308,8 +1340,11 @@ static HRESULT d3d9_texture_init(struct d3d9_texture *texture, struct d3d9_devic
+     if (!level_count)
+         level_count = wined3d_log2i(max(max(desc->width, desc->height), desc->depth)) + 1;
+ 
++    if (pool == D3DPOOL_MANAGED && !managed_shadow)
++        texture->flags |= D3D9_TEXTURE_MANAGED;
++
+     wined3d_mutex_lock();
+-    if (pool == D3DPOOL_MANAGED)
++    if (managed_shadow)
+     {
+         struct wined3d_resource_desc managed_desc = *desc;
+ 
+-- 
+2.53.0
+
