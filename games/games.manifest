@@ -547,3 +547,21 @@ overlay = games/swash/overlay
 ; cover: a ship and its title on the main menu as the GO Ultra shows it
 cover = lab/games/Swashbucklers — Blue vs. Grey/cover.png
 cover_crop = 0 40 440
+
+[worms]
+; Worms World Party Remastered (2015), GOG's edition as installed (English:
+; the edition has no Russian), with Microsoft's D3DX 9.43 and D3DCompiler
+; 43 from Windows beside w2.exe: Wine's own cannot compile the frontend's
+; effect file (games/worms/README.md). Without GOG's uninstaller, web
+; cache, link and language chooser.
+source = lab/games/Worms World Party Remastered
+exclude = unins000.*
+exclude = webcache.zip
+exclude = *.lnk
+exclude = language_setup.*
+file = lab/redist/SysWOW64/D3DX9_43.dll
+file = lab/redist/SysWOW64/D3DCompiler_43.dll
+overlay = games/worms/overlay
+; cover: the worms on their globe (its language chooser's picture)
+cover = lab/games/Worms World Party Remastered/language_setup.png
+cover_crop = fit

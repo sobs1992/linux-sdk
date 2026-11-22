@@ -14,7 +14,10 @@ Infinity Ward's shooter (2005, Direct3D 9) under Wine on the GO Ultra,
   `sys_gpu`/`sys_cpuGHz` as Wine shows them. With another computer's
   there the game asked at the start, in a Windows message box, whether to
   set "optimal" settings for the changed hardware. `writable =
-  main/players`: the profile lives in `/data/wine/games/cod2`.
+  main/players, main/save, main/hunkusage.dat`: what the game writes lives
+  in `/data/wine/games/cod2`: the profile, `save/` (the temporary save of a
+  level's start) and `hunkusage.dat` (rewritten at every level load). On the
+  read-only card each stopped the first level's load with an error.
 - **The safe-mode question.** While it runs the game keeps its process id
   in `__CoD2SP_s` and deletes the file at a clean exit; at the start it
   compares the file's with its own and, the same, asks whether to start in
