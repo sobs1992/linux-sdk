@@ -1,0 +1,103 @@
+From 69770b1fdada36c6d5a5f78be10c9c58dd937a06 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 22 Nov 2026 00:34:23 +0100
+Subject: [PATCH] SeriousSam: Back closes NETRICSA; F2 (F9) before a game: the
+ quick saves
+
+A console's Back opens NETRICSA and closes it again; here it only opened
+it (polled in the game), B closed it. While NETRICSA is up Back is
+Escape now.
+
+F9, the quick load (bare_app's F2), did nothing before a game, where a
+console shows Continue first: during the intro, a demo or the main menu
+it opens the list of the quick saves, the newest chosen, so A loads it
+(the intro or demo stops as at Escape). In a game it loads the newest as
+before.
+---
+ SamTFE/Sources/SeriousSam/SeriousSam.cpp | 22 ++++++++++++++++++++++
+ SamTSE/Sources/SeriousSam/SeriousSam.cpp | 22 ++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/SamTFE/Sources/SeriousSam/SeriousSam.cpp b/SamTFE/Sources/SeriousSam/SeriousSam.cpp
+index 134211a..93a50ff 100644
+--- a/SamTFE/Sources/SeriousSam/SeriousSam.cpp
++++ b/SamTFE/Sources/SeriousSam/SeriousSam.cpp
+@@ -1332,6 +1332,11 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+           case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  iVK = VK_DOWN;   break;
+           case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  iVK = VK_LEFT;   break;
+           case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: iVK = VK_RIGHT;  break;
++          // Back opens NETRICSA in the game (polled) and closes it here,
++          // as on a console
++          case SDL_CONTROLLER_BUTTON_BACK:
++            if (_pGame->gm_csComputerState==CS_ON) iVK = VK_ESCAPE;
++            break;
+           }
+         } else if (msg.wParam==SDL_CONTROLLER_AXIS_LEFTX || msg.wParam==SDL_CONTROLLER_AXIS_LEFTY) {
+           // a press when the stick leaves the middle, with hysteresis
+@@ -1357,6 +1362,23 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+         // else left as it is: nothing below takes it (WM_NULL would not do:
+         // here it is WM_CLOSE too, which quits)
+       }
++
++      // F9, the quick load (a handheld's F2), before a game runs (the intro,
++      // a demo, the main menu): the quick saves, the newest chosen, A loads
++      // it; the intro or demo stops as at Escape. In a game F9 loads the
++      // newest as before.
++      if (msg.message==WM_KEYDOWN && msg.wParam==VK_F9
++       && _gmRunningGameMode!=GM_SINGLE_PLAYER && _gmRunningGameMode!=GM_NETWORK
++       && _gmRunningGameMode!=GM_SPLIT_SCREEN && _pGame->gm_csConsoleState==CS_OFF
++       && !(bMenuActive && pgmCurrentMenu==&gmLoadSaveMenu)) {
++        void StartSinglePlayerQuickLoadMenu(void);
++        if (_gmRunningGameMode==GM_DEMO || _gmRunningGameMode==GM_INTRO) {
++          _pGame->StopGame();
++          _gmRunningGameMode = GM_NONE;
++        }
++        if (!bMenuActive) StartMenus();
++        StartSinglePlayerQuickLoadMenu();
++      }
+ #endif
+ 
+       // toggle full-screen on alt-enter
+diff --git a/SamTSE/Sources/SeriousSam/SeriousSam.cpp b/SamTSE/Sources/SeriousSam/SeriousSam.cpp
+index 134211a..93a50ff 100644
+--- a/SamTSE/Sources/SeriousSam/SeriousSam.cpp
++++ b/SamTSE/Sources/SeriousSam/SeriousSam.cpp
+@@ -1332,6 +1332,11 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+           case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  iVK = VK_DOWN;   break;
+           case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  iVK = VK_LEFT;   break;
+           case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: iVK = VK_RIGHT;  break;
++          // Back opens NETRICSA in the game (polled) and closes it here,
++          // as on a console
++          case SDL_CONTROLLER_BUTTON_BACK:
++            if (_pGame->gm_csComputerState==CS_ON) iVK = VK_ESCAPE;
++            break;
+           }
+         } else if (msg.wParam==SDL_CONTROLLER_AXIS_LEFTX || msg.wParam==SDL_CONTROLLER_AXIS_LEFTY) {
+           // a press when the stick leaves the middle, with hysteresis
+@@ -1357,6 +1362,23 @@ int SubMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int
+         // else left as it is: nothing below takes it (WM_NULL would not do:
+         // here it is WM_CLOSE too, which quits)
+       }
++
++      // F9, the quick load (a handheld's F2), before a game runs (the intro,
++      // a demo, the main menu): the quick saves, the newest chosen, A loads
++      // it; the intro or demo stops as at Escape. In a game F9 loads the
++      // newest as before.
++      if (msg.message==WM_KEYDOWN && msg.wParam==VK_F9
++       && _gmRunningGameMode!=GM_SINGLE_PLAYER && _gmRunningGameMode!=GM_NETWORK
++       && _gmRunningGameMode!=GM_SPLIT_SCREEN && _pGame->gm_csConsoleState==CS_OFF
++       && !(bMenuActive && pgmCurrentMenu==&gmLoadSaveMenu)) {
++        void StartSinglePlayerQuickLoadMenu(void);
++        if (_gmRunningGameMode==GM_DEMO || _gmRunningGameMode==GM_INTRO) {
++          _pGame->StopGame();
++          _gmRunningGameMode = GM_NONE;
++        }
++        if (!bMenuActive) StartMenus();
++        StartSinglePlayerQuickLoadMenu();
++      }
+ #endif
+ 
+       // toggle full-screen on alt-enter
+-- 
+2.53.0
+
