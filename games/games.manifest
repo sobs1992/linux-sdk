@@ -459,3 +459,25 @@ file = lab/redist/openal-soft-1.23.1/soft_oal.dll -> OpenAL32.dll
 ; first letter's curl left out), the user's choice
 cover = lab/games/BookOfUnwrittenTales/cover-art.jpg
 cover_crop = 0 40 630
+
+[coldfear]
+; Cold Fear (2005, Darkworks), GOG's edition 1.0 v3 (2025: widescreen,
+; modern pads), unpacked from its installer with innoextract (--gog
+; --language en-US: every language's files are in that set); prepare.sh
+; picks Russian (and the English copyright page, the Russian one crashed),
+; the device's 854x480 (also where the options rewrite res.bin) and the
+; shadows low in the options file in saves/ (games/coldfear/README.md).
+; Without DirectX's redistributables, the installer's temporaries, GOG's
+; own metadata and the manual.
+source = lab/games/Cold Fear
+exclude = __redist
+exclude = tmp
+exclude = commonappdata
+exclude = app
+exclude = goggame-*
+exclude = Manual.pdf
+overlay = games/coldfear/overlay
+run = games/coldfear/prepare.sh
+; the whaler in the storm, the helicopter over it (concept art of the bonus videos)
+cover = lab/games/Cold Fear/data/movie/Bonus01.bik:5
+cover_crop = right
