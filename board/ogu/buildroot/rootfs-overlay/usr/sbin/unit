@@ -6,6 +6,8 @@
 #
 #   unit serial   the eMMC's serial number (0x...), as /etc/units has it
 #   unit name     the host name: its /etc/units name, else /etc/hostname
+#   unit label    its /etc/units name, nothing if it is not listed (bare_app
+#                 shows it as the platform: ogu2, else its own "ogu")
 #   unit net      the USB network's first three numbers, 192.168.7 if not
 #                 listed: the board is .2, the PC .1 (S42usbnet)
 
@@ -35,12 +37,15 @@ name)
 	[ -n "$n" ] || n=$(cat /etc/hostname 2>/dev/null)
 	echo "${n:-odroid-go-ultra}"
 	;;
+label)
+	field 2
+	;;
 net)
 	n=$(field 3)
 	echo "${n:-192.168.7}"
 	;;
 *)
-	echo "Usage: $0 serial | name | net" >&2
+	echo "Usage: $0 serial | name | label | net" >&2
 	exit 1
 	;;
 esac
