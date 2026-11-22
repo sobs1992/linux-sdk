@@ -15,7 +15,7 @@ Need for Speed: Underground. Without a pad in wine.ini the host never
 answers and no device is made.
 ---
  dlls/winebus.sys/Makefile.in    |   1 +
- dlls/winebus.sys/bus_bare.c     | 284 ++++++++++++++++++++++++++++++++
+ dlls/winebus.sys/bus_bare.c     | 285 ++++++++++++++++++++++++++++++++
  dlls/winebus.sys/main.c         |  15 ++
  dlls/winebus.sys/unix_private.h |   4 +
  dlls/winebus.sys/unixlib.c      |   3 +
@@ -40,7 +40,7 @@ new file mode 100644
 index 0000000..67520d2
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_bare.c
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,285 @@
 +/*
 + * The gamepad of bare_app_wine (the SDK of the ODROID-GO Ultra)
 + *
@@ -210,13 +210,14 @@ index 0000000..67520d2
 +    struct device_desc desc =
 +    {
 +        .input = -1,
-+        /* an Xbox 360 pad's ids: games that know it lay out its buttons */
++        /* an Xbox 360 pad's ids and the name Windows gives it: games that know
++         * it lay out its buttons and show its glyphs */
 +        .vid = 0x045e,
 +        .pid = 0x028e,
 +        .version = 0x0114,
 +        .is_gamepad = TRUE,
 +        .manufacturer = {'b','a','r','e','_','a','p','p',0},
-+        .product = {'G','O',' ','U','l','t','r','a',' ','g','a','m','e','p','a','d',0},
++        .product = {'C','o','n','t','r','o','l','l','e','r',' ','(','X','B','O','X',' ','3','6','0',' ','F','o','r',' ','W','i','n','d','o','w','s',')',0},
 +        .serialnumber = {'0','0','0','0',0},
 +    };
 +    struct bare_device *impl;
