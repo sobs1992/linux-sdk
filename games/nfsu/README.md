@@ -25,11 +25,14 @@ entry.
   `stick = pad` and Wine's winebus patch 0026 make an Xbox 360-like HID
   pad, which the game sees by DirectInput (X axis steering, triggers on
   Z, buttons 0-9). Its buttons are laid out for the game's own joystick
-  defaults (Settings > Controls > Joystick): Button 0 brake and reverse,
-  1 gas, 2 look back, 3 camera, 4 nitrous, 5 handbrake, 6/7 gear
-  down/up, 8 reset the car. So B and R2 are gas, A and L2 brake, X
-  nitrous, R1 handbrake, L1 look back, Y camera, F2/F3 gears, F4 reset,
-  F1 pause (Esc).
+  setup (Settings > Controls > Joystick): Button 0 gas, 1 brake and
+  reverse (the defaults the other way round: swapped in the profile
+  `overlay/save` gives, `player.cfg`, whose line for the pad lists them),
+  2 look back, 3 camera, 4 nitrous, 5 handbrake, 6/7 gear down/up, 8
+  reset the car. So A and R1 are gas, B and L1 brake, L2 handbrake, R2
+  look back, X nitrous, Y camera, F2/F3 gears, F4 reset, F1 pause (Esc).
+  The game writes its settings when it exits by its own menu (Esc, OK),
+  not when its options screen closes.
 - **Menus.** They take the pad's Button 0 (A) as Enter and 1 (B) as back,
   but neither its D-pad nor its stick: `dpad = arrows` (the keyboard's
   arrows, which also steer in a race). The right stick is the mouse: the
