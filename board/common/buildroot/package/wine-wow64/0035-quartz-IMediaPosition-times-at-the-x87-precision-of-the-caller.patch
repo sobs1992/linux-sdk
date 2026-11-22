@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 22 Nov 2026 18:35:00 +0100
+Subject: [PATCH] quartz: IMediaPosition times at the x87 precision of the
+ caller.
+
+Swashbucklers plays a movie until its position, kept as a float, is not
+below the duration, a double (AGL.dll 0x10032ac9). At the end the filter
+graph gives the position equal to the duration, 19.16 s for its logo
+movie, and float 19.16 is 19.1599998: the game never left the logo's
+loop, and the screen stayed black where the intro should have played
+(A or B skipped to the menu).
+
+Native quartz divides on the x87, whose precision control Direct3D sets
+to 24 bits on the thread that makes the device (unless
+D3DCREATE_FPU_PRESERVE; the game's flags are 0x50): both times then
+have a float's precision and compare equal. This build divides with
+SSE2, which the control word does not touch. Round the REFTIME results
+to a float when the control word asks for 24 bits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/quartz/filtergraph.c | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/quartz/filtergraph.c b/dlls/quartz/filtergraph.c
+--- a/dlls/quartz/filtergraph.c
++++ b/dlls/quartz/filtergraph.c
+@@ -2663,6 +2663,25 @@
+     return S_OK;
+ }
+ 
++/* Native quartz converts with the x87, whose precision control the calling
++ * thread may have lowered: Direct3D sets it to 24 bits unless the device is
++ * made with D3DCREATE_FPU_PRESERVE. Its times then have a float's precision,
++ * and programs rely on it: Swashbucklers keeps a movie's position as a float
++ * and plays the movie until that is not below the duration, a double, which
++ * an exact 19.16 never reaches (19.1599998 < 19.16). This build divides with
++ * SSE, which the control word does not touch: round as the x87 would. */
++static REFTIME reftime_at_fpu_precision(REFTIME time)
++{
++#if defined(__i386__) && (defined(__GNUC__) || defined(__clang__))
++    WORD cw;
++
++    __asm__ volatile ("fnstcw %0" : "=m" (cw));
++    if (!(cw & 0x300))
++        return (float)time;
++#endif
++    return time;
++}
++
+ static HRESULT ConvertToREFTIME(IMediaSeeking *seek, LONGLONG time_in, REFTIME *time_out)
+ {
+     GUID time_format;
+@@ -2677,7 +2696,8 @@
+         return E_NOTIMPL;
+     }
+ 
+-    *time_out = (REFTIME)time_in / 10000000; /* convert from 100 ns intervals to 1 second intervals */
++    /* convert from 100 ns intervals to 1 second intervals */
++    *time_out = reftime_at_fpu_precision((REFTIME)time_in / 10000000);
+     return S_OK;
+ }
+ 

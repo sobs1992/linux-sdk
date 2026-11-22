@@ -11,6 +11,13 @@ Russian edition «Головорезы: Корсары XIX века» as install
   the x86 flags the end is found (which flag its default handling gets
   wrong was not looked for; the cost is small: 120 fps in the tavern).
   The game's own MSVC 7.1 runtime is used (`dlls`), as Pirates! does.
+- **Movies.** The Akella logo and the intro (XRes/videos, WMV through
+  DirectShow and GStreamer into a texture of the game's own renderer). The
+  intro stayed black (A or B went on to the menu): the game plays a movie
+  until its position, kept as a float, is not below the duration, and at
+  the logo's end both were an exact 19.16, float 19.1599998. Native quartz
+  divides on the x87, which Direct3D sets to 24 bits, so both have a
+  float's precision; wine-wow64 patch 0035 rounds the same way.
 - **Screen.** The game's settings file, `Documents/My Games/Swashbucklers/
   settings` in the Wine user's profile: `overlay/profile` puts one there
   with 854x480 (16:9, in the game's own list) and the post effects off.
