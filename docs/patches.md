@@ -21,9 +21,9 @@
 проверка, в образ попадает патч. Первая строка темы патча — что он меняет; в теле —
 зачем и как измерено. Порядок — по имени (`0001-...`), нумерация сплошная.
 
-Сколько их сейчас: ядро GO Ultra 31, ядро GO Advance 3, U-Boot GO Ultra 17; пакеты:
-wine-wow64 25, rbdoom3-bfg 19, vcmi 13, xash3d-fwgs 11, mesa-panfrost 5, iortcw 5,
-wowbox64 3, SDL2 6, SDL2_mixer 2. Темы всех патчей каталога:
+Сколько их сейчас: ядро GO Ultra 37, ядро GO Advance 4, U-Boot GO Ultra 19; пакеты:
+wine-wow64 34, rbdoom3-bfg 20, vcmi 17, xash3d-fwgs 14, serious-engine 10,
+mesa-panfrost 5, iortcw 6, wowbox64 4, box64 1, SDL2 6, SDL2_mixer 2, sdl12-compat 2. Темы всех патчей каталога:
 
 ```sh
 grep -h '^Subject' board/ogu/linux/patches/*.patch
