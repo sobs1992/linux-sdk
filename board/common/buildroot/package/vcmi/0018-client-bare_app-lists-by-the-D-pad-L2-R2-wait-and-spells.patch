@@ -94,12 +94,18 @@ diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
  	uint32_t now = 0;
  
  	if(value >= stickDpadPress || ((held & positive) && value > stickDpadRelease))
-@@ -963,6 +1002,15 @@
+@@ -963,6 +1002,21 @@
  		now = negative;
  	if(now == held)
  		return;
 +	if(list)
 +	{
++		// a push of the map's scroll held into the list goes up there
++		if(stickDpad & (negative | positive))
++		{
++			stickDpad &= ~(negative | positive);
++			updateDpad();
++		}
 +		if(held)
 +			pushButton(held == GP_BIT(GP_UP) ? SDL_CONTROLLER_BUTTON_DPAD_UP : SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
 +		if(now)
