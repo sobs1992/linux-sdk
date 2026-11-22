@@ -80,15 +80,15 @@ The game plays by the gamepad through GOG's layer (`dinput8.dll` +
 Xbox 360 one (045E:028E, Wine's winebus patch). The game's own layout is
 kept (as with NFSU and The Bard's Tale): button 0 runs and chooses in the
 menus, so the device's buttons are the pad's where an Xbox 360 pad has
-them. The game's bindings are in Settings > Controls > Keys, second
+them, but A and B swapped (the user's choice: B chooses in the menus). The game's bindings are in Settings > Controls > Keys, second
 column (DEV0):
 
 | Device | Pad | Game |
 |---|---|---|
 | left stick | left stick | walk |
 | right stick | right stick | camera, aim |
-| A (hold) | 0 | run (stamina), choice in the menus |
-| B | 1 | use |
+| A | 1 | use |
+| B (hold) | 0 | run (stamina), choice in the menus |
 | X | 2 | reload |
 | Y | 3 | grab a ledge |
 | L1 (hold) | 4 | aim over the shoulder |
@@ -102,7 +102,7 @@ column (DEV0):
 
 F1 opens the game's menu, as in every game; F5 minimises, F6 (held)
 quits. Checked on ogu2: aim, fire, reload, crouch, run, F1, F2, the
-menus by D-pad and A. Not checked: the weapons (only the pistol at the
+menus by D-pad and the choice button. Not checked: the weapons (only the pistol at the
 start), grab, use.
 
 ## Saves
@@ -116,5 +116,5 @@ a real save point; the options file is written there.
 
 - The intro video and the in-engine scene after it take ~2.5 minutes from
   "New game"; A does not skip the video, Start pauses the scene.
-- The title page says "press a mouse button": A works.
+- The title page says "press a mouse button": B works.
 - 344 MB RSS in play.
