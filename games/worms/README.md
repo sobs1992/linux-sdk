@@ -35,14 +35,27 @@ menu entry.
   eight mouse moves in a row bring the pointer back: after B, X, the
   arrows... move the right stick a little to see it again.
 - **Controls.** The menus take the mouse only (no key moves or chooses
-  there): right stick the pointer (`cursor_speed = 2.0`), A the left
+  there): right stick the pointer (`cursor_speed = 3.5`: 670 px a second
+  at full deflection, the other mouse games' left-stick speed; 2.0 was
+  "too slow", 1.7 s across the menus and ~10 s at half deflection; in a
+  match the same stick moves the camera), A the left
   button (choose a menu item, a weapon in the panel, a target). In a
   match: left stick and D-pad the arrows (walk, aim), R1 Space (fire,
   held for power), B Enter (jump), X Backspace (back flip, twice a high
   jump), Y the right button (weapons panel), L1 Tab (next worm), F1 Esc
   (the match's menu: Force Sudden Death, Quit The Game; a click on the
-  item under the pointer). The game also takes an XInput pad
-  (`stick = pad` moves the menus' selection), but shows no layout for it.
+  item under the pointer). The grenade's fuse and bounce have no
+  stepping key (the keyboard's 1..5, - and +), so L2/R2 and F2/F3 are
+  buttons of the game's own Xbox pad, which it reads next to the keyboard
+  and the mouse: LB/RB fuse down/up (also turn a girder or an air
+  strike), LT/RT bounce min/max (its layout is in `language/*.txt`,
+  IDS_OPT_CONT_DESC01..13: Thumb L, Thumb R, A, B, X, Y, LB, RB, LT, RT,
+  Menu, the thumbs' presses, the order of the pictures named in w2.exe).
+  Checked in a match: "Grenade, 4 Sec, MAX Bounce" and back. A pad
+  button closes an open weapons panel, as the game's B would.
+- **Options screen.** The main menu's fourth tile (Options) shows a
+  white page with only its edit fields drawn (an MFC dialog, `+dialog`
+  lists its owner-drawn buttons); F6 (hold) is the way out. Not solved.
   Verified 2026-11-22 on unit 1 from the buttons alone: title, single
   player, quick game, firing with power, weapons panel, Quit The Game ->
   Yes back to the menus. A match takes 30-90 s to load (the cake).
