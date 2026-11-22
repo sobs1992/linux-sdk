@@ -35,8 +35,11 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
 - Settings (`config.xml`, `ogre.cfg`), saved games and logs (`bout.log`,
   Ogre's log) in My Documents\Book of Unwritten Tales in the Wine prefix:
   nothing written into the game's directory (`/games` stays read-only).
-- Controls: the left stick is the cursor, A the click, Y the right click,
-  X held marks the scene's hotspots (Space), B and F1 Esc. Videos and
+- Controls: the left stick is the cursor, the right stick and the D-pad a
+  slower one (for a small hotspot), A the click, Y the right click, X or R1
+  held marks the scene's hotspots (Space), F1 Esc (the menu). B does
+  nothing (2026-11-22: as Esc next to A and Y it threw the player out of
+  the scene into the menu by a slip of the thumb). Videos and
   dialogue lines are skipped by a click (Esc does not skip the prologue).
   The inventory opens with the cursor at the screen's bottom edge (the left
   stick pushed down all the way); the right click does not open it in this
@@ -47,9 +50,9 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
   left its window, and each move there set the Windows arrow (the window's
   WM_SETCURSOR) before the game's SetCursor(NULL): bare_app_wine drew an
   arrow flickering over the game's cursor. `cursor = hidden` in wine.ini.
-- Saving: B, "Сохранение", the "пусто" line, the "Сохранение" button (no
+- Saving: F1, "Сохранение", the "пусто" line, the "Сохранение" button (no
   name needed: an empty one is saved as "new game"; Enter does not save).
-  Loading: B, "Загрузка", a line, "Загрузка". No quick save (F keys do
+  Loading: F1, "Загрузка", a line, "Загрузка". No quick save (F keys do
   nothing). Tester's review: docs/game-controls-audit-2026-11-20.md, 6.20.
 
 ## Text size
