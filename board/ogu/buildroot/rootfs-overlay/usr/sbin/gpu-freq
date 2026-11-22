@@ -10,11 +10,18 @@
 #   gpu-freq get       the top now, MHz
 #   gpu-freq set MHZ   the top now and from the next boot on
 #   gpu-freq load      at boot: the kept one, else DEFAULT
+#   gpu-freq hold      the GPU at the top now (its lowest clock raised to it),
+#                      until release: bare_app while a game with "gpu = top"
+#                      is in front (Need for Speed: Most Wanted: the governor
+#                      clocked down between its frames, the next one late)
+#   gpu-freq release   the lowest clock back down: the governor chooses again
 #
-# bare_app's Settings > System runs list, get and set.
+# bare_app's Settings > System runs list, get and set; its games hold and
+# release.
 
 DEV=/sys/class/devfreq/ffe40000.gpu
 KEEP=/data/gpu-max-mhz
+HELD=/run/gpu-freq.held	# there while held: a new top is held too
 CHOICES="666 800"
 DEFAULT=666	# safe on the unit with the fault
 
@@ -39,9 +46,21 @@ wait_dev() {
 	[ -e $DEV/max_freq ] || { echo "gpu-freq: no GPU devfreq ($DEV)" >&2; exit 1; }
 }
 
+# the lowest operating point
+lowest() {
+	set -- $(cat $DEV/available_frequencies)
+	l=$1
+	for f; do [ "$f" -lt "$l" ] && l=$f; done
+	echo $l
+}
+
 apply() {
 	hz=$(hz_of "$1") || { echo "gpu-freq: the GPU has no $1 MHz" >&2; return 1; }
+	# the floor never above the top: down first when it is
+	[ "$(cat $DEV/min_freq)" -gt "$hz" ] && lowest > $DEV/min_freq
 	echo "$hz" > $DEV/max_freq
+	[ -e $HELD ] && echo "$hz" > $DEV/min_freq
+	return 0
 }
 
 case "$1" in
@@ -70,6 +89,16 @@ set)
 		echo "gpu-freq: /data is not mounted: $2 MHz until the next boot" >&2
 	fi
 	;;
+hold)
+	wait_dev
+	touch $HELD
+	cat $DEV/max_freq > $DEV/min_freq
+	;;
+release)
+	wait_dev
+	rm -f $HELD
+	lowest > $DEV/min_freq
+	;;
 load)
 	wait_dev
 	want=$(cat $KEEP 2>/dev/null)
@@ -80,7 +109,7 @@ load)
 	apply "$want"
 	;;
 *)
-	echo "Usage: $0 list | get | set MHZ | load" >&2
+	echo "Usage: $0 list | get | set MHZ | load | hold | release" >&2
 	exit 1
 	;;
 esac

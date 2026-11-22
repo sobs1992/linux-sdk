@@ -17,7 +17,15 @@ loaded by the ASI loader, the game's `dinput8.dll`). `[nfsmw]` in
   (what the options screen writes).
 - **Frame rate.** Menus 130-150 fps; a race 30-35, both busy threads (the
   game's ~57 %, WineD3D's ~75 %) as in NFSU. `fps_limit = 30` holds it
-  even.
+  even. The heaviest scenes (the career's opening drive, measured over
+  50 s of it with `BARE_APP_FRAME_STATS=1`, the same each run) were
+  21 fps with the slowest frames at ~127 ms: no thread at 100 %, the GPU
+  busy 45-77 %, its governor (simple_ondemand) going down to 125-400 MHz
+  in the gaps so that the next frame came late. `gpu = top` (bare_app
+  holds the GPU at its top clock while the game is in front, `gpu-freq
+  hold`) and `PAN_MMAP_WINDOW` (buffers mapped below 4 GiB, no WoW64
+  copies; speed.exe is not large-address-aware): 27.6 fps there, the
+  slowest frames ~60 ms. `BOX64_DYNAREC_SAFEFLAGS=0` crashed the game.
 - **Movies.** This edition's `MOVIES/*.vp6` (story, Blacklist, tutorials,
   the attract movie: 32 files, 2.2 GB) are 1920x1088 VP6 at ~12 Mbit/s;
   the game decodes them in its own x86 code (Box64), one thread at 100 %,
