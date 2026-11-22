@@ -1,0 +1,103 @@
+From: Sobs <antohasobne@gmail.com>
+Subject: [PATCH] client: bare_app lists by the D-pad; L2 wait, R2 spells on the GO Ultra
+
+- A list of scenarios or saved games in front (the selection tab of the
+  lobby, the load and save screens): the D-pad's Up and Down choose a row
+  as a keyboard's arrows do (the controller's D-pad: VCMI's moveUp and
+  moveDown). They swiped the list under the cursor and left the row
+  chosen where it was: a save was chosen with the stick's cursor only.
+  Elsewhere the D-pad swipes and scrolls as before.
+- GO Ultra keys (BARE_APP_VCMI_KEYS=ogu): L2 and R2 are the game's, the
+  volume has keys of its own there. L2 is the controller's right shoulder
+  (wait in a battle, the next town on the map), R2 its right trigger
+  (cast a spell, in a battle and on the map); both were only clickable
+  by the cursor at the bottom of the screen.
+
+Upstream: not applicable (SDK-specific)
+Signed-off-by: Sobs <antohasobne@gmail.com>
+---
+diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
+--- a/client/renderSDL/BareAppLink.cpp
++++ b/client/renderSDL/BareAppLink.cpp
+@@ -19,6 +19,8 @@
+ #include "../eventsSDL/InputHandler.h"
+ #include "../gui/CursorHandler.h"
+ #include "../gui/WindowHandler.h"
++#include "../lobby/CSelectionBase.h"
++#include "../lobby/SelectionTab.h"
+ #include "../render/IScreenHandler.h"
+ #include "../../lib/CConfigHandler.h"
+ #include "../../lib/GameLibrary.h"
+@@ -881,6 +883,19 @@
+ 	{
+ 		if(fromStick)
+ 			return;	// the stick moves the cursor through its axes
++		// a list of scenarios or saved games in front: Up and Down choose
++		// a row as a keyboard's arrows do (VCMI's moveUp and moveDown, the
++		// controller's D-pad) instead of swiping; the release goes where
++		// the press went
++		if((button == GP_UP || button == GP_DOWN) && (pressed ? listOnTop() : (listDpad & GP_BIT(button))))
++		{
++			if(pressed)
++				listDpad |= GP_BIT(button);
++			else
++				listDpad &= ~GP_BIT(button);
++			pushButton(button == GP_UP ? SDL_CONTROLLER_BUTTON_DPAD_UP : SDL_CONTROLLER_BUTTON_DPAD_DOWN, pressed);
++			return;
++		}
+ 		if(pressed)
+ 			dpad |= GP_BIT(button);
+ 		else
+@@ -945,10 +960,32 @@
+ /// (quit) are bare_app's, never the game's. false: the common buttons.
+ bool BareAppLink::onUltraButton(int button, bool pressed)
+ {
+-	(void)pressed;
++	// L2 and R2 are the game's on the GO Ultra (its volume has keys of its
++	// own): L2 the controller's right shoulder (wait in a battle, the next
++	// town on the map), R2 its right trigger (cast a spell, in a battle and
++	// on the map)
++	if(button == GP_L2)
++	{
++		pushButton(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, pressed);
++		return true;
++	}
++	if(button == GP_R2)
++	{
++		pushAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, pressed ? SDL_JOYSTICK_AXIS_MAX : 0);
++		return true;
++	}
+ 	return button == GP_F5 || button == GP_F6;
+ }
+ 
++/// The scenarios or the saved games listed in front (not the options or an
++/// on-screen keyboard over them)
++bool BareAppLink::listOnTop() const
++{
++	const auto selection = ENGINE->windows().topWindow<CSelectionBase>();
++
++	return selection && selection->tabSel && selection->tabSel->isActive();
++}
++
+ /// The right stick (the GO Ultra has one) does what the D-pad does
+ void BareAppLink::onRightStick(int axis, int value)
+ {
+diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
+--- a/client/renderSDL/BareAppLink.h
++++ b/client/renderSDL/BareAppLink.h
+@@ -118,6 +118,7 @@
+ 	void onAxis(int axis, int value);
+ 	static bool ultraKeysSet();
+ 	bool onUltraButton(int button, bool pressed);
++	bool listOnTop() const;
+ 	void onRightStick(int axis, int value);
+ 	void onKey(int code, bool pressed);
+ 	void onMouseButton(int button, bool pressed);
+@@ -156,6 +157,7 @@
+ 	bool rejoin = false;	///< the magnifier has opened: around the cursor
+ 	uint32_t movedAt = 0;	///< SDL_GetTicks() of the last magnifier move check
+ 	uint32_t dpad = 0;	///< D-pad directions held, gp_button bits
++	uint32_t listDpad = 0;	///< Up, Down held as a list's (listOnTop()), gp_button bits
+ 	bool swiping = false;	///< the D-pad holds VCMI's right stick
+ 	uint32_t mapScrollAt = 0;	///< SDL_GetTicks() when the map last asked for the D-pad
+ 	Point stick;		///< last left stick values
