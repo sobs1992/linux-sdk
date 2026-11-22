@@ -6,6 +6,8 @@ Subject: [PATCH] client: bare_app lists by the D-pad; L2 wait, R2 spells on the 
   as a keyboard's arrows do (the controller's D-pad: VCMI's moveUp and
   moveDown). They swiped the list under the cursor and left the row
   chosen where it was: a save was chosen with the stick's cursor only.
+  The right stick's up and down, the D-pad's double on the GO Ultra, do
+  the same.
   Elsewhere the D-pad swipes and scrolls as before.
 - GO Ultra keys (BARE_APP_VCMI_KEYS=ogu): L2 and R2 are the game's, the
   volume has keys of its own there. L2 is the controller's right shoulder
@@ -48,7 +50,7 @@ diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
  		if(pressed)
  			dpad |= GP_BIT(button);
  		else
-@@ -945,10 +960,32 @@
+@@ -945,16 +960,40 @@
  /// (quit) are bare_app's, never the game's. false: the common buttons.
  bool BareAppLink::onUltraButton(int button, bool pressed)
  {
@@ -70,6 +72,7 @@ diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
  	return button == GP_F5 || button == GP_F6;
  }
  
+-/// The right stick (the GO Ultra has one) does what the D-pad does
 +/// The scenarios or the saved games listed in front (not the options or an
 +/// on-screen keyboard over them)
 +bool BareAppLink::listOnTop() const
@@ -79,9 +82,34 @@ diff --git a/client/renderSDL/BareAppLink.cpp b/client/renderSDL/BareAppLink.cpp
 +	return selection && selection->tabSel && selection->tabSel->isActive();
 +}
 +
- /// The right stick (the GO Ultra has one) does what the D-pad does
++/// The right stick (the GO Ultra has one) does what the D-pad does: with a
++/// list in front its up and down choose a row, as the D-pad's
  void BareAppLink::onRightStick(int axis, int value)
  {
+ 	const uint32_t negative = GP_BIT(axis == GP_AXIS_RX ? GP_LEFT : GP_UP);
+ 	const uint32_t positive = GP_BIT(axis == GP_AXIS_RX ? GP_RIGHT : GP_DOWN);
+-	const uint32_t held = stickDpad & (negative | positive);
++	const bool list = axis == GP_AXIS_RY && (listStick || listOnTop());
++	const uint32_t held = (list ? listStick : stickDpad) & (negative | positive);
+ 	uint32_t now = 0;
+ 
+ 	if(value >= stickDpadPress || ((held & positive) && value > stickDpadRelease))
+@@ -963,6 +1002,15 @@
+ 		now = negative;
+ 	if(now == held)
+ 		return;
++	if(list)
++	{
++		if(held)
++			pushButton(held == GP_BIT(GP_UP) ? SDL_CONTROLLER_BUTTON_DPAD_UP : SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
++		if(now)
++			pushButton(now == GP_BIT(GP_UP) ? SDL_CONTROLLER_BUTTON_DPAD_UP : SDL_CONTROLLER_BUTTON_DPAD_DOWN, true);
++		listStick = now;
++		return;
++	}
+ 	stickDpad = (stickDpad & ~(negative | positive)) | now;
+ 	updateDpad();
+ }
 diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
 --- a/client/renderSDL/BareAppLink.h
 +++ b/client/renderSDL/BareAppLink.h
@@ -93,11 +121,12 @@ diff --git a/client/renderSDL/BareAppLink.h b/client/renderSDL/BareAppLink.h
  	void onRightStick(int axis, int value);
  	void onKey(int code, bool pressed);
  	void onMouseButton(int button, bool pressed);
-@@ -156,6 +157,7 @@
+@@ -156,6 +157,8 @@
  	bool rejoin = false;	///< the magnifier has opened: around the cursor
  	uint32_t movedAt = 0;	///< SDL_GetTicks() of the last magnifier move check
  	uint32_t dpad = 0;	///< D-pad directions held, gp_button bits
 +	uint32_t listDpad = 0;	///< Up, Down held as a list's (listOnTop()), gp_button bits
++	uint32_t listStick = 0;	///< the same of the right stick's up and down
  	bool swiping = false;	///< the D-pad holds VCMI's right stick
  	uint32_t mapScrollAt = 0;	///< SDL_GetTicks() when the map last asked for the D-pad
  	Point stick;		///< last left stick values
