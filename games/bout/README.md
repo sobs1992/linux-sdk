@@ -42,6 +42,11 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
   stick pushed down all the way); the right click does not open it in this
   edition. An item is taken by a click and hangs on the cursor, used by a
   click on its target, put back by the right click.
+- Cursor: the game draws its own. With the pointer in the top row or the
+  left column (x or y 0) it calls ShowCursor(TRUE), as if the mouse had
+  left its window, and each move there set the Windows arrow (the window's
+  WM_SETCURSOR) before the game's SetCursor(NULL): bare_app_wine drew an
+  arrow flickering over the game's cursor. `cursor = hidden` in wine.ini.
 - Saving: B, "Сохранение", the "пусто" line, the "Сохранение" button (no
   name needed: an empty one is saved as "new game"; Enter does not save).
   Loading: B, "Загрузка", a line, "Загрузка". No quick save (F keys do
