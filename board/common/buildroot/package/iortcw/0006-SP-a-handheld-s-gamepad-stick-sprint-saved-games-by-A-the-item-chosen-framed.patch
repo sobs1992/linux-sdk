@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sobs <antohasobne@gmail.com>
+Date: Sun, 22 Nov 2026 02:00:00 +0100
+Subject: [PATCH] SP: a handheld's gamepad: the stick sprints, saved games
+ load by A, the item chosen framed
+
+- j_stickSprint (archived, 0 by default: never): the moving stick pushed
+  that far (0..1 of the way) sprints as +sprint held. A handheld has no
+  stick to press (L3); its gamepad.cfg sets 0.9.
+- A gamepad layout newer than the one a player's config was made with:
+  gamepad.cfg says its layout (pad_layout_current), the config keeps the
+  player's (pad_layout, archived, none before 2). After the config, if
+  older, gamepad-update.cfg runs once over its bindings and pad_layout
+  becomes the current one.
+- Lists: Enter (a gamepad's A) on the row chosen does what a double click
+  does; the saved games load (the Load menu showed the row chosen and A
+  did nothing).
+- A gamepad's X in a menu with the switch between the player's saved
+  games and the autosaves (an item "autosave": the Load menus) flips it.
+- While the gamepad drives the menus the pointer is not drawn and the item
+  the keys chose has a frame (the menus only lit an item up a little);
+  the pointer comes back when it moves (the right stick, a mouse).
+---
+diff --git a/SP/code/client/cl_input.c b/SP/code/client/cl_input.c
+--- a/SP/code/client/cl_input.c
++++ b/SP/code/client/cl_input.c
+@@ -478,6 +478,17 @@
+ 	}
+ 
+ 	cmd->upmove = ClampChar( cmd->upmove + (int)up );
++
++	// a handheld has no stick to press (L3): the moving stick pushed past
++	// j_stickSprint sprints, as +sprint held, while the stamina lasts
++	if ( j_stickSprint->value > 0 ) {
++		float x = cl.joystickAxis[j_side_axis->integer] / 32767.0f;
++		float y = cl.joystickAxis[j_forward_axis->integer] / 32767.0f;
++
++		if ( x * x + y * y >= j_stickSprint->value * j_stickSprint->value ) {
++			cmd->buttons |= BUTTON_SPRINT;
++		}
++	}
+ }
+ 
+ /*
+diff --git a/SP/code/client/cl_main.c b/SP/code/client/cl_main.c
+--- a/SP/code/client/cl_main.c
++++ b/SP/code/client/cl_main.c
+@@ -111,6 +111,7 @@
+ cvar_t	*j_forward_axis;
+ cvar_t	*j_side_axis;
+ cvar_t	*j_up_axis;
++cvar_t	*j_stickSprint;
+ 
+ cvar_t  *cl_activeAction;
+ 
+@@ -3736,6 +3737,9 @@
+ 	j_forward_axis = Cvar_Get ("j_forward_axis", "1", CVAR_ARCHIVE);
+ 	j_side_axis =    Cvar_Get ("j_side_axis",    "0", CVAR_ARCHIVE);
+ 	j_up_axis =      Cvar_Get ("j_up_axis",      "4", CVAR_ARCHIVE);
++	// a gamepad without a stick to press: the moving stick pushed this far
++	// (0..1 of the way) sprints, 0 never
++	j_stickSprint =  Cvar_Get ("j_stickSprint",  "0", CVAR_ARCHIVE);
+ 
+ 	Cvar_CheckRange(j_pitch_axis, 0, MAX_JOYSTICK_AXIS-1, qtrue);
+ 	Cvar_CheckRange(j_yaw_axis, 0, MAX_JOYSTICK_AXIS-1, qtrue);
+diff --git a/SP/code/client/client.h b/SP/code/client/client.h
+--- a/SP/code/client/client.h
++++ b/SP/code/client/client.h
+@@ -443,6 +443,7 @@
+ extern	cvar_t	*j_pitch_axis;
+ extern	cvar_t	*j_yaw_axis;
+ extern	cvar_t	*j_forward_axis;
++extern	cvar_t	*j_stickSprint;
+ extern	cvar_t	*j_side_axis;
+ extern	cvar_t	*j_up_axis;
+ 
+diff --git a/SP/code/qcommon/common.c b/SP/code/qcommon/common.c
+--- a/SP/code/qcommon/common.c
++++ b/SP/code/qcommon/common.c
+@@ -1950,6 +1950,16 @@
+ 		// skip the wolfconfig.cfg and autoexec.cfg if "safe" is on the command line
+ 		Cbuf_ExecuteText(EXEC_NOW, "exec " Q3CONFIG_CFG "\n");
+ 		Cbuf_Execute();
++		// a gamepad layout newer than the one the player's config was made
++		// with (gamepad.cfg says pad_layout_current, the config keeps
++		// pad_layout): its changes over the player's bindings, once
++		if ( Cvar_VariableIntegerValue( "pad_layout" ) < Cvar_VariableIntegerValue( "pad_layout_current" ) &&
++		     FS_ReadFile( "gamepad-update.cfg", NULL ) > 0 ) {
++			Cbuf_ExecuteText(EXEC_NOW, "exec gamepad-update.cfg\n");
++			Cbuf_Execute();
++			Cvar_Get( "pad_layout", "0", CVAR_ARCHIVE );	// kept in the config
++			Cvar_Set( "pad_layout", Cvar_VariableString( "pad_layout_current" ) );
++		}
+ 		Cbuf_ExecuteText(EXEC_NOW, "exec autoexec.cfg\n");
+ 		Cbuf_Execute();
+ 	}
+diff --git a/SP/code/ui/ui_local.h b/SP/code/ui/ui_local.h
+--- a/SP/code/ui/ui_local.h
++++ b/SP/code/ui/ui_local.h
+@@ -814,6 +814,7 @@
+ 
+ typedef struct {
+ 	displayContextDef_t uiDC;
++	qboolean padDriven;		// the gamepad drives the menus: no pointer drawn
+ 	int newHighScoreTime;
+ 	int newBestTime;
+ 	int showPostGameTime;
+diff --git a/SP/code/ui/ui_main.c b/SP/code/ui/ui_main.c
+--- a/SP/code/ui/ui_main.c
++++ b/SP/code/ui/ui_main.c
+@@ -715,7 +715,9 @@
+ 	UI_SetColor( NULL );
+ 	if (Menu_Count() > 0 && (trap_Key_GetCatcher() & KEYCATCH_UI)) {
+ 		uiMenuCommand_t mymenu = _UI_GetActiveMenu();
+-		if ( mymenu != UIMENU_BRIEFING ) {
++		if ( uiInfo.padDriven ) {
++			Menu_PaintGamepadFocus();
++		} else if ( mymenu != UIMENU_BRIEFING ) {
+ 			UI_DrawHandlePic( uiInfo.uiDC.cursorx - 16, uiInfo.uiDC.cursory - 16, 32, 32, uiInfo.uiDC.Assets.cursor );
+ 		}
+ 	}
+@@ -6938,6 +6940,14 @@
+ void _UI_KeyEvent( int key, qboolean down ) {
+ 	const qboolean padBack = key == K_PAD0_B;
+ 
++	// the gamepad drives the menus: no pointer, the item chosen framed
++	// (until the pointer moves: the right stick, a mouse)
++	if ( down && key >= K_PAD0_A && key <= K_PAD0_RIGHTTRIGGER &&
++		 key != K_PAD0_RIGHTSTICK_LEFT && key != K_PAD0_RIGHTSTICK_RIGHT &&
++		 key != K_PAD0_RIGHTSTICK_UP && key != K_PAD0_RIGHTSTICK_DOWN ) {
++		uiInfo.padDriven = qtrue;
++	}
++
+ 	key = Menu_GamepadKey( key );
+ 	if ( !key ) {
+ 		return;
+@@ -6992,6 +7002,9 @@
+ =================
+ */
+ void _UI_MouseEvent( int dx, int dy ) {
++	if ( dx || dy ) {
++		uiInfo.padDriven = qfalse;	// the pointer is shown again
++	}
+ 	// update mouse screen position
+ 	uiInfo.uiDC.cursorx += dx;
+ 	if ( uiInfo.uiDC.cursorx < 0 ) {
+diff --git a/SP/code/ui/ui_shared.c b/SP/code/ui/ui_shared.c
+--- a/SP/code/ui/ui_shared.c
++++ b/SP/code/ui/ui_shared.c
+@@ -2243,6 +2243,14 @@
+ 			return qtrue;
+ 		}
+ 
++		// Enter (a gamepad's A) on the row chosen: what a double click on it
++		// does (the saved games: load the one chosen)
++		if ( ( key == K_ENTER || key == K_KP_ENTER ) && listPtr->doubleClick && !listPtr->notselectable &&
++			 item->cursorPos >= 0 && item->cursorPos < count ) {
++			Item_RunScript( item, listPtr->doubleClick );
++			return qtrue;
++		}
++
+ 		// mouse hit
+ 		if ( key == K_MOUSE1 || key == K_MOUSE2 ) {
+ 			if ( item->window.flags & WINDOW_LB_LEFTARROW ) {
+@@ -3151,6 +3159,37 @@
+ 	menu->window.flags |= WINDOW_HASFOCUS;
+ }
+ 
++/*
++==================
++Menu_PaintGamepadFocus
++
++The item the keys chose, framed: a gamepad has no pointer to show it (the
++menus only light an item up a little, when the pointer is over it)
++==================
++*/
++void Menu_PaintGamepadFocus( void ) {
++	static const vec4_t gold = { 1.0f, 0.8f, 0.3f, 0.9f };
++	menuDef_t *menu = Menu_GetFocused();
++	itemDef_t *item;
++	rectDef_t r;
++
++	if ( !menu || menu->cursorItem < 0 || menu->cursorItem >= menu->itemCount ) {
++		return;
++	}
++	item = menu->items[menu->cursorItem];
++	if ( !( item->window.flags & WINDOW_VISIBLE ) || ( item->window.flags & WINDOW_DECORATION ) ) {
++		return;
++	}
++	r = item->window.rect;
++	if ( item->type == ITEM_TYPE_TEXT && item->text ) {
++		r = *Item_CorrectedTextRect( item );
++	}
++	if ( r.w <= 0 || r.h <= 0 ) {
++		return;
++	}
++	DC->drawRect( r.x - 3, r.y - 2, r.w + 6, r.h + 4, 1, gold );
++}
++
+ void Menu_PointerToCursorItem( void ) {
+ 	menuDef_t *menu = Menu_GetFocused();
+ 	itemDef_t *item;
+@@ -3276,6 +3315,21 @@
+ 		return;
+ 	}
+ 
++	// a gamepad's X where the saved games are listed: the menu's switch
++	// between the player's own and the autosaves (an item "autosave" of
++	// ui_savegameListAutosave), a click on it otherwise
++	if ( down && key == K_PAD0_X ) {
++		itemDef_t *sw = Menu_FindItemByName( menu, "autosave" );
++
++		if ( sw && sw->cvar ) {
++			DC->setCVar( sw->cvar, DC->getCVarValue( sw->cvar ) ? "0" : "1" );
++			if ( sw->action ) {
++				Item_RunScript( sw, sw->action );
++			}
++			return;
++		}
++	}
++
+ 	// see if the mouse is within the window bounds and if so is this a mouse click
+ 	if ( down && !( menu->window.flags & WINDOW_POPUP ) && !Rect_ContainsPoint( &menu->window.rect, DC->cursorx, DC->cursory ) ) {
+ 		static qboolean inHandleKey = qfalse;
+diff --git a/SP/code/ui/ui_shared.h b/SP/code/ui/ui_shared.h
+--- a/SP/code/ui/ui_shared.h
++++ b/SP/code/ui/ui_shared.h
+@@ -479,6 +479,7 @@
+ 
+ int UI_SelectForKey(int key);
+ int Menu_GamepadKey( int key );
++void Menu_PaintGamepadFocus( void );
+ void Menu_PointerToCursorItem( void );
+ void Menus_FocusUnderPointer( void );
+ qboolean Menu_FocusOpener( void );
+-- 
+2.43.0
+

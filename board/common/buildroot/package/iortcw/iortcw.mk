@@ -53,6 +53,8 @@ define IORTCW_INSTALL_TARGET_CMDS
 			$(TARGET_DIR)/usr/lib/iortcw/main/$(m).sp.$(IORTCW_ARCH).so$(sep))
 	$(INSTALL) -D -m 0644 $(IORTCW_PKGDIR)/gamepad.cfg \
 		$(TARGET_DIR)/usr/lib/iortcw/main/gamepad.cfg
+	$(INSTALL) -D -m 0644 $(IORTCW_PKGDIR)/gamepad-update.cfg \
+		$(TARGET_DIR)/usr/lib/iortcw/main/gamepad-update.cfg
 	$(INSTALL) -D -m 0755 $(IORTCW_PKGDIR)/iowolfsp.sh \
 		$(TARGET_DIR)/usr/bin/iowolfsp
 endef
