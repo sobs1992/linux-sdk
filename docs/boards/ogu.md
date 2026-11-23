@@ -374,6 +374,30 @@ carl9170), Ralink (rt2800usb) собраны модулями, прошивки 
 `/etc/init.d/S41wifi hotplug`: wpa_supplicant и DHCP; сеть выбирается в bare_app
 («Настройки» → Wi-Fi), список сетей — `/etc/wpa_supplicant.conf`.
 
+Bluetooth тоже только через USB-адаптер (btusb; прошивки Realtek и MediaTek из
+`linux-firmware`, в том числе `rtl_bt/rtl8851bu_fw.bin`, которой нет в списке Buildroot:
+её добавляет `board/common/buildroot/external.mk`). Ядро: BLE (в arm64 defconfig он
+выключен), `uhid` для HID over GATT, AF_ALG для криптографии bluetoothd, драйверы
+геймпадов (PlayStation, Nintendo, Sony, Microsoft, Steam, xpad). Демоны стартуют, только
+когда адаптер появился (mdev → `/etc/init.d/S40bluetooth hotplug`) или уже вставлен при
+загрузке, иначе не стартуют вовсе и загрузку не удлиняют: `dbus-daemon`, `bluetoothd`
+(`/etc/bluetooth/main.conf`: имя «ODROID-GO Ultra», повторное сопряжение без вопросов,
+быстрое переподключение) и `bluealsa -p a2dp-source` (звук в наушники). Buildroot'овские
+`S30dbus-daemon` и `S40bluetoothd` переименованы post-build'ом в `dbus-daemon` и
+`bluetoothd`, чтобы rcS их не запускал. Ключи сопряжённых устройств —
+`/var/lib/bluetooth` → `/data/bluetooth`, переживают перепрошивку системы. Устройства
+выбираются в bare_app («Настройки» → Bluetooth); для отладки — `bluetoothctl`, `btmon`,
+`bluealsa-cli`.
+
+TP-Link Archer TX10UB Nano (RTL8851BU, Wi-Fi 6 + Bluetooth 5.3, USB ID `3625:010b`:
+его знают и `rtw89_8851bu`, и `btusb` ядра 7.2) при включении притворяется CD-приводом с
+драйвером для Windows (`0bda:1a2b`; у других таких Realtek — ещё `0bda:a192`).
+usb-storage этот диск пропускает (`US_FL_IGNORE_DEVICE`), а `/usr/sbin/usb-cd-eject`
+выбрасывает его через `usb_modeswitch -K` — из mdev, если адаптер вставили позже, и из
+coldplug `S03mdev`, если он был вставлен до включения; адаптер возвращается уже собой
+(`dmesg | grep usb-cd-eject`). Дальше Wi-Fi работает как у любого адаптера выше, а
+Bluetooth — как описано здесь.
+
 `scripts/ogu-ctl.py` управляет bare_app по этой сети, без UART:
 
 ```sh
