@@ -45,7 +45,10 @@
 # Needs sfdisk, partx and blkid (util-linux), mke2fs and resize2fs
 # (e2fsprogs), mkdosfs.
 
-CONF=/etc/data-partition
+CONF=${S05DATA_CONF:-/etc/data-partition}
+# tests (scripts/test-s05data.sh): another disk than the root's, another
+# mount point, no /games
+DATA=${S05DATA_MNT:-/data}
 MIN_SECTORS=131072	# 64 MiB
 GAMES_FS="vfat exfat"	# the file systems of a "GAMES" partition
 
@@ -148,7 +151,7 @@ grow_fs() {
 	[ $((fs / 512 + 2048)) -le "$(cat "/sys/class/block/$p3/size")" ] || return 0
 	log "growing /data to the size of $p3"
 	( nice resize2fs "/dev/$p3" > /dev/null 2>&1 &&
-		log "/data grown to $(df -P -h /data | awk 'NR == 2 { print $2 }')" ||
+		log "/data grown to $(df -P -h "$DATA" | awk 'NR == 2 { print $2 }')" ||
 		log "cannot grow /data" ) &
 }
 
@@ -165,11 +168,14 @@ data() {
 			return 1
 		fi
 		size=$data_size
-		[ -n "$size" ] || [ -z "$data_end" ] || size=$((data_end - data_start))
 		if [ -z "$size" ] && found=$(fs_at "$data_start" ext4 data) &&
 		   [ $((data_start + ${found#* })) -le "$disk_size" ]; then
-			# a "data" there: its own size (what is after it is kept)
+			# a "data" there: its own size (what is after it is kept;
+			# with slots one of an older layout to the end of the disk
+			# stays so, and slot b waits for scripts/ab-migrate.sh)
 			size=${found#* }
+		elif [ -z "$size" ] && [ -n "$data_end" ]; then
+			size=$((data_end - data_start))
 		fi
 		new=1
 		add_part 3 "$data_start" "$size" 83 || return 1
@@ -184,9 +190,9 @@ data() {
 		log "formatting $p3"
 		mke2fs -q -t ext4 -L data "/dev/$p3" || return 1
 	fi
-	mkdir -p /data
+	mkdir -p "$DATA"
 	# fails, keeping it, if "data" is larger than p3 (from an older layout)
-	mount -t ext4 -o noatime "/dev/$p3" /data || { log "cannot mount $p3"; return 1; }
+	mount -t ext4 -o noatime "/dev/$p3" "$DATA" || { log "cannot mount $p3"; return 1; }
 	log "$p3 on /data"
 	grow_fs
 }
@@ -260,6 +266,15 @@ card_games() {
 
 start() {
 	disk=$(root_disk) || { log "cannot find the root disk"; return 1; }
+	if [ -n "${S05DATA_DISK+set}" ]; then
+		# a test's disk: never the root disk, never "" (that would be it)
+		if [ -z "$S05DATA_DISK" ] || [ "$S05DATA_DISK" = "$disk" ] ||
+		   [ ! -e "/sys/class/block/$S05DATA_DISK" ] || [ -z "${S05DATA_MNT:-}" ]; then
+			log "S05DATA_DISK \"$S05DATA_DISK\": not a test disk, nothing done"
+			return 1
+		fi
+		disk=$S05DATA_DISK
+	fi
 	main=
 	if [ -f "$CONF" ]; then
 		read -r data_start data_size slot_size < "$CONF"
@@ -287,6 +302,7 @@ start() {
 			main=/dev/$p4
 		fi
 	fi
+	[ -z "$S05DATA_NO_GAMES" ] || return 0
 	card=$(card_games) && log "$card: games of the SD card"
 	games-mount start $main $card
 }
