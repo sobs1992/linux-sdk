@@ -1,0 +1,120 @@
+#!/bin/sh
+# bare-report [GAME]: one text file for a bug report: what the device runs
+# (/etc/sdk-release, the kernel), its state (memory, disks, battery,
+# temperatures, processes, USB), bare_app's settings and log, the kernel's
+# messages and, for GAME (a game's name under /data/logs: monkey1, homm3),
+# that game's settings file and its launch logs; without GAME the game
+# played last. Wi-Fi passwords, Bluetooth and SSH keys stay out.
+#
+# Written onto the games card, /games/reports/<date>[-GAME].txt (remounted
+# writable for that and read-only again), or /data/reports if there is no
+# card (shared as a USB disk, not put in). Prints the file's path; exit
+# status 1 if it could not be written. bare_app runs it (ACT_REPORT).
+LOGS=/data/logs
+CARD=/games
+name=$1
+
+case "$name" in
+*/* | .*) echo "bare-report: $name?" >&2; exit 1 ;;
+esac
+
+tmp=/tmp/bare-report.$$
+trap 'rm -f "$tmp"' EXIT
+
+section() {
+	printf '\n===== %s =====\n' "$1"
+}
+
+# show TITLE FILE: the file, or that there is none
+show() {
+	section "$1"
+	if [ -r "$2" ]; then
+		cat "$2"
+	else
+		echo "(no $2)"
+	fi
+}
+
+# the game played last: its newest launch log
+if [ -z "$name" ]; then
+	last=$(ls -t $LOGS/*/1.log 2>/dev/null | head -n 1)
+	[ -n "$last" ] && game=$(basename "$(dirname "$last")") || game=
+else
+	game=$name
+fi
+
+{
+	echo "OdroidLinux: a report for a bug report"
+	echo "made:     $(date '+%Y-%m-%d %H:%M:%S')"
+	echo "game:     ${name:-(none asked for)}${game:+, logs of $game}"
+	echo "model:    $(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
+	unit=$(/usr/sbin/unit label 2>/dev/null)
+	echo "unit:     ${unit:-(not listed in /etc/units)}"
+	echo "kernel:   $(uname -a)"
+	echo "up:       $(uptime)"
+	echo "It has no Wi-Fi passwords, Bluetooth or SSH keys in it."
+	show "system (/etc/sdk-release)" /etc/sdk-release
+
+	if [ -n "$game" ]; then
+		section "the game: $CARD/$game"
+		ls -la "$CARD/$game" 2>&1 | head -n 60
+		for f in wine.ini game.ini; do
+			[ -r "$CARD/$game/$f" ] && show "$CARD/$game/$f" "$CARD/$game/$f"
+		done
+		for n in 1 2 3; do
+			[ -r "$LOGS/$game/$n.log" ] && show "launch log $n (1: the last)" "$LOGS/$game/$n.log"
+		done
+	fi
+	section "the games' last launches"
+	ls -lt $LOGS/*/1.log 2>/dev/null | head -n 20
+
+	section "memory"
+	free
+	grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree|Shmem):' /proc/meminfo
+	section "disks"
+	df -h
+	section "mounts"
+	grep -vE ' (proc|sysfs|devpts|cgroup2?|debugfs|tracefs|configfs) ' /proc/mounts
+	section "battery"
+	for d in /sys/class/power_supply/*; do
+		[ -d "$d" ] || continue
+		printf '%s:' "$(basename "$d")"
+		for a in status capacity voltage_now current_now online; do
+			[ -r "$d/$a" ] && printf ' %s=%s' "$a" "$(cat "$d/$a" 2>/dev/null)"
+		done
+		echo
+	done
+	section "temperatures"
+	for z in /sys/class/thermal/thermal_zone*; do
+		[ -r "$z/temp" ] && echo "$(cat "$z/type" 2>/dev/null): $(cat "$z/temp")"
+	done
+	section "processes"
+	ps
+	section "USB"
+	lsusb 2>&1
+	show "bare_app's settings (/etc/bare_app.conf)" /etc/bare_app.conf
+	section "bare_app's log (the end)"
+	tail -n 400 /var/log/bare_app.log 2>&1
+	section "the kernel's messages (the end)"
+	dmesg | tail -n 300
+} > "$tmp" 2>&1
+
+# Onto the card if it is there (writable for this), else /data
+dir=
+if mountpoint -q "$CARD" 2>/dev/null; then
+	ro=
+	grep -q " $CARD [^ ]* ro[, ]" /proc/mounts && ro=1
+	if [ -z "$ro" ] || mount -o remount,rw "$CARD"; then
+		mkdir -p "$CARD/reports" && dir=$CARD/reports
+	fi
+fi
+[ -n "$dir" ] || { mkdir -p /data/reports && dir=/data/reports; }
+out=$dir/$(date +%Y-%m-%d_%H-%M-%S)${name:+-$name}.txt
+cp "$tmp" "$out"
+ok=$?
+sync
+if [ -n "$ro" ] && ! mount -o remount,ro "$CARD"; then
+	echo "bare-report: $CARD stays writable (busy)" >&2
+fi
+[ $ok -eq 0 ] || { echo "bare-report: $out could not be written" >&2; exit 1; }
+echo "$out"

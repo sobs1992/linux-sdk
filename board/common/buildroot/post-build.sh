@@ -10,6 +10,20 @@ set -e
 TARGET_DIR="$1"
 shift
 
+# What this image is, for reports and updates: /etc/sdk-release with the
+# firmware (BASE_DIR is output/<fw>/buildroot), the day it was built and
+# the SDK's and bare_app's commits ("-dirty": with changes not committed)
+SDK_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+ver() {
+	git -C "$1" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown
+}
+cat > "$TARGET_DIR/etc/sdk-release" <<-END
+	FIRMWARE=$(basename "$(dirname "${BASE_DIR:-unknown/x}")")
+	BUILT=$(date +%Y-%m-%d)
+	SDK=$(ver "$SDK_DIR")
+	BARE_APP=$(ver "$SDK_DIR/apps/bare_app")
+END
+
 KEYS="$(dirname "$0")/authorized_keys"
 if [ -f "$KEYS" ]; then
 	echo "Adding SSH keys from $KEYS"

@@ -100,13 +100,28 @@ tools/ppm2png.py /tmp/s.ppm /tmp/s.png
 `BARE_APP_NATIVE_DIRS`; для Doom — `BARE_APP_DOOM_WAD`; для Half-Life — движок с
 `--enable-bare-app` и `BARE_APP_HALFLIFE_*`.
 
+## Отчёт с приставки: `bare-report`
+
+`/usr/sbin/bare-report [ИГРА]` (`board/common/buildroot/rootfs-overlay/usr/sbin/`)
+собирает один текстовый файл для сообщения об ошибке: `/etc/sdk-release` (прошивка, день
+сборки, коммиты SDK и bare_app — его пишет `post-build.sh`), ядро, память, диски,
+батарея, температуры, процессы, USB, `/etc/bare_app.conf`, конец `bare_app.log` и
+`dmesg`, а для игры (имя каталога из `/data/logs`) — её `wine.ini`/`game.ini`, список
+файлов и три журнала запуска; без имени — журналы игры, запущенной последней. Файл
+ложится на карту, `/games/reports/<дата>[-игра].txt` (карта на время записи
+перемонтируется на запись), а без карты — в `/data/reports`; путь печатается. Пароли
+Wi-Fi и ключи в отчёт не попадают. bare_app зовёт его кнопкой Y на экране ошибки и
+пунктом «Сохранить отчёт» в Настройках → Система (`ACT_REPORT`, `ctl_report.c`,
+`platform.report`, `BARE_APP_REPORT` — другая команда).
+
 ## Что смотреть при проблемах
 
 | Признак | Где искать |
 |---|---|
 | игры нет в меню | ini не там, нет `exe`; журнал: `native: …: no exe` |
 | «Не найдено: путь» | `needs`/`missing()` |
-| стартует и закрывается | `/data/logs/<игра>/1.log` — stdout/stderr игры и Wine, код выхода, сообщения ядра |
+| стартует и закрывается | экран ошибки (правило из `errors.ini`); `/data/logs/<игра>/1.log` — stdout/stderr игры и Wine, код выхода, сообщения ядра |
+| что стоит на плате | `/etc/sdk-release`; всё сразу — `bare-report` |
 | чёрный экран, «Загрузка…» | другой видеодрайвер; `SDL_LOGGING = video=debug` |
 | рывки | монитор F5 (удерживать): график времени кадра, CPU по кластерам, диск; `BARE_APP_FRAME_STATS=1` в лог |
 | Wine | `WINEBARE_FPS=1` — fps и стопы; `WINEDEBUG` как обычно |
