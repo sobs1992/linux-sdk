@@ -19,8 +19,11 @@ start() {
 	[ $? -eq 0 ] && echo "OK" || echo "ERROR"
 
 	# coldplug modules: every modalias is under /sys/devices (all of
-	# /sys/ takes three times as long to walk)
+	# /sys/ takes three times as long to walk). A Wi-Fi adapter in its
+	# driver CD mode is ejected first: it comes back as itself, which mdev
+	# sees (usb-cd-eject).
 	(
+		/usr/sbin/usb-cd-eject coldplug
 		find /sys/devices -name modalias -print0 |
 			xargs -0 sort -u |
 			tr '\n' '\0' |

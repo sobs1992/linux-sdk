@@ -71,12 +71,14 @@ APPS_AUTOSTART := bare-app
 # an SDL2 game; game files on /games/rtcw), Unreal Tournament 2004 (its
 # Linux x86_64 build under Box64; game files on /games/ut2004). Chocolate Doom (an SDL2 game
 # as it is: bare-app.CHOCOLATE_DOOM=y) is left out: bare_app has its own Doom;
-# the file manager's viewer for pictures, video and sound (FFmpeg)
+# the file manager's viewer for pictures, video and sound (FFmpeg),
+# Settings > Bluetooth (bluetoothd over D-Bus; the daemons come with a USB
+# adapter: board/ogu/buildroot)
 APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.HOMM3=y bare-app.HALFLIFE=y bare-app.WINE=y \
                   bare-app.SDL=y bare-app.STREAM=y bare-app.DOOM3=y \
                   bare-app.RTCW=y bare-app.UT2004=y bare-app.MEDIA=y \
-                  bare-app.SERIOUSSAM=y
+                  bare-app.SERIOUSSAM=y bare-app.BLUETOOTH=y
 
 # --- SD card image ---
 # Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,

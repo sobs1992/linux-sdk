@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# Bluetooth on the ODROID-GO Ultra: it has no chip of its own, a USB adapter
+# on the USB-A port brings hci0 (btusb, loaded by mdev by modalias; its
+# firmware from linux-firmware). The daemons start when an adapter comes
+# (mdev runs "hotplug" for the bluetooth subsystem, see /etc/mdev.conf) or
+# at boot when one is already in, never without one: the boot stays as
+# short. Once started they stay when the adapter is pulled out: bluetoothd
+# waits for the next one.
+#   dbus-daemon  the system bus (Buildroot's S30dbus-daemon, renamed by
+#                post-build.sh to dbus-daemon so that rcS leaves it)
+#   bluetoothd   pairing; HID and HID over GATT (pads, keyboards, mice),
+#                A2DP and AVRCP (Buildroot's S40bluetoothd, renamed alike);
+#                the keys of the paired devices are kept in
+#                /var/lib/bluetooth -> /data/bluetooth
+#   bluealsa     headphones and speakers (A2DP source): bare_app writes the
+#                sound to it
+# bare_app reaches bluetoothd and bluealsa over the system bus.
+
+LOCK=/var/run/bluetooth.lock
+BLUEALSA=/usr/bin/bluealsa
+BLUEALSA_PID=/var/run/bluealsa.pid
+
+# the lock is fd 9; the daemons started under it must not keep it open
+lock() {
+	exec 9>$LOCK
+	flock 9
+}
+
+up() {
+	(
+		lock
+		# nodes that appear only once their modules are in: /dev/uhid
+		# (HID over GATT), /dev/uinput (AVRCP's keys); hidp (classic HID)
+		# is asked for by its socket
+		modprobe -q uhid
+		modprobe -q uinput
+		modprobe -q hidp
+		mkdir -p /data/bluetooth
+		chmod 700 /data/bluetooth
+		pidof dbus-daemon >/dev/null || /etc/init.d/dbus-daemon start 9>&-
+		pidof bluetoothd >/dev/null || /etc/init.d/bluetoothd start 9>&-
+		pidof bluealsa >/dev/null ||
+			start-stop-daemon -S -b -m -p $BLUEALSA_PID -x $BLUEALSA -- \
+				-S -p a2dp-source 9>&-
+	) </dev/null >/dev/null 2>&1 &
+}
+
+down() {
+	start-stop-daemon -K -q -p $BLUEALSA_PID
+	rm -f $BLUEALSA_PID
+	[ -x /etc/init.d/bluetoothd ] && /etc/init.d/bluetoothd stop
+	[ -x /etc/init.d/dbus-daemon ] && /etc/init.d/dbus-daemon stop
+}
+
+have_adapter() {
+	for h in /sys/class/bluetooth/hci*; do
+		[ -e "$h" ] && return 0
+	done
+	return 1
+}
+
+case "$1" in
+start)
+	printf "Starting bluetooth: "
+	have_adapter && up
+	echo "OK";;
+stop)
+	printf "Stopping bluetooth: "
+	pidof bluetoothd >/dev/null && down >/dev/null 2>&1
+	echo "OK";;
+restart)
+	down >/dev/null 2>&1
+	up;;
+hotplug)
+	# from mdev: the bluetooth subsystem's uevent ($ACTION, $DEVTYPE:
+	# "host" for an adapter, "link" for a connection)
+	[ "$ACTION" = add ] && [ "$DEVTYPE" = host ] && up
+	exit 0;;
+*)
+	echo "Usage: $0 {start|stop|restart|hotplug}"
+	exit 1
+esac

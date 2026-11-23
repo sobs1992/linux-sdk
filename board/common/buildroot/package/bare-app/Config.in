@@ -119,6 +119,19 @@ config BR2_PACKAGE_BARE_APP_STREAM
 	  Open rtsp://<device>:8554/live in VLC. Switches bare_app's
 	  STREAM on. In the SDK: APPS_CONFIG += bare-app.STREAM=y
 
+config BR2_PACKAGE_BARE_APP_BLUETOOTH
+	bool "Bluetooth settings (BlueZ over D-Bus)"
+	depends on BR2_USE_MMU # dbus
+	depends on BR2_TOOLCHAIN_HAS_THREADS # dbus
+	select BR2_PACKAGE_DBUS
+	help
+	  Settings > Bluetooth: finds, pairs, connects and forgets pads,
+	  keyboards, mice and headphones through bluetoothd (BlueZ) on
+	  the D-Bus system bus; with bluez-alsa the games' sound goes to
+	  connected headphones. The board brings the daemons (BlueZ,
+	  bluez-alsa, their start) itself. Switches bare_app's BLUETOOTH
+	  on. In the SDK: APPS_CONFIG += bare-app.BLUETOOTH=y
+
 config BR2_PACKAGE_BARE_APP_MEDIA
 	bool "media viewer (pictures, video, sound)"
 	depends on BR2_PACKAGE_FFMPEG_ARCH_SUPPORTS

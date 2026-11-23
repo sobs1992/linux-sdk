@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Realtek USB Wi-Fi + Bluetooth adapters (the TP-Link Archer TX10UB Nano
+# among them) come up as a CD-ROM with their Windows driver on it ("driver
+# CD mode": 0bda:1a2b or 0bda:a192) until told to eject it; then they come
+# back as the adapter (rtw89 or rtw88 + btusb, loaded by modalias). The
+# kernel's usb-storage leaves that disc alone (US_FL_IGNORE_DEVICE), so the
+# eject goes over libusb: usb_modeswitch -K (SCSI START STOP UNIT).
+#
+#   usb-cd-eject           from mdev for the USB device's uevent ($ACTION,
+#                          $DEVTYPE, $DEVPATH; see /etc/mdev.conf)
+#   usb-cd-eject coldplug  the ones plugged in before mdev listened (S03mdev)
+
+is_cd() {
+	case "$1:$2" in
+	0bda:1a2b|0bda:a192) return 0;;
+	esac
+	return 1
+}
+
+# $1: the device's directory in sysfs
+try() {
+	[ -r "$1/idVendor" ] || return 0
+	v=$(cat "$1/idVendor")
+	p=$(cat "$1/idProduct")
+	is_cd "$v" "$p" || return 0
+	bus=$(cat "$1/busnum")
+	dev=$(cat "$1/devnum")
+	echo "usb-cd-eject: $v:$p on bus $bus device $dev is a driver CD, ejecting" >/dev/kmsg
+	usb_modeswitch -Q -v "0x$v" -p "0x$p" -b "$bus" -g "$dev" -K >/dev/null 2>&1
+}
+
+if [ "$1" = coldplug ]; then
+	for d in /sys/bus/usb/devices/*; do
+		try "$d"
+	done
+	exit 0
+fi
+[ "$ACTION" = add ] && [ "$DEVTYPE" = usb_device ] || exit 0
+try "/sys$DEVPATH"
