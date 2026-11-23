@@ -63,11 +63,22 @@ work = lab/images/work
 ;              paths of the section's "source" are the directory it found
 ;   gog        GOG's product ids (goggame-<id>.info in the game's directory),
 ;              found before "detect"
-;   No detect: the game is put on the card from a PC only (Heroes III and
-;   Half-Life: their installers need bash; Doom is in the image)
+;   No detect: the game is put on the card from a PC only (Doom is in the
+;   image, UT2004). Installers too (GOG's setup_*.exe): the board unpacks
+;   them and finds the game in their listing the same way.
+;   install = homm3, halflife on the board: what their scripts copy, done by
+;   gamerecipe.py (no bash there); Heroes III's VCMI mods are zips the
+;   player puts into /games/redist (HOMM3_MODS), or the ones on the card
+;   already when it is installed again
+;   language   the installer's language to unpack (innoextract --language),
+;              when not every file is in the default set
+;   title      the game's name on the install screen, for a game without
+;              a wine.ini or game.ini of its own (VCMI, Xash3D)
 ; ---------------------------------------------------------------------------
 
 [heroes3]
+title = Heroes of Might and Magic III
+detect = Data/H3bitmap.lod | Data/H3sprite.lod
 ; Heroes of Might and Magic III: Data, Maps, MP3 of an installation (here a
 ; HotA one), the VCMI mods Horn of the Abyss and the Russian translation
 ; (downloaded once into dl/hota)
@@ -78,7 +89,7 @@ cover = lab/games/HoMM3_HotA/game_info/data/Data/H3bitmap.lod:gamselb1.pcx
 cover_crop = left
 
 [hota]
-detect = h3hota HD.exe | Data/H3bitmap.lod
+detect = h3hota HD.exe | HotA.dat | Data/H3bitmap.lod
 ; Heroes III: Horn of the Abyss as it is (HotA 1.8 + HD mod 5), Wine, from
 ; the same installation as heroes3 (its own copy: Wine runs the HD mod's exe).
 ; prepare.sh sets the HD mod's resolution and renderer for wine.ini's mode.
@@ -103,6 +114,8 @@ cover = output/ogu/buildroot/target/usr/share/games/doom/doom1.wad:TITLEPIC
 cover_crop = fit
 
 [halflife]
+title = Half-Life
+detect = valve/liblist.gam | valve/halflife.wad
 ; Half-Life from Steam: valve/ and valve_russian/ (scripts/halflife-install.sh)
 install = halflife
 source = ${steam}/steamapps/common/Half-Life

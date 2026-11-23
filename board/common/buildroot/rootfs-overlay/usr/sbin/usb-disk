@@ -40,6 +40,10 @@ start() {
 	[ ! -e $STATE ] || { log "already shared"; return 0; }
 	G=$(gadget) || { log "no USB gadget running"; return 1; }
 	devs=$(games-mount devices) || { log "/games is not mounted"; return 1; }
+	# the card's install and redist folders with what goes into them, for
+	# the player who opens the card on the computer (game-install, GO Ultra)
+	! command -v game-install >/dev/null || game-install prepare-card >/dev/null 2>&1 ||
+		log "game-install prepare-card failed"
 	games-mount stop 2>/dev/null
 	case $? in
 	0) ;;

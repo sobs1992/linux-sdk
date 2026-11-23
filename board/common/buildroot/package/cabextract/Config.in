@@ -1,0 +1,9 @@
+config BR2_PACKAGE_CABEXTRACT
+	bool "cabextract"
+	help
+	  Unpacks Microsoft cabinet files (.cab): the DirectX
+	  redistributables in GOG's installers (__redist/DirectX) and
+	  Microsoft's DirectX package, from which the device's
+	  game-install takes the Windows DLLs a game's recipe needs.
+
+	  https://www.cabextract.org.uk/

@@ -1,0 +1,24 @@
+config BR2_PACKAGE_INNOEXTRACT
+	bool "innoextract"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_USE_WCHAR
+	select BR2_PACKAGE_BOOST
+	select BR2_PACKAGE_BOOST_IOSTREAMS
+	select BR2_PACKAGE_BOOST_FILESYSTEM
+	select BR2_PACKAGE_BOOST_DATE_TIME
+	select BR2_PACKAGE_BOOST_SYSTEM
+	select BR2_PACKAGE_BOOST_PROGRAM_OPTIONS
+	select BR2_PACKAGE_XZ
+	help
+	  Unpacks installers made with Inno Setup (GOG's setup_*.exe
+	  and their .bin parts) without running them: the device's
+	  game-install installs a game from its installer.
+
+	  The master branch: the 1.9 release stops at Inno Setup 6.0.5,
+	  GOG's newer installers are 6.1 to 6.4.
+
+	  https://constexpr.org/innoextract/
+
+comment "innoextract needs a toolchain w/ C++, threads, wchar"
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS || !BR2_USE_WCHAR

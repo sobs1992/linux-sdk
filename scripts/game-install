@@ -6,47 +6,75 @@ game-install: games copied onto the games card installed on the board
   game-install scan [DIR]
       what is in DIR (/games/install): a line per entry, TAB between:
         entry PATH KIND RECIPE TITLE GAME STATE
-      KIND dir (a folder) or installer (a .exe: not installed here yet),
+      KIND dir (a folder of a game) or installer (an Inno Setup installer,
+      GOG's setup_*.exe with its .bin parts, by itself or in a folder),
       RECIPE the games.manifest section of the game found in it ("-"
-      none), TITLE its name, GAME the folder of the game inside PATH,
-      STATE new, installed (its folder is on /games already: --replace),
-      unknown (no recipe: a Windows game installs with --exe), or
-      installer; for a game of a recipe then, if it lacks some
+      none), TITLE its name, GAME the folder of the game inside PATH (of
+      an installer: inside what it unpacks), STATE new, installed (its
+      folder is on /games already: --replace), unknown (no recipe: a
+      Windows game installs with --exe), or installer (an .exe this
+      device does not unpack); then, for an installer
+        size PATH MIB             what it unpacks
+      for a game of a recipe, if it lacks some
         need PATH NAME|NAME|...  the files its recipe takes from a PC
                                  (Windows DLLs, fonts, a translation) that
-                                 are not in /games/redist (by name, any
-                                 case or depth; a DLL 32-bit)
+                                 are not in /games/redist or the system's
+                                 /usr/share/game-redist (by name, any case
+                                 or depth, also inside DirectX's .cab
+                                 files; a DLL 32-bit), nor in the
+                                 installer's own DirectX
       for an unknown game
-        exe PATH EXE|EXE|...   its programs, the likeliest first
+        exe PATH EXE|EXE|...   its programs, the likeliest first (GOG's
+                               own choice first: goggame-*.info)
   game-install install PATH [--replace] [--exe EXE --title TITLE]
       the game in PATH (an entry) into its folder of /games by its recipe
       (scripts/gamerecipe.py, the recipes of the rootfs: what the PC's
       games-image.py does); a game without a recipe with --exe (relative
-      to the game's folder) as a Windows game: a wine.ini of its own
-      (TITLE, the program), its cover the program's icon. On the card the
-      game is moved into place (no copy, no room needed); the card is
-      writable for that only. Lines on stdout:
-        step N/M NAME   find, files, extras, cover, prepare, data, finish
-        skip file NAME  left out: a file of the PC the recipe names, not in
-                        /games/redist either
+      to the game's folder; GOG's primary program if not given) as a
+      Windows game: a wine.ini of its own (TITLE, the program), its cover
+      the program's icon. On the card the game is moved into place (no
+      copy, no room needed); an installer is unpacked next to it first
+      (innoextract: room for the game needed), its DirectX cabinets kept
+      in /games/redist/DirectX for later games, the installer's files
+      deleted once the game is in. The card is writable for that only.
+      Lines on stdout:
+        step N/M NAME   find, unpack, files, extras, cover, prepare, data,
+                        finish
+        progress N      percent of the unpacking
+        skip file NAME  left out: a file of the PC the recipe names, found
+                        nowhere
         skip prepare SCRIPT   its "run" step failed (the game is there)
         skip cover WHY  its cover not made (the program's icon instead)
         done FOLDER TITLE
         fail CODE ARG   why it failed, for the device's own words: gone (the
                         folder or program is not there), unknown (no recipe,
                         no --exe), exists (ARG the card's folder taken), room
-                        (ARG the MiB needed), card (not writable), error
-                        (ARG the message)
+                        (ARG the MiB needed), card (not writable), setup (the
+                        installer could not be unpacked), error (ARG the
+                        message)
       errors also on stderr "game-install: ...", exit status 1.
-GAME_INSTALL_GAMES, GAME_INSTALL_DATA and GAME_INSTALL_RECIPES name other
-directories than /games, /data and the recipes (tests).
+  game-install remove PATH
+      deletes an entry of the install folder (a folder, or an installer
+      with its .bin parts); "done removed NAME".
+  game-install prepare-card
+      the card's install and redist folders, each with a text saying what
+      goes into it, and the user guide (the system's
+      /usr/share/doc/user-guide.html) as "Руководство.html" at the card's
+      top, renewed when the system's differs (bare_app's USB disk does
+      this before the PC sees the card).
+GAME_INSTALL_GAMES, GAME_INSTALL_DATA, GAME_INSTALL_RECIPES and
+GAME_INSTALL_REDIST name other directories than /games, /data, the recipes
+and /usr/share/game-redist (tests).
 """
+import atexit
 import fnmatch
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # the recipes: the board's, else the SDK's this script is in; tests name
 # others (GAME_INSTALL_RECIPES: a copy as post-build.sh makes it, no lab/)
@@ -62,10 +90,18 @@ GAMES = os.environ.get("GAME_INSTALL_GAMES", "/games")
 DATA = os.environ.get("GAME_INSTALL_DATA", "/data")
 INSTALL = os.path.join(GAMES, "install")
 REDIST = os.path.join(GAMES, "redist")	# what recipes take from a PC, put there by the player
-STEPS = ("find", "files", "extras", "cover", "prepare", "data", "finish")
+# what the system brings for recipes (OpenAL Soft's soft_oal.dll: package openal-soft-win32)
+SYSTEM_REDIST = os.environ.get("GAME_INSTALL_REDIST", "/usr/share/game-redist")
+UNPACK = ".unpack-"	# an installer unpacked in the install folder: .unpack-<name>
+STEPS = ("find", "unpack", "files", "extras", "cover", "prepare", "data", "finish")
 # programs of a game that are not the game
 NOT_GAME = re.compile(r"(unins|setup|install|config|dxsetup|directx|vcredist|vc_redist|dotnet|"
-                      r"crashreport|uninst|patch|update|register|autorun|readme|ereg)", re.I)
+                      r"crashreport|uninst|patch|update|register|autorun|readme|ereg|scriptinterpreter)", re.I)
+RUSSIAN = re.compile(r"^(ru|ru-ru|russian)$", re.I)
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
 
 
 def die(msg, code="error", arg=None):
@@ -98,31 +134,176 @@ def pe_machine(p):
         return None
 
 
-_redist = None
+def tool(name):
+    """a program of the system (innoextract, cabextract), None if it has not"""
+    return shutil.which(name)
 
 
-def redist(spec):
-    """a file a recipe takes from the PC (lab/redist/SysWOW64/D3DX9_41.dll,
-    Fonts/arial*.ttf, a translation's installer), in the card's redist
-    folder: by its name or pattern, any case, any depth; a DLL 32-bit (the
-    games of the recipes are; 64-bit Windows keeps the 64-bit DLLs in
-    System32 under the same names, OpenAL Soft's bin/Win64 too). One file
-    per name."""
-    global _redist
-    if _redist is None:
-        _redist = sorted(os.path.join(d, f) for d, _, fs in os.walk(REDIST) for f in fs)
+# ---- files a recipe takes from a PC ------------------------------------------
+#
+# Looked for by name in the card's redist folder (where the player puts
+# them, and the DirectX cabinets of installers are kept), the system's
+# (OpenAL Soft) and, while an installer is installed, what it unpacked:
+# as files, and inside cabinets (.cab: DirectX's redistributables, one
+# DLL or a few each; Microsoft's DirectX package is a cabinet of cabinets).
+
+_files = None		# the files of the redist folders
+_cabs = None		# [(cabinet, [its members' names, lower case])]
+_extra = []		# more folders to look in (an installer's unpacked files)
+_tmp = None		# where cabinets are unpacked to
+
+
+def redist_dirs():
+    return [REDIST, SYSTEM_REDIST] + _extra
+
+
+def reset_redist():
+    global _files, _cabs
+    _files = _cabs = None
+
+
+def cab_members(cab):
+    """the names of a cabinet's files (cabextract -l), [] not one"""
+    exe = tool("cabextract")
+    if not exe:
+        return []
+    r = subprocess.run([exe, "-l", cab], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                       errors="replace")
+    return [l.rsplit("|", 1)[1].strip() for l in r.stdout.splitlines() if l.count("|") == 2 and
+            not l.strip().startswith("File size")]
+
+
+def x64_name(n):
+    return bool(re.search(r"(x64|amd64|ia64|arm64)", n, re.I))
+
+
+def index():
+    global _files, _cabs
+    if _files is None:
+        _files, _cabs = [], []
+        for top in redist_dirs():
+            for d, _, fs in os.walk(top):
+                for f in sorted(fs):
+                    p = os.path.join(d, f)
+                    _files.append(p)
+                    low = f.lower()
+                    # cabinets of 64-bit DLLs are of no use to the 32-bit games
+                    if (low.endswith(".cab") or re.match(r"directx.*redist.*\.exe$", low)) and not x64_name(low):
+                        _cabs.append((p, [m.lower() for m in cab_members(p)]))
+    return _files, _cabs
+
+
+def unpack_member(cab, member):
+    """one file of a cabinet, unpacked into a temporary folder: its path"""
+    global _tmp
+    if _tmp is None:
+        _tmp = tempfile.mkdtemp(prefix="game-install-")
+        atexit.register(shutil.rmtree, _tmp, True)
+    out = tempfile.mkdtemp(dir=_tmp)
+    subprocess.run([tool("cabextract"), "-q", "-F", member, "-d", out, cab],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for d, _, fs in os.walk(out):
+        for f in fs:
+            if f.lower() == member.lower():
+                return os.path.join(d, f)
+    return None
+
+
+def lookup(spec, unpack):
+    """files of spec's name or pattern in the redist folders, one per name:
+    as files, else inside cabinets (unpack: unpacked, else only said to be
+    there: (cabinet, member)); a DLL 32-bit (the games of the recipes are;
+    64-bit Windows keeps its 64-bit DLLs in System32 under the same names,
+    OpenAL Soft's bin/Win64 too)"""
+    files, cabs = index()
     pat = os.path.basename(spec).lower()
-    i386 = spec.lower().endswith(".dll")
+    dll = pat.endswith(".dll")
     out, seen = [], set()
-    for p in _redist:
+    for p in files:
         n = os.path.basename(p).lower()
         if n in seen or not fnmatch.fnmatchcase(n, pat):
             continue
-        if i386 and pe_machine(p) != 0x14c:
+        if dll and pe_machine(p) != 0x14c:
             continue
         seen.add(n)
         out.append(p)
+    if out:
+        return out
+    for cab, members in cabs:
+        for m in members:
+            if m in seen or not fnmatch.fnmatchcase(os.path.basename(m), pat):
+                continue
+            if m.endswith(".cab"):	# a cabinet in Microsoft's package: by its name
+                continue
+            if not unpack:
+                seen.add(m)
+                out.append((cab, m))
+                continue
+            p = unpack_member(cab, m)
+            if p and (not dll or pe_machine(p) == 0x14c):
+                seen.add(m)
+                out.append(p)
+    if not out and not unpack:
+        # Microsoft's DirectX package holds cabinets named for their DLLs
+        # (Jun2010_d3dx9_43_x86.cab): there, by the name
+        stem = os.path.splitext(pat)[0]
+        for cab, members in cabs:
+            if any(m.endswith(".cab") and stem in m and not x64_name(m) for m in members):
+                return [(cab, stem)]
     return out
+
+
+def redist(spec):
+    """gamerecipe's elsewhere(): the files themselves"""
+    return lookup(spec, True)
+
+
+def redist_there(spec):
+    """for needs(): whether they are somewhere"""
+    return lookup(spec, False)
+
+
+def keep_directx(top):
+    """the 32-bit DirectX cabinets of an unpacked installer (GOG's
+    __redist/DirectX) and of Microsoft's package in the redist folder into
+    /games/redist/DirectX: later games' recipes find their DLLs there"""
+    dst = os.path.join(REDIST, "DirectX")
+    kept = 0
+    for d, _, fs in os.walk(top):
+        if os.path.basename(d).lower() != "directx":
+            continue
+        for f in fs:
+            if f.lower().endswith(".cab") and not x64_name(f) and \
+                    not os.path.exists(os.path.join(dst, f)):
+                os.makedirs(dst, exist_ok=True)
+                shutil.copyfile(os.path.join(d, f), os.path.join(dst, f))
+                kept += 1
+    if kept:
+        log("%d DirectX cabinets kept in %s" % (kept, dst))
+        reset_redist()
+
+
+def open_directx_package():
+    """Microsoft's DirectX package (directx_Jun2010_redist.exe) in the redist
+    folder: its 32-bit cabinets unpacked into /games/redist/DirectX once"""
+    exe = tool("cabextract")
+    if not exe or not os.path.isdir(REDIST):
+        return
+    for d, _, fs in os.walk(REDIST):
+        for f in fs:
+            if not re.match(r"directx.*redist.*\.exe$", f, re.I):
+                continue
+            pkg = os.path.join(d, f)
+            want = [m for m in cab_members(pkg) if m.lower().endswith(".cab") and not x64_name(m)]
+            dst = os.path.join(REDIST, "DirectX")
+            todo = [m for m in want if not os.path.exists(os.path.join(dst, m))]
+            if not todo:
+                continue
+            os.makedirs(dst, exist_ok=True)
+            subprocess.run([exe, "-q", "-d", dst] + sum((["-F", m] for m in todo), []) + [pkg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log("%s: %d cabinets into %s" % (pkg, len(todo), dst))
+            reset_redist()
 
 
 def file_names(specs):
@@ -135,9 +316,14 @@ def file_names(specs):
     return out
 
 
+# ---- what an entry is -----------------------------------------------------------
+
 def title_of(name, g):
-    """the name its wine.ini or game.ini gives (of its overlay, or a file
-    line that brings it: Pirates!'s), else the section's"""
+    """the section's "title", else the name its wine.ini or game.ini gives
+    (of its overlay, or a file line that brings it: Pirates!'s), else the
+    section's own"""
+    if g.get("title"):
+        return g["title"]
     o = g.get("overlay")
     inis = [os.path.join(gamerecipe.path(o), ini) for ini in ("wine.ini", "game.ini")] if o else []
     for spec in g.get("file", []):
@@ -154,21 +340,229 @@ def title_of(name, g):
     return name
 
 
+def gog_info(root):
+    """(name, primary program relative to root) of GOG's goggame-*.info in
+    root, (None, None) none"""
+    try:
+        names = sorted(n for n in os.listdir(root) if re.match(r"goggame-\d+\.info$", n, re.I))
+    except OSError:
+        return None, None
+    for n in names:
+        try:
+            d = json.load(open(os.path.join(root, n), encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        for t in d.get("playTasks", []):
+            if t.get("isPrimary") and t.get("path", "").lower().endswith(".exe"):
+                return d.get("name"), t["path"].replace("\\", "/")
+        return d.get("name"), None
+    return None, None
+
+
 def programs(root):
-    """the .exe files of a Windows game, the likeliest game first: not an
-    installer or a tool, the biggest, the least deep"""
+    """the .exe files of a Windows game, the likeliest game first: GOG's
+    primary one, then not an installer or a tool, the least deep, the
+    biggest"""
+    _, primary = gog_info(root)
     found = []
     for d, dirs, files in os.walk(root):
         depth = os.path.relpath(d, root).count(os.sep) + (d != root)
         if depth > 2:
             dirs[:] = []
             continue
+        dirs[:] = [x for x in dirs if not x.startswith("__")]	# GOG's __redist, __support
         for f in files:
             if f.lower().endswith(".exe"):
                 p = os.path.join(d, f)
-                found.append((bool(NOT_GAME.search(f)), depth, -os.path.getsize(p),
-                              os.path.relpath(p, root)))
+                rel = os.path.relpath(p, root)
+                found.append((not (primary and rel.lower() == primary.lower()), bool(NOT_GAME.search(f)),
+                              depth, -os.path.getsize(p), rel))
     return [p for *_, p in sorted(found)]
+
+
+class Setup:
+    """an Inno Setup installer (innoextract): its game's name, languages,
+    files [(size, path)]; ok False: not one this device unpacks"""
+
+    def __init__(self, exe):
+        self.exe, self.ok, self.name, self.languages, self.files = exe, False, None, [], []
+        prog = tool("innoextract")
+        if not prog:
+            return
+        r = subprocess.run([prog, "--list-languages", exe], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, errors="replace")
+        if r.returncode:
+            return
+        m = re.search(r'"(.+?)"', r.stdout)
+        self.name = m.group(1) if m else None
+        self.languages = [l.split()[1] for l in r.stdout.splitlines() if l.startswith(" - ") and len(l.split()) > 1]
+        self.files = self.listing(None)
+        self.ok = bool(self.files)
+
+    def listing(self, language):
+        r = subprocess.run([tool("innoextract"), "-s", "-m", "--list-sizes"] +
+                           (["--language", language] if language else []) + [self.exe],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+        out = []
+        for l in r.stdout.splitlines():
+            m = re.match(r"(\d+) (.+)$", l)
+            if m:
+                out.append((int(m.group(1)), m.group(2)))
+        return out
+
+    def paths(self, files=None):
+        return [p for _, p in (self.files if files is None else files)]
+
+    def gog_info(self):
+        """(name, primary program) of its goggame-*.info (unpacked alone)"""
+        info = [p for p in self.paths() if re.search(r"(^|/)goggame-\d+\.info$", p, re.I)]
+        if not info:
+            return None, None
+        tmp = tempfile.mkdtemp(prefix="game-install-")
+        try:
+            subprocess.run([tool("innoextract"), "-s", "-m", "-d", tmp, "-I", info[0], self.exe],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return gog_info(os.path.join(tmp, os.path.dirname(info[0])))
+        finally:
+            shutil.rmtree(tmp, True)
+
+    def language(self, g, want):
+        """the language to unpack: the recipe's ("language"), else Russian if
+        the installer has it and the game's files (want: paths) are all in
+        that set (GOG tags some games' files with one language only: Cold
+        Fear's en-US), else every file (None)"""
+        if g and g.get("language"):
+            return g["language"]
+        ru = next((l for l in self.languages if RUSSIAN.match(l)), None)
+        if not ru or not want:
+            return None
+        have = {p.lower() for p in self.paths(self.listing(ru))}
+        return ru if all(w.lower() in have for w in want) else None
+
+
+def bin_parts(exe):
+    """the .bin parts of a GOG installer: <name>-1.bin, <name>-2.bin..."""
+    d, stem = os.path.dirname(exe), os.path.splitext(os.path.basename(exe))[0]
+    try:
+        return sorted(os.path.join(d, n) for n in os.listdir(d)
+                      if re.fullmatch(re.escape(stem) + r"-\d+\.bin", n, re.I))
+    except OSError:
+        return []
+
+
+def installer_in(d):
+    """the installer in a folder copied from a PC (GOG's download: setup_*.exe
+    and its .bin parts), None"""
+    try:
+        exes = sorted(n for n in os.listdir(d) if n.lower().endswith(".exe") and os.path.isfile(os.path.join(d, n)))
+    except OSError:
+        return None
+    exes.sort(key=lambda n: (not n.lower().startswith("setup"), not bin_parts(os.path.join(d, n))))
+    for n in exes[:3]:
+        s = Setup(os.path.join(d, n))
+        if s.ok:
+            return s
+    return None
+
+
+def mod_needs(name, g):
+    """the zips of the VCMI mods a homm3 section takes from the redist
+    folders that are neither there nor installed on the card already
+    (kept when Heroes III is installed again)"""
+    if g.get("install") != "homm3":
+        return []
+    mods = os.path.join(GAMES, g.get("dir", name), "Mods")
+    have = {m for m, _, _, _ in gamerecipe.HOMM3_MODS if os.path.isdir(os.path.join(mods, m))}
+    return [z for m, _, z, _ in gamerecipe.HOMM3_MODS
+            if z in gamerecipe.homm3_mod_zips(g) and m not in have and not redist_there(z)]
+
+
+def listing_needs(g, setup, pre):
+    """needs() for a game still in its installer: what its recipe's lines
+    name that is neither in the installer (a file of the game; a DirectX
+    cabinet of its __redist named for the DLL) nor in the redist folders"""
+    paths = {p.lower() for p in setup.paths()}
+    cabs = [os.path.basename(p) for p in paths if p.endswith(".cab") and not x64_name(p)]
+    orig = (g.get("source") or "").rstrip("/")
+    out = []
+    specs = [gamerecipe.arrow(s)[0] for s in g.get("file", []) + g.get("data", [])]
+    for spec in specs:
+        if orig and (spec == orig or spec.startswith(orig + "/")):
+            rel = spec[len(orig):].lstrip("/").lower()
+            pat = ((pre + "/") if pre else "").lower() + rel
+            if any(fnmatch.fnmatchcase(p, pat) for p in paths):
+                continue
+        elif gamerecipe.sources(spec):
+            continue	# a file of the recipes themselves
+        stem = os.path.splitext(os.path.basename(spec))[0].lower()
+        if spec.lower().endswith(".dll") and any(stem in c for c in cabs):
+            continue
+        if redist_there(spec):
+            continue
+        out.append(spec)
+    for spec in g.get("env", []):
+        v = spec.partition("=")[2].strip()
+        if v.startswith("/") and not os.path.exists(v) and not redist_there(v):
+            out.append(v)
+    return out
+
+
+def setup_programs(setup, pre):
+    """the programs of a game in an installer, as programs() orders them"""
+    _, primary = setup.gog_info()
+    pre = (pre + "/") if pre else ""
+    found = []
+    for size, p in setup.files:
+        if not p.startswith(pre) or not p.lower().endswith(".exe"):
+            continue
+        rel = p[len(pre):]
+        if rel.startswith("__") or rel.startswith("tmp/") or rel.startswith("commonappdata/"):
+            continue
+        depth = rel.count("/")
+        if depth > 2:
+            continue
+        found.append((not (primary and rel.lower() == primary.lower()), bool(NOT_GAME.search(rel)),
+                      depth, -size, rel))
+    return [p for *_, p in sorted(found)]
+
+
+def entry_line(*f):
+    say("\t".join(f))
+
+
+def setup_game_dir(setup, hit):
+    """the folder of the game inside what an installer unpacks: its recipe's,
+    else that of GOG's primary program, else app/ (GOG's older installers),
+    else the top; and GOG's (name, primary program)"""
+    if hit:
+        return hit[2], (None, None)
+    info = setup.gog_info()
+    primary = info[1]
+    if primary:
+        for _, q in setup.files:
+            if q.lower().endswith("/" + primary.lower()) or q.lower() == primary.lower():
+                return q[:len(q) - len(primary)].rstrip("/"), info
+    if any(q.startswith("app/") for q in setup.paths()):
+        return "app", info
+    return "", info
+
+
+def scan_setup(p, setup, secs):
+    hit = gamerecipe.find_in_listing(setup.paths(), secs)
+    if hit:
+        name, g, pre = hit
+        state = "installed" if os.path.isdir(os.path.join(GAMES, g.get("dir", name))) else "new"
+        entry_line("entry", p, "installer", name, title_of(name, g), pre, state)
+        lack = file_names(listing_needs(g, setup, pre) + mod_needs(name, g))
+        if lack:
+            entry_line("need", p, "|".join(lack))
+    else:
+        pre, (info_name, _) = setup_game_dir(setup, None)
+        entry_line("entry", p, "installer", "-", info_name or setup.name or os.path.basename(p), pre, "unknown")
+        exes = setup_programs(setup, pre)
+        if exes:
+            entry_line("exe", p, "|".join(exes))
+    entry_line("size", p, str((sum(s for s, _ in setup.files) >> 20) + 1))
 
 
 def scan(top):
@@ -179,8 +573,14 @@ def scan(top):
         return
     for n in names:
         p = os.path.join(top, n)
+        if n.startswith("."):
+            continue	# .unpack-*: an installer being (or left half) unpacked
         if os.path.isfile(p) and n.lower().endswith(".exe"):
-            say("\t".join(("entry", p, "installer", "-", n, p, "installer")))
+            s = Setup(p)
+            if s.ok:
+                scan_setup(p, s, secs)
+            else:
+                entry_line("entry", p, "installer", "-", n, p, "installer")
             continue
         if not os.path.isdir(p):
             continue
@@ -188,17 +588,23 @@ def scan(top):
         if hit:
             name, g, root = hit
             state = "installed" if os.path.isdir(os.path.join(GAMES, g.get("dir", name))) else "new"
-            say("\t".join(("entry", p, "dir", name, title_of(name, g), root, state)))
-            lack = file_names(gamerecipe.needs(g, root, redist))
+            entry_line("entry", p, "dir", name, title_of(name, g), root, state)
+            lack = file_names(gamerecipe.needs(g, root, redist_there) + mod_needs(name, g))
             if lack:
-                say("\t".join(("need", p, "|".join(lack))))
+                entry_line("need", p, "|".join(lack))
+            continue
+        s = installer_in(p)
+        if s:
+            scan_setup(p, s, secs)
             continue
         exes = programs(p)
-        root = os.path.dirname(os.path.join(p, exes[0])) if exes else p
-        say("\t".join(("entry", p, "dir", "-", n, p, "unknown")))
+        title = gog_info(os.path.dirname(os.path.join(p, exes[0])) if exes else p)[0] or n
+        entry_line("entry", p, "dir", "-", title, p, "unknown")
         if exes:
-            say("\t".join(("exe", p, "|".join(exes))))
+            entry_line("exe", p, "|".join(exes))
 
+
+# ---- installing -----------------------------------------------------------------
 
 def card_rw(rw):
     """the card writable (the mount's own flag: it is read-only while games
@@ -241,63 +647,178 @@ def clean_entry(entry, root):
         d = os.path.dirname(d)
 
 
-def install(entry, replace, exe, title):
-    entry = os.path.abspath(entry)
-    if not os.path.isdir(entry):
-        die("%s: not a folder" % entry, "gone", entry)
-    n = len(STEPS)
-    say("step 1/%d find" % n)
-    secs = sections()
-    hit = gamerecipe.find_game(entry, secs)
+def in_install(p):
+    """p is an entry of the install folder (its own path, no link on it)"""
+    p = os.path.abspath(p)
+    return (os.path.dirname(p) == os.path.abspath(INSTALL) and os.path.realpath(p) == p and
+            os.path.basename(p) not in ("", ".", ".."))
+
+
+def remove_tree(p):
+    """an entry, or an unpacking of ours, deleted: only inside the install
+    folder (the card has no links; a link is refused all the same)"""
+    if not in_install(p) or os.path.islink(p):
+        raise RecipeError("%s: not an entry of %s" % (p, INSTALL))
+    if os.path.isdir(p):
+        shutil.rmtree(p)
+    elif os.path.lexists(p):
+        os.remove(p)
+
+
+def free_mib():
+    st = os.statvfs(GAMES)
+    return (st.f_bavail * st.f_frsize) >> 20
+
+
+def drop(work):
+    """an unpacking of ours left by a failure, deleted"""
+    if work and os.path.lexists(work):
+        try:
+            remove_tree(work)
+        except (RecipeError, OSError) as e:
+            log("%s left: %s" % (work, e))
+
+
+def unpack(setup, dest, language):
+    """the installer into dest (innoextract), "progress N" as it goes"""
+    total = sum(s for s, _ in (setup.listing(language) if language else setup.files)) or 1
+    sizes = {}
+    for s, p in setup.files:
+        sizes[p] = s
+    cmd = [tool("innoextract"), "--gog", "-m", "--progress=0", "-d", dest] + \
+        (["--language", language] if language else []) + [setup.exe]
+    log("$ " + " ".join(cmd))
+    done, shown = 0, -1
+    pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    for l in pr.stdout:
+        if not l.startswith(" - "):
+            log(l.rstrip())
+            continue
+        for p in re.findall(r'"([^"]+)"', l):
+            done += sizes.get(p, 0)
+        pct = min(99, done * 100 // total)
+        if pct != shown:
+            shown = pct
+            say("progress %d" % pct)
+    if pr.wait():
+        raise RecipeError("innoextract failed (status %d)" % pr.returncode)
+    say("progress 100")
+
+
+def resolve(entry, root_hint, secs, exe, title, replace):
+    """(name, keys, root, title, hit) of the game in entry"""
+    hit = gamerecipe.find_game(root_hint, secs)
     if hit:
         name, g, root = hit
-        title = title_of(name, g)
-    elif exe:
-        root = entry
-        if not os.path.isfile(os.path.join(root, exe)):
-            die("%s: no %s" % (entry, exe), "gone", exe)
-        title = title or os.path.basename(entry)
-        # its folder on the card: the name of the one copied, a number added
-        # if that is taken (a game of the card's, a recipe's)
-        base = slug(os.path.basename(entry))
-        name, k = base, 2
-        while os.path.lexists(os.path.join(GAMES, name)) and not replace:
-            name, k = "%s-%d" % (base, k), k + 1
-        g = {"install": "copy"}
-    else:
+        return name, g, root, title_of(name, g), True
+    if not exe:
+        # a game GOG installed: its primary program
+        for d in [root_hint] + [os.path.join(root_hint, x) for x in sorted(os.listdir(root_hint))
+                                if os.path.isdir(os.path.join(root_hint, x))]:
+            n, primary = gog_info(d)
+            if primary and os.path.isfile(os.path.join(d, primary)):
+                root_hint, exe, title = d, primary, title or n
+                break
+    if not exe:
         die("%s: not a game this device knows (no recipe): choose its program" % entry, "unknown", entry)
-    gdir = g.get("dir", name)
-    dest = os.path.join(GAMES, gdir)
-    if os.path.lexists(dest) and not replace:
-        die("%s is there already (/games/%s)" % (title, gdir), "exists", "/games/" + gdir)
-    # moved when on the card itself, no symbolic link on its path (a link
-    # would move, the deletions of the recipe's excludes go through it)
-    move = (os.path.realpath(root) == os.path.abspath(root) and
-            os.stat(root).st_dev == os.stat(GAMES).st_dev)
-    if not move:
-        need = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(root) for f in fs)
-        st = os.statvfs(GAMES)
-        if need > st.f_bavail * st.f_frsize:
-            die("not enough room on the games card: %d MiB needed" % (need >> 20), "room", str((need >> 20) + 1))
+    root = root_hint
+    if not os.path.isfile(os.path.join(root, exe)):
+        die("%s: no %s" % (entry, exe), "gone", exe)
+    title = title or gog_info(root)[0] or os.path.splitext(os.path.basename(entry))[0]
+    # its folder on the card: the name of the one copied, a number added
+    # if that is taken (a game of the card's, a recipe's)
+    base = slug(os.path.splitext(os.path.basename(entry))[0])
+    if base.startswith("setup-"):
+        base = slug(title)
+    name, k = base, 2
+    while os.path.lexists(os.path.join(GAMES, name)) and not replace:
+        name, k = "%s-%d" % (base, k), k + 1
+    return name, {"install": "copy", "exe": exe}, root, title, False
+
+
+def install(entry, replace, exe, title):
+    entry = os.path.abspath(entry)
+    if not os.path.exists(entry):
+        die("%s: not there" % entry, "gone", entry)
+    n = len(STEPS)
     told = set()
 
     def step(what):
         if what in STEPS and what not in told:
             told.add(what)
             say("step %d/%d %s" % (STEPS.index(what) + 1, n, what))
-    writable = card_rw(True)
+    step("find")
+    secs = sections()
+    setup = None
+    if os.path.isfile(entry):
+        setup = Setup(entry)
+        if not setup.ok:
+            die("%s: not an installer this device unpacks" % entry, "setup", entry)
+    elif not gamerecipe.find_game(entry, secs):
+        setup = installer_in(entry)
+    work = None
+    writable = False
     try:
+        if setup:
+            hit = gamerecipe.find_in_listing(setup.paths(), secs)
+            g0 = hit[1] if hit else None
+            pre, (_, primary) = setup_game_dir(setup, hit)
+            slash = (pre + "/") if pre else ""
+            if hit:
+                want = [slash + f for f in gamerecipe.detect_files(g0)]
+            else:
+                want = [slash + (exe or primary)] if (exe or primary) else []
+            language = setup.language(g0, want)
+            need = (sum(s for s, _ in (setup.listing(language) if language else setup.files)) >> 20) + 64
+            if hit:
+                gdir = g0.get("dir", hit[0])
+                if os.path.lexists(os.path.join(GAMES, gdir)) and not replace:
+                    die("%s is there already (/games/%s)" % (title_of(hit[0], g0), gdir), "exists",
+                        "/games/" + gdir)
+            if need > free_mib():
+                die("not enough room on the games card: %d MiB needed" % need, "room", str(need))
+            writable = card_rw(True)
+            work = os.path.join(INSTALL, UNPACK + slug(os.path.splitext(os.path.basename(setup.exe))[0]))
+            if os.path.lexists(work):
+                remove_tree(work)	# a half unpacking of before
+            step("unpack")
+            unpack(setup, work, language)
+            keep_directx(work)
+            _extra.append(work)	# its DirectX for this game's recipe too
+            reset_redist()
+            root_hint = os.path.join(work, pre) if pre else work
+        else:
+            if not os.path.isdir(entry):
+                die("%s: not a folder" % entry, "gone", entry)
+            root_hint = entry
+        name, g, root, title, hit = resolve(entry, root_hint, secs, exe, title, replace)
+        gdir = g.get("dir", name)
+        dest = os.path.join(GAMES, gdir)
+        if os.path.lexists(dest) and not replace:
+            die("%s is there already (/games/%s)" % (title, gdir), "exists", "/games/" + gdir)
+        # moved when on the card itself, no symbolic link on its path (a link
+        # would move, the deletions of the recipe's excludes go through it)
+        move = (os.path.realpath(root) == os.path.abspath(root) and
+                os.stat(root).st_dev == os.stat(GAMES).st_dev)
+        copied = g.get("install") in ("homm3", "halflife")	# what VCMI, Xash3D read: copied
+        if not move or copied:
+            size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(root) for f in fs)
+            if (size >> 20) + 1 > free_mib():
+                die("not enough room on the games card: %d MiB needed" % ((size >> 20) + 1), "room",
+                    str((size >> 20) + 1))
+        if not writable:
+            writable = card_rw(True)
+        open_directx_package()
         skipped = gamerecipe.install_game(name, g, GAMES, DATA, source=root, move=move, strict=False,
-                                          log=lambda m: print(m, file=sys.stderr, flush=True),
-                                          step=step, elsewhere=redist)
+                                          log=log, step=step, elsewhere=redist)
         if not hit:
             # a Windows game of its own: its wine.ini, its icon
             with open(os.path.join(dest, "wine.ini"), "w", encoding="utf-8") as f:
                 f.write("; a Windows game installed on the device without a recipe (game-install):\n"
                         "; bare_app_wine's defaults (apps/bare_app/ports/wine/wine.ini says the keys)\n"
-                        "name = %s\nexe = %s\n" % (title, exe))	# relative: with "/"
+                        "name = %s\nexe = %s\n" % (title, g["exe"]))	# relative: with "/"
             step("cover")
-            gamerecipe.icon_cover(dest, log=lambda m: print(m, file=sys.stderr, flush=True))
+            gamerecipe.icon_cover(dest, log=log)
         for s in skipped:
             if s.startswith("prepare: "):
                 say("skip prepare " + s[9:])
@@ -306,15 +827,118 @@ def install(entry, replace, exe, title):
             else:
                 say("skip file " + os.path.basename(s))
         step("finish")
-        if move:
+        if setup:
+            if work and os.path.lexists(work):
+                remove_tree(work)
+            for f in [setup.exe] + bin_parts(setup.exe):
+                os.remove(f)	# the installer: the game is in (the PC keeps its copy)
+            if os.path.isdir(entry):
+                clean_entry(entry, os.path.join(entry, "x"))
+        elif copied and in_install(entry) and os.path.isdir(entry):
+            remove_tree(entry)	# copied what the engine reads: the folder goes, as a moved one
+        elif move:
             clean_entry(entry, root)
+        subprocess.run(["sync"])
+    except SystemExit:
+        drop(work)
+        raise
+    except (RecipeError, OSError) as e:
+        drop(work)
+        if setup and isinstance(e, RecipeError) and "innoextract" in str(e):
+            die(str(e), "setup", os.path.basename(setup.exe))
+        die(str(e))
+    finally:
+        if writable:
+            card_rw(False)
+    say("done %s %s" % (gdir, title))
+
+
+def remove(entry):
+    entry = os.path.abspath(entry)
+    if not os.path.lexists(entry):
+        die("%s: not there" % entry, "gone", entry)
+    if not in_install(entry):
+        die("%s: not an entry of %s" % (entry, INSTALL))
+    writable = card_rw(True)
+    try:
+        if os.path.isfile(entry) and entry.lower().endswith(".exe"):
+            for f in bin_parts(entry):
+                os.remove(f)
+        remove_tree(entry)
         subprocess.run(["sync"])
     except (RecipeError, OSError) as e:
         die(str(e))
     finally:
         if writable:
             card_rw(False)
-    say("done %s %s" % (gdir, title))
+    say("done removed %s" % os.path.basename(entry))
+
+
+INSTALL_README = """\
+Сюда кладут игры, чтобы установить их на приставке.
+
+Что можно положить:
+  - установщик игры из GOG: файл setup_....exe вместе с его файлами .bin
+    (если они есть), как скачали;
+  - или папку уже установленной на компьютере игры целиком.
+
+Потом на приставке: главный экран, круглая кнопка «+» (Установка игр),
+выберите игру и нажмите A. Подробно: руководство, глава «Установка игр».
+
+Put a game here to install it on the device: a GOG installer
+(setup_....exe with its .bin files) or the folder of a game installed on a
+computer. Then on the device: home screen, the "+" round button.
+"""
+
+GUIDE = os.environ.get("GAME_INSTALL_GUIDE", "/usr/share/doc/user-guide.html")
+GUIDE_ON_CARD = "Руководство.html"
+
+REDIST_README = """\
+Сюда кладут файлы Windows, которые нужны некоторым играм (приставка сама
+скажет, какие: «нужны файлы»). Подпапки и регистр букв не важны.
+
+Библиотеки DirectX (D3DX9_....dll, D3DCompiler_43.dll) приставка берёт
+сама из установщиков GOG. Если их нет: скачайте с сайта Microsoft пакет
+«DirectX End-User Runtimes (June 2010)» (файл directx_Jun2010_redist.exe)
+и положите его сюда как есть.
+
+Windows files some games need (the device names them: "files needed").
+DirectX: Microsoft's directx_Jun2010_redist.exe as it is.
+"""
+
+
+def prepare_card():
+    """the install and redist folders, with what goes into them"""
+    if not os.path.isdir(GAMES):
+        die("%s: no games card" % GAMES, "card", "")
+    todo = [(INSTALL, "КАК УСТАНОВИТЬ ИГРУ.txt", INSTALL_README),
+            (REDIST, "ЧТО СЮДА КЛАСТЬ.txt", REDIST_README)]
+    todo = [t for t in todo if not os.path.isfile(os.path.join(t[0], t[1]))]
+    guide = None
+    try:
+        guide = open(GUIDE, "rb").read()
+        on_card = os.path.join(GAMES, GUIDE_ON_CARD)
+        if os.path.isfile(on_card) and open(on_card, "rb").read() == guide:
+            guide = None	# the same already
+    except OSError:
+        pass
+    if not todo and guide is None:
+        return
+    writable = card_rw(True)
+    try:
+        for d, name, text in todo:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, name), "w", encoding="utf-8-sig", newline="\r\n") as f:
+                f.write(text)	# Windows' Notepad: UTF-8 with its mark, CR LF
+        if guide is not None:
+            with open(os.path.join(GAMES, GUIDE_ON_CARD), "wb") as f:
+                f.write(guide)
+        subprocess.run(["sync"])
+    except OSError as e:
+        die(str(e))
+    finally:
+        if writable:
+            card_rw(False)
 
 
 def main():
@@ -323,8 +947,8 @@ def main():
         scan(a[1] if len(a) == 2 else INSTALL)
         return
     if a[:1] == ["install"] and len(a) >= 2:
-        entry, replace, exe, title = a[1], False, None, None
-        rest = a[2:]
+        entry, replace, exe, title = None, False, None, None
+        rest = a[1:]
         while rest:
             o = rest.pop(0)
             if o == "--replace":
@@ -333,11 +957,22 @@ def main():
                 exe = rest.pop(0)
             elif o == "--title" and rest:
                 title = rest.pop(0)
+            elif entry is None and not o.startswith("--"):
+                entry = o
             else:
                 die("%s?" % o)
+        if entry is None:
+            die("install: which entry?")
         install(entry, replace, exe, title)
         return
-    die("usage: game-install scan [DIR] | install PATH [--replace] [--exe EXE --title TITLE]")
+    if a[:1] == ["remove"] and len(a) == 2:
+        remove(a[1])
+        return
+    if a == ["prepare-card"]:
+        prepare_card()
+        return
+    die("usage: game-install scan [DIR] | install PATH [--replace] [--exe EXE --title TITLE] | "
+        "remove PATH | prepare-card")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,9 @@ find "$R" -name __pycache__ -prune -exec rm -rf {} +
 cp "$SDK_DIR/scripts/gamerecipe.py" "$SDK_DIR/scripts/game_pictures.py" "$R/scripts/"
 cp "$SDK_DIR/apps/bare_app/ports/wine/wine.ini" "$R/apps/bare_app/ports/wine/"
 install -m 0755 "$SDK_DIR/scripts/game-install" "$1/usr/bin/game-install"
+# the user guide as one HTML file: game-install prepare-card puts it on the
+# games card ("Руководство.html") for the player who opens the card on a PC
+python3 "$SDK_DIR/scripts/user-guide.py" "$1/usr/share/doc/user-guide.html"
 cc=$HOST_DIR/llvm-mingw/bin/i686-w64-mingw32-clang
 if [ -x "$cc" ]; then
 	"$cc" -O2 -Wall -mwindows -s -o "$R/games/pop/poplaunch.exe" "$SDK_DIR/games/pop/poplaunch.c"

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_OPENAL_SOFT_WIN32
+	bool "openal-soft-win32"
+	help
+	  OpenAL Soft's 32-bit Windows DLL (soft_oal.dll, the official
+	  binary release) in /usr/share/game-redist, where the device's
+	  game-install finds the files a game's recipe takes from a PC:
+	  The Book of Unwritten Tales plays its sound through it (as
+	  OpenAL32.dll), so the player need not bring it.
+
+	  https://openal-soft.org/

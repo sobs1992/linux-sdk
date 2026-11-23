@@ -1,0 +1,9 @@
+config BR2_PACKAGE_GAME_FRAME
+	bool "game-frame"
+	depends on BR2_PACKAGE_FFMPEG
+	select BR2_PACKAGE_FFMPEG_SWSCALE
+	help
+	  game-frame VIDEO SECONDS: a frame of a game's video as a PPM,
+	  for covers the device's game-install makes from videos
+	  (games.manifest "cover = VIDEO.bik:SECONDS"): the system's
+	  ffmpeg has no ffmpeg program.

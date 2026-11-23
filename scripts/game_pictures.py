@@ -187,21 +187,26 @@ def _icon(data, what):
 
 
 def _video_frame(path, seconds, what):
-    """the frame of video PATH at SECONDS, by ffmpeg"""
+    """the frame of video PATH at SECONDS, by ffmpeg (on the device, which
+    has ffmpeg's libraries only: by game-frame, the SDK's package)"""
     import io
     import shutil
     import subprocess
     from PIL import Image
 
-    _check(shutil.which("ffmpeg"), "%s: needs ffmpeg (apt install ffmpeg)" % what)
+    ffmpeg, frame = shutil.which("ffmpeg"), shutil.which("game-frame")
+    _check(ffmpeg or frame, "%s: needs ffmpeg (apt install ffmpeg)" % what)
     try:
         t = float(seconds)
     except ValueError:
         raise PictureError("%s: the entry is a time in seconds" % what)
     _check(0 <= t < 86400, "%s: time out of range" % what)
-    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", "%g" % t, "-i", "file:" + path,
-                        "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
-                       capture_output=True, timeout=120)
+    if ffmpeg:
+        cmd = ["ffmpeg", "-v", "error", "-ss", "%g" % t, "-i", "file:" + path,
+               "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]
+    else:
+        cmd = [frame, path, "%g" % t]	# a PPM
+    r = subprocess.run(cmd, capture_output=True, timeout=120)
     _check(r.returncode == 0 and r.stdout,
            "%s: %s" % (what, r.stderr.decode(errors="replace").strip() or "no frame there"))
     im = Image.open(io.BytesIO(r.stdout))

@@ -226,23 +226,120 @@ def excluded(rel, name, excl):
 
 def _move_tree(src, dest, excl, log):
     """the source directory renamed to dest (the same file system: no
-    copy), then what the excludes name deleted from it. Never through a
-    link: renamed, the link would move and the deletions reach the
-    directory it points to (a PC's copy of the game)."""
+    copy); the paths in it the excludes name, which the caller deletes
+    once its cover is made (a cover may be an excluded file: Worms'
+    language_setup.png). Never through a link: renamed, the link would
+    move and the deletions reach the directory it points to (a PC's copy
+    of the game)."""
     if os.path.realpath(src) != os.path.abspath(src):
         raise RecipeError("%s: a symbolic link on its path: not moved" % src)
     os.rename(src, dest)
+    out = []
     for d, dirs, files in os.walk(dest, topdown=True):
         rel = os.path.relpath(d, dest)
         for n in list(dirs) + files:
             p = n if rel == "." else os.path.join(rel, n)
             if excluded(p, n, excl):
-                full = os.path.join(d, n)
-                if os.path.isdir(full) and not os.path.islink(full):
-                    shutil.rmtree(full)
+                out.append(os.path.join(d, n))
+                if n in dirs:
                     dirs.remove(n)
-                else:
-                    os.remove(full)
+    return out
+
+
+def _delete(paths):
+    """files and directories deleted, a link as a link"""
+    for p in paths:
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p)
+        elif os.path.lexists(p):
+            os.remove(p)
+
+
+# VCMI's mods for Heroes III (scripts/homm3-install.sh's MODS): the mod's id
+# (its directory under Mods/), its option to leave it out, its zip (a
+# directory <zip name>/ with mod.json inside), where it comes from
+HOMM3_MODS = (
+    ("hota", "--no-hota", "horn-of-the-abyss-vcmi-1.7.zip",
+     "https://github.com/vcmi-mods/horn-of-the-abyss/releases/download/1.7/horn-of-the-abyss-vcmi-1.7.zip"),
+    ("russian-translation", "--no-rus", "mega-pack-rus-vcmi-1.7.zip",
+     "https://github.com/vcmi-mods/mega-pack-rus/releases/download/1.7/mega-pack-rus-vcmi-1.7.zip"),
+)
+
+
+def _subdir(d, name):
+    """d's directory of that name, any case (MP3, Mp3, mp3), None"""
+    try:
+        return next((os.path.join(d, n) for n in sorted(os.listdir(d))
+                     if n.lower() == name.lower() and os.path.isdir(os.path.join(d, n))), None)
+    except OSError:
+        return None
+
+
+def homm3_mod_zips(g):
+    """the zips of the VCMI mods a homm3 section installs"""
+    opts = g.get("options", "").split()
+    return [z for _, opt, z, _ in HOMM3_MODS if opt not in opts]
+
+
+def _copy_homm3(src, dest, opts, elsewhere, keep, missing):
+    """scripts/homm3-install.sh on the board: Data's archives (not empty,
+    not HotA's), Maps, MP3; each VCMI mod from its zip (elsewhere(), the
+    redist folders), else the one the card had (keep), else said missing"""
+    import zipfile
+    data = _subdir(src, "data")
+    if not data or not any(n.lower() == "h3bitmap.lod" for n in os.listdir(data)):
+        raise RecipeError("%s: no Data/H3bitmap.lod, not a Heroes III installation" % src)
+    os.makedirs(os.path.join(dest, "Data"))
+    for n in sorted(os.listdir(data)):
+        p = os.path.join(data, n)
+        if (os.path.isfile(p) and os.path.getsize(p) > 0 and n.lower().endswith((".lod", ".snd", ".vid"))
+                and not n.lower().startswith("hota")):
+            shutil.copy2(p, os.path.join(dest, "Data", n))
+    for name, to in (("maps", "Maps"), ("mp3", "Mp3")):
+        d = _subdir(src, name)
+        if d:
+            shutil.copytree(d, os.path.join(dest, to))
+    for mod, opt, zname, _ in HOMM3_MODS:
+        if opt in opts:
+            continue
+        target = os.path.join(dest, "Mods", mod)
+        zips = elsewhere(zname) if elsewhere else []
+        if zips:
+            tmp = os.path.join(dest, "Mods", "." + mod)
+            shutil.rmtree(tmp, ignore_errors=True)
+            with zipfile.ZipFile(zips[0]) as z:
+                z.extractall(tmp)
+            inner = os.path.join(tmp, zname[:-4])
+            if not os.path.isfile(os.path.join(inner, "mod.json")):
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise RecipeError("%s: no %s/mod.json inside" % (zips[0], zname[:-4]))
+            os.rename(inner, target)
+            shutil.rmtree(tmp, ignore_errors=True)
+        elif keep and os.path.isdir(os.path.join(keep, mod)):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.rename(os.path.join(keep, mod), target)
+        else:
+            missing(zname)
+    if keep:
+        shutil.rmtree(keep, ignore_errors=True)
+
+
+def _copy_halflife(src, dest):
+    """scripts/halflife-install.sh on the board: valve/ and its translations
+    (valve_<lang>/ with resource/gameui_<lang>.txt), without programs,
+    saved games and the player's config"""
+    if not os.path.isfile(os.path.join(src, "valve", "liblist.gam")):
+        raise RecipeError("%s: no valve/liblist.gam, not a Half-Life installation" % src)
+    dirs = ["valve"] + sorted(n for n in os.listdir(src) if n.startswith("valve_") and
+                              os.path.isfile(os.path.join(src, n, "resource", "gameui_%s.txt" % n[6:])))
+
+    def ignore(d, names):
+        rel = os.path.relpath(d, src)
+        return {n for n in names if n.lower().endswith((".dll", ".so", ".dylib", ".exe")) or
+                (rel == "valve" and n in ("SAVE", "config.cfg"))}
+    os.makedirs(dest)
+    for d in dirs:
+        shutil.copytree(os.path.join(src, d), os.path.join(dest, d), ignore=ignore)
 
 
 def install_game(name, g, games, data, source=None, move=False, strict=True, log=print, step=None,
@@ -278,13 +375,26 @@ def install_game(name, g, games, data, source=None, move=False, strict=True, log
     if src and not os.path.isdir(src):
         raise RecipeError("[%s] source %s: not a directory" % (name, src))
     orig_src = src
+    later = []	# moved: what the excludes name, deleted once the cover is made
+    keep = None	# the board: VCMI's mods of a heroes3 being replaced, kept aside
+    if how == "homm3" and not strict and os.path.isdir(os.path.join(dest, "Mods")):
+        keep = dest + ".mods-kept"
+        shutil.rmtree(keep, ignore_errors=True)
+        os.rename(os.path.join(dest, "Mods"), keep)
     if os.path.islink(dest):
         os.remove(dest)		# the link, not what it points to
     else:
         shutil.rmtree(dest, ignore_errors=True)
-    log("[%s] %s %s -> /games/%s" % (name, "move" if move else how, src or "", gdir))
+    log("[%s] %s %s -> /games/%s" % (name, "move" if move and how == "copy" else how, src or "", gdir))
     step("files")
-    if how in ("homm3", "halflife"):
+    if how in ("homm3", "halflife") and not strict:
+        # the board (no bash, curl): what the PC's scripts copy, done here;
+        # the VCMI mods from the files of the redist folders (elsewhere)
+        if how == "homm3":
+            _copy_homm3(src, dest, g.get("options", "").split(), elsewhere, keep, missing)
+        else:
+            _copy_halflife(src, dest)
+    elif how in ("homm3", "halflife"):
         # the SDK's installers put the game into <games>/heroes3, /halflife
         script = path(os.path.join("scripts", how + "-install.sh"))
         opts = g.get("options", "").split()
@@ -298,7 +408,7 @@ def install_game(name, g, games, data, source=None, move=False, strict=True, log
             raise RecipeError("[%s] needs a source" % name)
         excl = [e for x in g.get("exclude", []) for e in x.split()]
         if move:
-            _move_tree(src, dest, excl, log)
+            later = _move_tree(src, dest, excl, log)
             source = dest	# its files are there now (file, cover lines)
         else:
             def ignore(d, names):
@@ -334,6 +444,7 @@ def install_game(name, g, games, data, source=None, move=False, strict=True, log
             if strict:
                 raise
             missing("cover (%s)" % e)
+    _delete(later)	# before the icon: not one of an excluded uninstaller
     if not strict and not os.path.exists(os.path.join(dest, "cover.png")):
         icon_cover(dest, log)
     if g.get("run"):
@@ -438,4 +549,35 @@ def find_game(top, sections, depth=FIND_DEPTH):
             except OSError:
                 pass
         level = nxt
+    return None
+
+
+def find_in_listing(paths, sections, depth=FIND_DEPTH):
+    """(name, keys, directory) of the game whose files a listing holds (an
+    installer's paths, "/" between parts; directory "" its top, or "app"):
+    the same tests as find_game() on what is not unpacked yet, the
+    shallowest directory first; None"""
+    files = {p.lower(): p for p in paths}
+    dirs = {}
+    for p in paths:
+        parts = p.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            dirs.setdefault("/".join(parts[:i]).lower(), "/".join(parts[:i]))
+
+    def has(pre, f):
+        f = (pre + f).lower()
+        return f in files or f in dirs
+    for d in sorted({""} | set(dirs), key=lambda x: (x.count("/") + bool(x), x)):
+        if d.count("/") + bool(d) > depth:
+            break
+        pre = d + "/" if d else ""
+        ids = {m.group(1) for p in files if p.startswith(pre) and "/" not in p[len(pre):]
+               for m in [re.match(r"goggame-(\d+)\.info$", p[len(pre):])] if m}
+        for name, g in sections:
+            if ids and set(g.get("gog", "").split()) & ids:
+                return name, g, dirs.get(d, "")
+        for name, g in sorted(sections, key=lambda s: -len(detect_files(s[1]))):
+            fs = detect_files(g)
+            if fs and all(has(pre, f) for f in fs):
+                return name, g, dirs.get(d, "")
     return None
