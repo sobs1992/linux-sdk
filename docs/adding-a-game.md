@@ -15,7 +15,10 @@
 - файлы игры — раздел игр (`/games/<id>`, карта exFAT `GAMES` у GO Ultra, см.
   [sd-layout.md](sd-layout.md)); на ПК — `lab/games/<Игра>` (вне git, `games/README.md`);
   `scripts/games-image.py` переносит их по манифесту;
-- сохранения и настройки — `/data/<id>` (у Wine общий префикс `/data/wine/prefix`);
+- сохранения и настройки — `/data/<id>` (у Wine общий префикс `/data/wine/prefix`; если
+  Windows-игра пишет сохранения в профиль — Документы, AppData, — назовите эти каталоги
+  ключом `saves` в её wine.ini: по нему экран опций игры удаляет сохранения, см.
+  `apps/bare_app/docs/GAMES.md`, «Данные игры»);
 - обложка — `cover.png` в каталоге игры (манифест делает её из картинки, значка exe
   или кадра ролика);
 - управление — `[keys]`/`[labels]` ini-файла; имена кнопок одни и те же в `wine.ini`,

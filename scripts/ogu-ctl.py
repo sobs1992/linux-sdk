@@ -18,13 +18,14 @@ USB-C port (S42usbnet: the board is 192.168.7.2; OGU_HOST to change it).
   ogu-ctl.py launch:monkey2       bare_app starts a game (its directory's name, its
                                   title or key), without going through the menu
   ogu-ctl.py quit-game            bare_app ends the game (in front or minimised)
+  ogu-ctl.py options:monkey2      bare_app opens the game's options (as Y on its tile)
   ogu-ctl.py wfmove:400,240 wclick
                                   a Windows game's cursor to a pixel of the screenshot
                                   (shot:), a left click there; wmove:X,Y a point of the
                                   Windows screen, wclick:right, wkey:NAME a key of
                                   wine.ini's [keys] names (esc, enter, f10, ctrl+s)
 
-Steps run in order, in one go on the board. launch, quit-game and the w steps
+Steps run in order, in one go on the board. launch, quit-game, options and the w steps
 are lines for the FIFOs of bare_app (/tmp/bare_app.ctl) and bare_app_wine
 (/tmp/bare_app_wine.ctl, while a Windows game runs). Button presses are written into
 the gpio-keys evdev device, so bare_app and the game get them like real
@@ -130,6 +131,8 @@ def run(steps):
             script.append(ctl(APP_CTL, "launch " + arg))
         elif name == "quit-game":
             script.append(ctl(APP_CTL, "quit-game"))
+        elif name == "options" and arg:
+            script.append(ctl(APP_CTL, "options " + arg))
         elif name in ("wmove", "wfmove") and len(arg.split(",")) == 2:
             x, y = (int(v) for v in arg.split(","))
             script.append(ctl(WINE_CTL, "%s %d %d" % (name[1:], x, y)) + "; sleep 0.1")
