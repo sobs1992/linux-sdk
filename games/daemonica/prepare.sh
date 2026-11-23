@@ -10,4 +10,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 : "${GAME_DIR:?}" "${SOURCE:?}"
 sed -i 's/^ video_mode: .*/ video_mode: 7/' "$GAME_DIR/Data/daemonica.cfg"
 grep -q '^ video_mode: 7$' "$GAME_DIR/Data/daemonica.cfg"
-python3 -B "$here/daemonica_dialog.py" "$SOURCE/daemonica.wrs" "$GAME_DIR/daemonica.wrs"
+# the original: the PC's copy, or the game's own, not changed yet (the
+# board's game-install moved the game into place: $SOURCE is gone)
+in=$SOURCE/daemonica.wrs
+[ -f "$in" ] || in=$GAME_DIR/daemonica.wrs
+python3 -B "$here/daemonica_dialog.py" "$in" "$GAME_DIR/daemonica.wrs"

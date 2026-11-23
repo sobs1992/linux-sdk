@@ -19,10 +19,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 sdk=${SDK_DIR:-$(cd "$here/../.." && pwd)}
 cc=$sdk/output/ogu/buildroot/host/llvm-mingw/bin/i686-w64-mingw32-clang
 
-[ -x "$cc" ] || { echo "prepare.sh: no $cc (make FW=ogu first)" >&2; exit 1; }
 [ -f "$GAME_DIR/POP.EXE" ] || { echo "prepare.sh: no $GAME_DIR/POP.EXE" >&2; exit 1; }
-
-"$cc" -O2 -Wall -mwindows -s -o "$GAME_DIR/poplaunch.exe" "$here/poplaunch.c"
+if [ -f "$here/poplaunch.exe" ]; then
+	# the board's recipes: built with the firmware (board/ogu/buildroot/post-build.sh)
+	cp "$here/poplaunch.exe" "$GAME_DIR/poplaunch.exe"
+else
+	[ -x "$cc" ] || { echo "prepare.sh: no $cc (make FW=ogu first)" >&2; exit 1; }
+	"$cc" -O2 -Wall -mwindows -s -o "$GAME_DIR/poplaunch.exe" "$here/poplaunch.c"
+fi
 
 [ -n "${POP_RUS:-}" ] || exit 0
 [ -f "$POP_RUS" ] || { echo "prepare.sh: no $POP_RUS" >&2; exit 1; }

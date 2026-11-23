@@ -21,3 +21,26 @@ if [ -d "$1/var/lib/bluetooth" ] && [ ! -L "$1/var/lib/bluetooth" ]; then
 fi
 mkdir -p "$1/var/lib"
 ln -sfn /data/bluetooth "$1/var/lib/bluetooth"
+
+# Games installed on the board (/usr/bin/game-install, bare_app's install
+# screen): the recipes as the SDK has them, at the same paths under
+# /usr/share/game-recipes (games/games.manifest and the games' directories,
+# scripts/gamerecipe.py and game_pictures.py, what a recipe takes from the
+# SDK: Pirates!'s wine.ini), done by the same code as games-image.py on
+# the PC. Prince of Persia's poplaunch.exe is built here (its prepare.sh
+# would build it with llvm-mingw, which the board has not).
+SDK_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+R="$1/usr/share/game-recipes"
+rm -rf "$R"
+mkdir -p "$R/scripts" "$R/apps/bare_app/ports/wine"
+cp -r "$SDK_DIR/games" "$R/"
+find "$R" -name __pycache__ -prune -exec rm -rf {} +
+cp "$SDK_DIR/scripts/gamerecipe.py" "$SDK_DIR/scripts/game_pictures.py" "$R/scripts/"
+cp "$SDK_DIR/apps/bare_app/ports/wine/wine.ini" "$R/apps/bare_app/ports/wine/"
+install -m 0755 "$SDK_DIR/scripts/game-install" "$1/usr/bin/game-install"
+cc=$HOST_DIR/llvm-mingw/bin/i686-w64-mingw32-clang
+if [ -x "$cc" ]; then
+	"$cc" -O2 -Wall -mwindows -s -o "$R/games/pop/poplaunch.exe" "$SDK_DIR/games/pop/poplaunch.c"
+else
+	echo "post-build: no $cc: Prince of Persia installs without poplaunch.exe on the board" >&2
+fi

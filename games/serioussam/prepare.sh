@@ -24,4 +24,6 @@ menu=$(dir_ci "$GAME_DIR/Scripts" Menu)
 tables=$(dir_ci "$(dir_ci "$GAME_DIR" Data)" Translations)
 mkdir -p "$menu" "$tables"
 sed 's/$/\r/' "$here/SPOptions.cfg" > "$menu/SPOptions.cfg"
-iconv -f UTF-8 -t CP1251 "$here/translation.txt" | sed 's/$/\r/' > "$tables/sdk.txt"
+# CP1251 with CRLF (python3: the board has no iconv)
+python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1], encoding="utf-8").read().replace("\n", "\r\n").encode("cp1251"))' \
+	"$here/translation.txt" > "$tables/sdk.txt"

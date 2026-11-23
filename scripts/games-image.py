@@ -33,7 +33,8 @@ so the first boot finds and keeps them:
       big as the games plus games_free_mb (or games_size_mb)
 
 The manifest is an ini file: [image] for the whole image, then a [section]
-per game (see games/games.manifest for every key). Games are put together
+per game (see games/games.manifest for every key); what a section says is
+done by scripts/gamerecipe.py, which the board's game-install uses too. Games are put together
 in <work>/games and <work>/data first (on a disk with room: lab/images),
 then made into the partitions with mke2fs -d and mtools: no root, no loop
 devices. --reuse keeps what is already in <work> for games not named by
@@ -43,8 +44,6 @@ Writing an image: make FW=<fw> flash IMAGE_FILE=<image> DEV=/dev/sdX, or for
 the eMMC (Vol+ at power-on) make FW=<fw> flash-emmc IMAGE_EMMC_FILE=<image>.
 """
 import argparse
-import fnmatch
-import glob
 import json
 import os
 import re
@@ -52,9 +51,11 @@ import shutil
 import subprocess
 import sys
 
+import gamerecipe
+from gamerecipe import RecipeError
+
 SDK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COVER = 240		# px: the home screen's tile on the GO Ultra
-MULTI = ("exclude", "file", "data", "env")	# keys that may come more than once
+gamerecipe.ROOT = SDK
 
 
 def die(msg):
@@ -68,35 +69,6 @@ def log(msg):
 def sdk_path(p):
     p = os.path.expanduser(p)
     return p if os.path.isabs(p) else os.path.join(SDK, p)
-
-
-def read_manifest(path):
-    """[(section, {key: value or [values]})] in file order; ${key} in a
-    value is that key of [image], set above it (a path many games share)"""
-    sections, cur, image = [], None, {}
-
-    def var(m):
-        if m.group(1) not in image:
-            die("%s:%d: ${%s}: no %s in [image] above" % (path, n, m.group(1), m.group(1)))
-        return image[m.group(1)]
-    for n, line in enumerate(open(path, encoding="utf-8"), 1):
-        s = re.sub(r"(^|\s)[;#].*$", "", line).strip()
-        if not s:
-            continue
-        m = re.fullmatch(r"\[([^\]]+)\]", s)
-        if m:
-            cur = image if m.group(1).strip() == "image" else {}
-            sections.append((m.group(1).strip(), cur))
-            continue
-        if "=" not in s or cur is None:
-            die("%s:%d: %s?" % (path, n, s))
-        k, v = (x.strip() for x in s.split("=", 1))
-        v = re.sub(r"\$\{(\w+)\}", var, v)
-        if k in MULTI:
-            cur.setdefault(k, []).append(v)
-        else:
-            cur[k] = v
-    return sections
 
 
 def fw_value(fw, name):
@@ -113,169 +85,6 @@ def run(cmd, **kw):
     if r.returncode:
         die("failed: %s" % " ".join(cmd))
     return r
-
-
-def arrow(spec):
-    """"SRC -> DST" or "SRC": (SRC, DST or None)"""
-    if "->" in spec:
-        a, b = spec.split("->", 1)
-        return a.strip(), b.strip()
-    return spec.strip(), None
-
-
-def copy_into(src, dst):
-    """a file into a directory (dst ends in /) or to a path"""
-    if dst.endswith("/") or os.path.isdir(dst):
-        os.makedirs(dst, exist_ok=True)
-        dst = os.path.join(dst, os.path.basename(src))
-    else:
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.isdir(src):
-        shutil.copytree(src, dst, dirs_exist_ok=True)
-    else:
-        shutil.copy2(src, dst)
-
-
-def sources(spec):
-    """files of a glob, SDK-relative unless absolute; at least one"""
-    found = sorted(glob.glob(sdk_path(spec)))
-    if not found:
-        die("%s: not found" % spec)
-    return found
-
-
-def load_picture(spec, alpha=False):
-    """a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py)"""
-    from PIL import Image
-    m = re.match(r"^(.+\.(?:lod|wad|exe|dll|bik)):([^/:]+)$", spec, re.I)
-    try:
-        if m:
-            import game_pictures
-            im = game_pictures.picture(sdk_path(m.group(1)), m.group(2))
-        else:
-            im = Image.open(sdk_path(spec))
-        return im.convert("RGBA" if alpha else "RGB")
-    except Exception as e:
-        die("cover %s: %s" % (spec, e))
-
-
-def make_cover(spec, dst, crop, back_spec=None):
-    """spec: a picture file, or ARCHIVE:ENTRY of a game (game_pictures.py);
-    crop: center, top, bottom, left, right, "X Y SIZE" in its pixels, or fit
-    (all of it, on a blurred, darker copy of itself). With back_spec (a
-    picture likewise) the picture, transparent around (an icon), is put
-    whole on that one blurred and darker, with a shadow."""
-    try:
-        from PIL import Image, ImageEnhance, ImageFilter
-    except ImportError:
-        die("covers need Python's PIL (apt install python3-pil)")
-    if back_spec:
-        back = load_picture(back_spec)
-        w, h = back.size
-        s = min(w, h)
-        back = back.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))
-        back = back.resize((COVER, COVER), Image.LANCZOS).filter(ImageFilter.GaussianBlur(6))
-        back = ImageEnhance.Brightness(back).enhance(0.5).convert("RGBA")
-        fg = load_picture(spec, alpha=True)
-        k = COVER * 0.8 / max(fg.size)
-        fg = fg.resize((round(fg.width * k), round(fg.height * k)), Image.LANCZOS)
-        shadow = Image.new("RGBA", fg.size, (0, 0, 0, 0))
-        shadow.putalpha(fg.getchannel("A").point(lambda a: a * 7 // 10))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(6))
-        x, y = (COVER - fg.width) // 2, (COVER - fg.height) // 2
-        back.alpha_composite(shadow, (x + 4, y + 6))
-        back.alpha_composite(fg, (x, y))
-        back.convert("RGB").save(dst, optimize=True)
-        return
-    im = load_picture(spec)
-    w, h = im.size
-    if crop == "fit":
-        k = COVER / max(w, h)
-        s = min(w, h)
-        back = im.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))
-        back = back.resize((COVER, COVER), Image.LANCZOS).filter(ImageFilter.GaussianBlur(12))
-        back = ImageEnhance.Brightness(back).enhance(0.45)
-        fg = im.resize((round(w * k), round(h * k)), Image.LANCZOS)
-        back.paste(fg, ((COVER - fg.width) // 2, (COVER - fg.height) // 2))
-        back.save(dst, optimize=True)
-        return
-    nums = crop.split()
-    if len(nums) == 3 and all(n.isdigit() for n in nums):
-        x, y, s = map(int, nums)
-        if x + s > w or y + s > h:
-            die("cover_crop %s: outside the %dx%d picture" % (crop, w, h))
-    else:
-        s = min(w, h)
-        x = {"left": 0, "right": w - s}.get(crop, (w - s) // 2)
-        y = {"top": 0, "bottom": h - s}.get(crop, (h - s) // 2)
-    im = im.crop((x, y, x + s, y + s)).resize((COVER, COVER), Image.LANCZOS)
-    im.save(dst, optimize=True)
-
-
-def install_game(name, g, games, data):
-    gdir = g.get("dir", name)
-    dest = os.path.join(games, gdir)
-    how = g.get("install", "copy")
-    src = g.get("source") and sdk_path(g["source"])
-    if src and not os.path.isdir(src):
-        die("[%s] source %s: not a directory" % (name, src))
-    shutil.rmtree(dest, ignore_errors=True)
-    log("[%s] %s %s -> /games/%s" % (name, how, src or "", gdir))
-    if how in ("homm3", "halflife"):
-        # the SDK's installers put the game into <games>/heroes3, /halflife
-        script = os.path.join(SDK, "scripts", how + "-install.sh")
-        opts = g.get("options", "").split()
-        run([script] + opts + [src, games])
-        want = {"homm3": "heroes3", "halflife": "halflife"}[how]
-        if gdir != want:
-            os.replace(os.path.join(games, want), dest)
-    elif how == "copy":
-        if not src:
-            die("[%s] needs a source" % name)
-        excl = [e for x in g.get("exclude", []) for e in x.split()]
-
-        def ignore(d, names):
-            rel = os.path.relpath(d, src)
-            out = set()
-            for n in names:
-                p = n if rel == "." else os.path.join(rel, n)
-                if any(fnmatch.fnmatch(p, e) or fnmatch.fnmatch(n, e) for e in excl):
-                    out.add(n)
-            return out
-        shutil.copytree(src, dest, ignore=ignore, symlinks=False)
-    elif how == "none":
-        os.makedirs(dest, exist_ok=True)
-    else:
-        die("[%s] install = %s? (copy, homm3, halflife, none)" % (name, how))
-    for spec in g.get("file", []):
-        s, d = arrow(spec)
-        for f in sources(s):
-            copy_into(f, os.path.join(dest, d) if d else dest + "/")
-    if g.get("overlay"):
-        o = sdk_path(g["overlay"])
-        if not os.path.isdir(o):
-            die("[%s] overlay %s: not a directory" % (name, o))
-        shutil.copytree(o, dest, dirs_exist_ok=True)
-    if g.get("cover"):
-        def in_game(spec):
-            """game:PATH, a file of the game as installed"""
-            return os.path.join(dest, spec[5:]) if spec and spec.startswith("game:") else spec
-        make_cover(in_game(g["cover"]), os.path.join(dest, "cover.png"), g.get("cover_crop", "center"),
-                   in_game(g.get("cover_back")))
-    if g.get("run"):
-        env = dict(os.environ, GAME_DIR=dest, SOURCE=src or "", SDK_DIR=SDK, DATA_DIR=data)
-        for spec in g.get("env", []):
-            k, eq, v = spec.partition("=")
-            if not eq or not re.fullmatch(r"[A-Za-z_]\w*", k.strip()):
-                die("[%s] env = %s: NAME=VALUE?" % (name, spec))
-            env[k.strip()] = v.strip()
-        run([sdk_path(g["run"])], env=env, cwd=SDK)
-    for spec in g.get("data", []):
-        s, d = arrow(spec)
-        if not d:
-            die("[%s] data = %s: needs \"-> path on /data\"" % (name, spec))
-        for f in sources(s):
-            copy_into(f, os.path.join(data, d.lstrip("/")))
 
 
 def du_bytes(top, cluster):
@@ -413,7 +222,10 @@ def main():
     ap.add_argument("--reuse", action="store_true", help="keep the games already in <work>")
     a = ap.parse_args()
 
-    sections = read_manifest(a.manifest)
+    try:
+        sections = gamerecipe.read_manifest(a.manifest)
+    except RecipeError as e:
+        die(str(e))
     image = dict(next((s for n, s in sections if n == "image"), {}))
     games_sec = [(n, s) for n, s in sections if n != "image"]
     fw = image.get("fw", "ogu")
@@ -446,7 +258,10 @@ def main():
         if a.reuse and not pick and os.path.isdir(os.path.join(games, g.get("dir", name))):
             log("[%s] kept from %s" % (name, work))
             continue
-        install_game(name, g, games, data)
+        try:
+            gamerecipe.install_game(name, g, games, data, log=log)
+        except (RecipeError, OSError) as e:
+            die(str(e))
 
     if a.card:
         fill_card(games, [g.get("dir", n) for n, g in games_sec if not pick or n in pick],
