@@ -106,7 +106,7 @@ tools/ppm2png.py /tmp/s.ppm /tmp/s.png
 |---|---|
 | игры нет в меню | ini не там, нет `exe`; журнал: `native: …: no exe` |
 | «Не найдено: путь» | `needs`/`missing()` |
-| стартует и закрывается | `/var/log/bare_app.log` — туда идёт stdout/stderr игры и Wine |
+| стартует и закрывается | `/data/logs/<игра>/1.log` — stdout/stderr игры и Wine, код выхода, сообщения ядра |
 | чёрный экран, «Загрузка…» | другой видеодрайвер; `SDL_LOGGING = video=debug` |
 | рывки | монитор F5 (удерживать): график времени кадра, CPU по кластерам, диск; `BARE_APP_FRAME_STATS=1` в лог |
 | Wine | `WINEBARE_FPS=1` — fps и стопы; `WINEDEBUG` как обычно |
