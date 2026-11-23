@@ -29,6 +29,16 @@
 # as it is. A p3 that ends before the end of the disk with nothing after
 # it (that p4 deleted) is grown to the end, its file system with it.
 #
+# A/B system slots (a third value in /etc/data-partition, the slot's size
+# in sectors; scripts/mkimage.sh IMAGE_AB_SLOT_MB, /usr/sbin/ab-state):
+# slot a is p2, slot b p4 at the end of the disk, p3 between them (its size
+# "-": up to slot b). p2 is grown to the data start when it ends before it
+# (the image's rootfs is smaller than its slot), online with its file
+# system if it is the root; p4 is added once, never formatted (an update
+# writes it: /usr/sbin/system-update). A p3 of an older layout that takes
+# the end of the disk is kept: no p4 then (scripts/ab-migrate.sh makes
+# room for it). No "GAMES" p4 with slots.
+#
 # /games is read-only, so switching the board off never leaves the FAT
 # dirty; "games-mount rw" to write there from the board ("games-mount ro"
 # after).
@@ -107,7 +117,7 @@ after_p3() {
 # no size: the old p4 of a layout with a size, found after the p3 that
 # fs_at gave the size of "data", gets its partition again
 old_games() {
-	[ -z "$data_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
+	[ -z "$data_size" ] && [ -z "$slot_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
 	start=$(after_p3)
 	found=$(fs_at "$start" "$GAMES_FS" GAMES) || return 0
 	log "a \"GAMES\" file system after $p3: its partition back"
@@ -118,7 +128,7 @@ old_games() {
 # p3 to the end of the disk when it may take the rest (no size, no p4,
 # no file system after it: a deleted p4 must be wiped first)
 grow_part() {
-	[ -z "$data_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
+	[ -z "$data_size" ] && [ -z "$slot_size" ] && [ ! -e "/sys/class/block/$p4" ] || return 0
 	[ $((disk_size - $(part_end "$p3"))) -ge 2048 ] || return 0	# 1 MiB
 	if blkid -p -O $(($(after_p3) * 512)) "/dev/$disk" > /dev/null 2>&1; then
 		log "a file system after $p3: not growing it"
@@ -149,12 +159,13 @@ data() {
 			log "rootfs ends at sector $(part_end "$p2"), past the data start $data_start"
 			return 1
 		fi
-		if [ $(( ${games_start:-$disk_size} - data_start )) -lt $MIN_SECTORS ] ||
+		if [ $(( ${games_start:-${data_end:-$disk_size}} - data_start )) -lt $MIN_SECTORS ] ||
 		   [ "${games_start:-0}" -gt "$disk_size" ]; then
 			log "no room for a data partition on $disk"
 			return 1
 		fi
 		size=$data_size
+		[ -n "$size" ] || [ -z "$data_end" ] || size=$((data_end - data_start))
 		if [ -z "$size" ] && found=$(fs_at "$data_start" ext4 data) &&
 		   [ $((data_start + ${found#* })) -le "$disk_size" ]; then
 			# a "data" there: its own size (what is after it is kept)
@@ -204,6 +215,32 @@ games() {
 	fi
 }
 
+# A/B slots: p2 (slot a) up to the data start, p4 (slot b) at the end
+slots() {
+	end_p2=$(part_end "$p2")
+	if [ "$end_p2" -lt "$data_start" ] &&
+	   ! blkid -p -O $((end_p2 * 512)) "/dev/$disk" > /dev/null 2>&1; then
+		log "growing $p2 (slot a) up to the data start"
+		echo "start=$(cat "/sys/class/block/$p2/start"), size=$((data_start - $(cat "/sys/class/block/$p2/start")))" |
+			sfdisk -q -N 2 --no-reread --no-tell-kernel "/dev/$disk" &&
+			partx -u -n 2 "/dev/$disk" || log "cannot grow $p2"
+	fi
+	# the root file system to its partition, online, in the background
+	if [ "$(mountpoint -d /)" = "$(cat "/sys/class/block/$p2/dev")" ]; then
+		fs=$(blkid -p -o value -s FSSIZE "/dev/$p2" 2>/dev/null)
+		if [ -n "$fs" ] && [ $((fs / 512 + 2048)) -le "$(cat "/sys/class/block/$p2/size")" ]; then
+			log "growing the root file system to the size of $p2"
+			( nice resize2fs "/dev/$p2" > /dev/null 2>&1 || log "cannot grow the root file system" ) &
+		fi
+	fi
+	[ -e "/sys/class/block/$p4" ] && return 0
+	if [ ! -e "/sys/class/block/$p3" ] || [ "$(part_end "$p3")" -gt "$data_end" ]; then
+		log "no room for slot b after $p3: system updates need it (scripts/ab-migrate.sh)"
+		return 0
+	fi
+	add_part 4 "$data_end" "$slot_size" 83
+}
+
 # the FAT or exFAT "GAMES" partition of an SD card that is not the boot disk
 card_games() {
 	for b in /sys/block/mmcblk*; do
@@ -225,16 +262,25 @@ start() {
 	disk=$(root_disk) || { log "cannot find the root disk"; return 1; }
 	main=
 	if [ -f "$CONF" ]; then
-		read -r data_start data_size < "$CONF"
+		read -r data_start data_size slot_size < "$CONF"
+		[ "$data_size" != - ] || data_size=
 		games_start=${data_size:+$((data_start + data_size))}
 		disk_size=$(cat "/sys/block/$disk/size")
+		# A/B: slot b at the end, on a MiB boundary
+		data_end=
+		[ -z "$slot_size" ] || data_end=$(( (disk_size - slot_size) / 2048 * 2048 ))
+		[ -z "$slot_size" ] || games_start=
 		p2=$(part_name "$disk" 2)
 		p3=$(part_name "$disk" 3)
 		p4=$(part_name "$disk" 4)
 
-		if data && [ -n "$games_start" ] && games; then
+		data_ok=
+		data && data_ok=1
+		if [ -n "$data_ok" ] && [ -n "$slot_size" ]; then
+			slots
+		elif [ -n "$data_ok" ] && [ -n "$games_start" ] && games; then
 			main=/dev/$p4
-		elif [ -z "$data_size" ] && [ -e "/sys/class/block/$p4" ] &&
+		elif [ -z "$data_size" ] && [ -z "$slot_size" ] && [ -e "/sys/class/block/$p4" ] &&
 		     is_fs "$p4" "$GAMES_FS" GAMES; then
 			# older layout: kept until p4 is deleted (p3 grows then)
 			log "$p4: games of an older layout, kept"

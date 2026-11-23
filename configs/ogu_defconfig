@@ -81,8 +81,9 @@ APPS_CONFIG    := bare-app.DEFCONFIG=ogu_defconfig bare-app.DOOM_WAD=y \
                   bare-app.SERIOUSSAM=y bare-app.BLUETOOTH=y
 
 # --- SD card image ---
-# Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.ini,
-#          u-boot.bin, Image, dtbs, extlinux][p2 ext4 rootfs]
+# Layout: [MBR + FIP boot code][FIP @512][p1 FAT32 BOOT @16M: boot.scr,
+#          boot.ini, u-boot.bin, Image, dtbs, extlinux/fallback.conf]
+#          [p2 ext4 system, slot a][p3 ext4 data][p4 system, slot b]
 IMAGE_RAW      := $(IMAGES_DIR)/u-boot-fip.bin@1
 IMAGE_MBR_CODE := $(IMAGES_DIR)/u-boot-fip-mbr.bin
 IMAGE_BOOT_FILES := $(IMAGES_DIR)/u-boot.bin $(BOARD_DIR)/boot/boot.ini
@@ -97,6 +98,14 @@ IMAGE_BOOT_SIZE_MB   := 128
 # fills one). A p3 that ends early, from the layout with a FAT32 p4 at
 # 5120 MiB, grows to the end once that p4 is deleted.
 IMAGE_DATA_START_MB := 2192
+# A/B system slots (docs/boards/ogu.md, "Обновление системы"): p2 (slot a,
+# from 144 MiB up to the data start: 2048 MiB) and p4 (slot b, the last
+# 2048 MiB of the disk, added on the first boot), each a whole system with
+# its kernel in /boot; boot.scr on BOOT picks one, an update
+# (/usr/sbin/system-update, "make update") goes into the one not running.
+# Slot b leaves p3 the disk up to it.
+IMAGE_AB_SLOT_MB := 2048
+IMAGE_BOOT_SCRIPT := $(BOARD_DIR)/boot/boot.cmd
 # MBR disk identifier; root= is passed as PARTUUID=<id>-02
 IMAGE_DISK_ID := 0x4f475531
 

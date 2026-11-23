@@ -52,8 +52,9 @@ first_block() {
 setup_cmdline() {
 	part=$1 offset=$2
 	[ -f "$EXTLINUX" ] || { log "no $EXTLINUX"; return 1; }
-	# the BOOT partition of the disk the system runs from, not another one
-	[ "$(disk_of "$(findmnt -n -o SOURCE /boot)")" = "$(disk_of "$(findmnt -n -o SOURCE /)")" ] ||
+	# on the disk the system runs from, not another one (/boot is the A/B
+	# slot's own directory, or the BOOT partition of an older layout)
+	[ "$(disk_of "$(findmnt -n -o SOURCE -T /boot)")" = "$(disk_of "$(findmnt -n -o SOURCE /)")" ] ||
 		{ log "/boot is not on the root disk"; return 1; }
 	want="resume=PARTUUID=$part resume_offset=$offset resumewait"
 	grep -q "^[[:space:]]*append .* $want\$" "$EXTLINUX" && return 0

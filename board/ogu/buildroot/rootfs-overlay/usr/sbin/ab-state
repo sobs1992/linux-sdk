@@ -1,0 +1,118 @@
+#!/bin/sh
+# ab-state: the A/B system slots of the boot disk (docs/boards/ogu.md,
+# "Обновление системы"). Slot a is p2, slot b p4; U-Boot's boot.scr
+# (board/ogu/boot/boot.cmd) picks one by one sector of the disk,
+# STATE_SECTOR, "name=value" lines:
+#   ab_slot    the slot that booted to its end last (a, b)
+#   ab_try     a slot to boot instead, none: none
+#   ab_left    boots of ab_try left (boot.scr counts them down)
+#   ab_failed  the slot given up on last, none: none
+#
+#   ab-state                  all of it, and "running=" the slot running now
+#   ab-state running          the slot running now (a, b; "" not a slot)
+#   ab-state other            the partition of the other slot (/dev/mmcblk1p4)
+#   ab-state try SLOT         boot SLOT from the next start, 3 times at most
+#   ab-state commit           the running slot is the one to boot (S99ab); a
+#                             try of the other slot waits on
+#   ab-state forget-failed    ab_failed=none (the player was told)
+#   ab-state version SLOT     the version of SLOT's system ("<built> <SDK
+#                             commit>" of its /etc/sdk-release), "" none
+STATE_SECTOR=32512	# 0x7f00 in boot.cmd: between the FIP and p1
+TRIES=3
+
+die() { echo "ab-state: $*" >&2; exit 1; }
+
+# the disk of / and the number of its partition
+root_part() {
+	p=$(readlink -f "/sys/dev/block/$(mountpoint -d /)") || return 1
+	echo "$(basename "$(dirname "$p")") $(cat "$p/partition")"
+}
+read -r disk part <<EOF
+$(root_part)
+EOF
+[ -n "$disk" ] || die "cannot find the root disk"
+case $disk in *[0-9]) pfx=${disk}p ;; *) pfx=$disk ;; esac
+
+running() {
+	case $part in 2) echo a ;; 4) echo b ;; *) echo "" ;; esac
+}
+
+load() {
+	ab_slot=a ab_try=none ab_left=0 ab_failed=none
+	eval "$(dd if="/dev/$disk" bs=512 skip=$STATE_SECTOR count=1 2>/dev/null | tr -d '\0' |
+		sed -n 's/^\(ab_slot\|ab_try\|ab_left\|ab_failed\)=\([a-z0-9]*\)$/\1=\2/p')"
+	case $ab_slot in a|b) ;; *) ab_slot=a ;; esac
+	case $ab_try in a|b) ;; *) ab_try=none ;; esac
+	case $ab_failed in a|b) ;; *) ab_failed=none ;; esac
+}
+
+save() {
+	printf 'ab_slot=%s\nab_try=%s\nab_left=%s\nab_failed=%s\n' \
+		"$ab_slot" "$ab_try" "$ab_left" "$ab_failed" |
+		dd of="/dev/$disk" bs=512 seek=$STATE_SECTOR count=1 conv=sync,notrunc,fsync 2>/dev/null ||
+		die "cannot write the state to /dev/$disk"
+}
+
+load
+case $1 in
+"")
+	echo "running=$(running)"
+	echo "ab_slot=$ab_slot"
+	echo "ab_try=$ab_try"
+	echo "ab_left=$ab_left"
+	echo "ab_failed=$ab_failed"
+	;;
+running)
+	running
+	;;
+other)
+	case $(running) in
+	a) echo "/dev/${pfx}4" ;;
+	b) echo "/dev/${pfx}2" ;;
+	*) die "not running from a slot (root is partition $part)" ;;
+	esac
+	;;
+try)
+	case $2 in a|b) ;; *) die "try a or b" ;; esac
+	ab_try=$2 ab_left=$TRIES
+	save
+	;;
+commit)
+	now=$(running)
+	[ -n "$now" ] || die "not running from a slot (root is partition $part)"
+	[ "$ab_slot" = "$now" ] && [ "$ab_try" = none ] && exit 0
+	# a try of the other slot waits for the next start (an update made
+	# just now): left as it is
+	if [ "$ab_try" != none ] && [ "$ab_try" != "$now" ]; then
+		[ "$ab_slot" = "$now" ] && exit 0
+		ab_slot=$now
+	else
+		ab_slot=$now ab_try=none ab_left=0
+	fi
+	save
+	logger -t ab "slot $now committed" 2>/dev/null
+	;;
+forget-failed)
+	[ "$ab_failed" = none ] && exit 0
+	ab_failed=none
+	save
+	;;
+version)
+	case $2 in a) n=2 ;; b) n=4 ;; *) die "version a or b" ;; esac
+	if [ "$2" = "$(running)" ]; then
+		f=/etc/sdk-release
+	else
+		dir=/run/ab-version
+		mkdir -p "$dir"
+		mount -t ext4 -o ro "/dev/$pfx$n" "$dir" 2>/dev/null || exit 0
+		trap 'umount "$dir"; rmdir "$dir"' EXIT
+		[ -f "$dir/boot/extlinux/extlinux.conf" ] || exit 0	# no system there
+		f=$dir/etc/sdk-release
+	fi
+	[ -f "$f" ] || { echo unknown; exit 0; }
+	echo "$(sed -n 's/^BUILT=//p' "$f") $(sed -n 's/^SDK=//p' "$f")"
+	;;
+*)
+	die "usage: ab-state [running | other | try a|b | commit | forget-failed | version a|b]"
+	;;
+esac

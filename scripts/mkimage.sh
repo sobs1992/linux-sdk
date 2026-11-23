@@ -14,6 +14,18 @@
 #                   only records "start size" of p3 in sectors in
 #                   /etc/data-partition and must end before p3
 #
+# A/B system slots (AB_SLOT_MB, the slot's size): the kernel, its dtbs and
+# /boot/extlinux/extlinux.conf go into the rootfs (slot a, p2: S05data
+# grows it to DATA_START_MB and adds slot b at the end of the disk, its
+# third value in /etc/data-partition), BOOT gets BOOT_SCRIPT made into
+# boot.scr (U-Boot's mkimage, MKIMAGE) that picks the slot, and keeps a
+# kernel of its own for when no slot boots (extlinux/fallback.conf: not
+# extlinux.conf, which U-Boot would boot first); /boot is the slot's
+# directory, BOOT is mounted on /mnt/boot only by hand (fstab noauto).
+# UPDATE_DIR: a system update of the same files there too,
+# <firmware>-<built>-<SDK commit>.upd (/usr/sbin/system-update); OUT_IMG
+# "-": only that.
+#
 # DTB_LAYOUT picks where the dtbs land in BOOT, matching how U-Boot builds
 # ${fdtfile} for extlinux "fdtdir /": "tree" keeps the vendor dirs
 # (rockchip/foo.dtb), "flat" puts them in the root, "both" does both.
@@ -30,6 +42,10 @@ BOOT_FILES=${BOOT_FILES:-}
 DTB_LAYOUT=${DTB_LAYOUT:-tree}
 DATA_START_MB=${DATA_START_MB:-}
 DATA_SIZE_MB=${DATA_SIZE_MB:-}
+AB_SLOT_MB=${AB_SLOT_MB:-}
+BOOT_SCRIPT=${BOOT_SCRIPT:-}
+MKIMAGE=${MKIMAGE:-mkimage}
+UPDATE_DIR=${UPDATE_DIR:-}
 
 P1_START=32768	# 16 MiB, in 512-byte sectors
 
@@ -44,9 +60,14 @@ need mcopy mtools
 need mke2fs e2fsprogs
 need fakeroot fakeroot
 
-for f in "$KERNEL" "$ROOTFS_TAR" ${MBR_CODE:+"$MBR_CODE"}; do
+for f in "$KERNEL" "$ROOTFS_TAR" ${MBR_CODE:+"$MBR_CODE"} ${BOOT_SCRIPT:+"$BOOT_SCRIPT"}; do
 	[ -e "$f" ] || die "missing $f: build the component first"
 done
+if [ -n "$AB_SLOT_MB" ]; then
+	[ -n "$DATA_START_MB" ] && [ -n "$BOOT_SCRIPT" ] || die "AB_SLOT_MB needs DATA_START_MB and BOOT_SCRIPT"
+	[ -z "$DATA_SIZE_MB" ] || die "AB_SLOT_MB: slot b takes the end of the disk, no DATA_SIZE_MB"
+	command -v "$MKIMAGE" >/dev/null || die "'$MKIMAGE' not found (U-Boot's tools/mkimage)"
+fi
 
 # --- raw blobs: sorted by sector, must not overlap each other or p1 ---
 raw_sorted=$(for r in $RAW; do echo "${r##*@} ${r%@*}"; done | sort -n)
@@ -85,7 +106,14 @@ done
 
 disk_id=$(printf '%08x' $(( DISK_ID )))
 # U-Boot sets ${fdtfile} from the board model; fdtdir prepends the path.
-cat > "$BOOT_DIR/extlinux/extlinux.conf" <<EOT
+# A/B: BOOT's kernel only when no slot boots, boot.scr picks the slot
+conf=extlinux.conf
+if [ -n "$AB_SLOT_MB" ]; then
+	conf=fallback.conf
+	"$MKIMAGE" -A arm64 -O linux -T script -C none -n "A/B slots" -d "$BOOT_SCRIPT" \
+		"$BOOT_DIR/boot.scr" > /dev/null || die "cannot make boot.scr of $BOOT_SCRIPT"
+fi
+cat > "$BOOT_DIR/extlinux/$conf" <<EOT
 default linux
 
 label linux
@@ -104,14 +132,18 @@ mcopy -i "$BOOT_IMG" -s -p -m "$BOOT_DIR"/* ::/
 
 # --- rootfs partition ---
 # Data partition for S05data: "start size" in sectors, no size: to the end
+# ("-" with A/B: up to slot b, whose size is the third value)
 data_part=
 if [ -n "$DATA_START_MB" ]; then
 	data_part=$(( DATA_START_MB * 2048 ))${DATA_SIZE_MB:+ $(( DATA_SIZE_MB * 2048 ))}
+	[ -z "$AB_SLOT_MB" ] || data_part="$data_part - $(( AB_SLOT_MB * 2048 ))"
 fi
 ROOT_DIR=$WORK_DIR/rootfs
 ROOT_IMG=$WORK_DIR/rootfs.ext4
+SYSTEM=$WORK_DIR/system.tar.xz
 fakeroot -- bash -euo pipefail -c '
 	root=$1 tar=$2 mods=$3 free_mb=$4 img=$5 data_part=$6 disk_id=$7
+	ab=$8 kernel=$9 dtbs=${10} layout=${11} cmdline=${12} system=${13} out=${14}
 	mkdir -p "$root"
 	tar -xpf "$tar" -C "$root"
 	if [ -d "$mods/lib/modules" ]; then
@@ -125,15 +157,54 @@ fakeroot -- bash -euo pipefail -c '
 	# busybox mount does not know PARTUUID=
 	vol_id=$(echo "$disk_id" | tr a-f A-F | sed "s/^\(....\)/\1-/")
 	mkdir -p "$root/boot"
-	sed -i "/[[:space:]]\/boot[[:space:]]/d" "$root/etc/fstab"
-	printf "UUID=%s\t/boot\tvfat\tdefaults,noatime\t0\t0\n" "$vol_id" >> "$root/etc/fstab"
+	sed -i "/[[:space:]]\/boot[[:space:]]/d; /[[:space:]]\/mnt\/boot[[:space:]]/d" "$root/etc/fstab"
+	if [ -z "$ab" ]; then
+		printf "UUID=%s\t/boot\tvfat\tdefaults,noatime\t0\t0\n" "$vol_id" >> "$root/etc/fstab"
+	else
+		# the slot boots from its own /boot; BOOT (boot.scr) only by hand
+		mkdir -p "$root/mnt/boot" "$root/boot/extlinux"
+		printf "UUID=%s\t/mnt/boot\tvfat\tnoauto,noatime\t0\t0\n" "$vol_id" >> "$root/etc/fstab"
+		cp "$kernel" "$root/boot/"
+		if [ -d "$dtbs" ]; then
+			case $layout in
+			tree|both) cp -r "$dtbs/." "$root/boot/" ;;&
+			flat|both) find "$dtbs" -name "*.dtb" -exec cp {} "$root/boot/" \; ;;
+			esac
+		fi
+		chown -R 0:0 "$root/boot"
+		printf "default linux\n\nlabel linux\n\tkernel /boot/%s\n\tfdtdir /boot/\n\tappend root=PARTUUID=%s-02 %s\n" \
+			"$(basename "$kernel")" "$disk_id" "$cmdline" > "$root/boot/extlinux/extlinux.conf"
+	fi
 	rm -f "$root/etc/data-partition"
 	[ -z "$data_part" ] || echo "$data_part" > "$root/etc/data-partition"
+	# a system update: the same files (root owns them: fakeroot)
+	[ -z "$system" ] || tar -C "$root" -cf - . | xz -T4 -6 > "$system"
+	[ "$out" = - ] && exit 0
 	size_mb=$(( $(du -sm "$root" | cut -f1) * 11 / 10 + free_mb ))
 	mke2fs -q -F -t ext4 -L rootfs -d "$root" -E root_owner=0:0 "$img" "${size_mb}M"
 ' _ "$ROOT_DIR" "$ROOTFS_TAR" "$LINUX_DIR/modules" "$ROOTFS_FREE_MB" "$ROOT_IMG" \
-	"$data_part" "$disk_id"
+	"$data_part" "$disk_id" "$AB_SLOT_MB" "$KERNEL" "$LINUX_DIR/dtbs" "$DTB_LAYOUT" "$CMDLINE" \
+	"${UPDATE_DIR:+$SYSTEM}" "$OUT_IMG"
+
+# --- the system update: update.ini and system.tar.xz in one tar ---
+if [ -n "$UPDATE_DIR" ]; then
+	rel=$ROOT_DIR/etc/sdk-release
+	[ -f "$rel" ] || die "the rootfs has no /etc/sdk-release (board/common/buildroot/post-build.sh)"
+	fw=$(sed -n 's/^FIRMWARE=//p' "$rel") built=$(sed -n 's/^BUILT=//p' "$rel") sdk=$(sed -n 's/^SDK=//p' "$rel")
+	mkdir -p "$UPDATE_DIR"
+	upd=$UPDATE_DIR/$fw-$built-$sdk.upd
+	cat > "$WORK_DIR/update.ini" <<EOT
+FIRMWARE=$fw
+VERSION=$built $sdk
+SYSTEM=system.tar.xz
+SHA256=$(sha256sum "$SYSTEM" | cut -d' ' -f1)
+SIZE_MB=$(du -sm "$ROOT_DIR" | cut -f1)
+EOT
+	tar -C "$WORK_DIR" -cf "$upd" update.ini system.tar.xz
+	echo "Update: $upd ($(( $(stat -c %s "$upd") / 1048576 )) MiB)"
+fi
 rm -rf "$ROOT_DIR"
+[ "$OUT_IMG" != - ] || exit 0
 
 # --- disk ---
 boot_sectors=$(( BOOT_SIZE_MB * 2048 ))

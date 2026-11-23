@@ -414,7 +414,8 @@ IMAGE_DTB_LAYOUT ?= tree
 # made by this SDK is in the slot.
 IMAGE_EMMC_FILE := $(if $(IMAGE_EMMC_DISK_ID),$(IMAGES_DIR)/$(IMAGE_NAME)-emmc.img)
 
-# $(call mkimage,<image file>,<disk id>,<boot area name>)
+# $(call mkimage,<image file>,<disk id>,<boot area name>[,<update dir>]):
+# <image file> "-" makes only the system update (IMAGE_AB_SLOT_MB boards)
 define mkimage
 	KERNEL=$(LINUX_INSTALL)/$(LINUX_IMAGE) \
 	LINUX_DIR=$(LINUX_INSTALL) \
@@ -429,6 +430,10 @@ define mkimage
 	DISK_ID=$(2) \
 	DATA_START_MB=$(IMAGE_DATA_START_MB) \
 	DATA_SIZE_MB=$(IMAGE_DATA_SIZE_MB) \
+	AB_SLOT_MB=$(IMAGE_AB_SLOT_MB) \
+	BOOT_SCRIPT=$(if $(IMAGE_BOOT_SCRIPT),$(call sdkpath,$(IMAGE_BOOT_SCRIPT))) \
+	MKIMAGE=$(UBOOT_OUT)/tools/mkimage \
+	UPDATE_DIR=$(4) \
 	BOOT_AREA=$(IMAGES_DIR)/$(3) \
 	WORK_DIR=$(OUT)/image-work \
 	HOST_TOOLS=$(ROOTFS_OUT)/host/bin \
@@ -444,7 +449,7 @@ define flash-boot-area
 		$(if $(IMAGE_MBR_CODE),$(IMAGES_DIR)/$(1).mbr)
 endef
 
-.PHONY: image all flash flash-boot flash-emmc flash-emmc-boot clean info help
+.PHONY: image all flash flash-boot flash-emmc flash-emmc-boot update clean info help
 image: check-fw
 	$(call mkimage,$(IMAGE_FILE),$(IMAGE_DISK_ID),boot-area)
 ifneq ($(IMAGE_EMMC_FILE),)
@@ -453,6 +458,13 @@ endif
 
 all: uboot linux rootfs $(BOOTFW_DEPS)
 	$(MAKE) FW=$(FW) image
+
+# A system update for boards with A/B slots (IMAGE_AB_SLOT_MB): the files of
+# a slot as the image's, images/updates/<fw>-<built>-<SDK commit>.upd, for
+# /usr/sbin/system-update on the board (bare_app: Settings > System)
+update: check-fw
+	@test -n "$(IMAGE_AB_SLOT_MB)" || { echo "$(FW) has no A/B slots (IMAGE_AB_SLOT_MB)"; exit 1; }
+	$(call mkimage,-,$(or $(IMAGE_EMMC_DISK_ID),$(IMAGE_DISK_ID)),update-boot-area,$(IMAGES_DIR)/updates)
 
 # make flash DEV=/dev/sdX
 flash: check-fw

@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# The A/B system slot that booted (/usr/sbin/ab-state): once the system is
+# up it becomes the one U-Boot boots (ab-state commit). Up means bare_app
+# has been running for UP_S seconds (or there is no bare_app): a slot
+# whose system never gets that far is not committed, U-Boot boots it at
+# most three times and then goes back to the slot before it.
+#
+# When U-Boot went back that way (ab_failed), /run/ab-failed names the
+# slot given up on, for bare_app to tell the player, and the state forgets
+# it.
+
+UP_S=30
+
+case "$1" in
+start)
+	[ -n "$(ab-state running 2>/dev/null)" ] || exit 0
+	failed=$(ab-state | sed -n 's/^ab_failed=\([ab]\)$/\1/p')
+	if [ -n "$failed" ]; then
+		echo "$failed" > /run/ab-failed
+		ab-state forget-failed
+		logger -t ab "slot $failed did not start: back to slot $(ab-state running)"
+	fi
+	(
+		sleep $UP_S
+		if [ ! -x /usr/bin/bare_app ] || pidof bare_app > /dev/null; then
+			ab-state commit
+		else
+			logger -t ab "bare_app is not running: slot $(ab-state running) not committed"
+		fi
+	) > /dev/null 2>&1 &
+	;;
+stop)
+	;;
+*)
+	echo "Usage: $0 {start|stop}"
+	exit 1
+	;;
+esac
+exit 0

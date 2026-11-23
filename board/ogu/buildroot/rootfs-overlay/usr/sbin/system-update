@@ -1,0 +1,152 @@
+#!/bin/sh
+# system-update: installs a system update into the other A/B slot
+# (docs/boards/ogu.md, "Обновление системы"; ab-state). The running system
+# is not touched: the next start boots the new one, and if that does not
+# come up three times U-Boot goes back to this one.
+#
+#   system-update FILE         install FILE (<firmware>-<version>.upd)
+#   system-update --info FILE  what FILE is: its update.ini
+#
+# FILE is a tar archive (scripts/mkimage.sh makes it, "make update"):
+#   update.ini      FIRMWARE=, VERSION=, SYSTEM=<name>, SHA256= of SYSTEM,
+#                   SIZE_MB= unpacked
+#   system.tar.xz   the slot's files: the root file system with its kernel,
+#                   dtbs and /boot/extlinux/extlinux.conf
+# The steps: the firmware is this one's, SYSTEM's checksum, the other slot
+# formatted (ext4), SYSTEM unpacked into it, this device's own files
+# carried over (those /etc/system-keep of either system lists: settings,
+# Wi-Fi networks, the SSH host key), its extlinux.conf's root= made its
+# partition, "ab-state try". Lines on stdout for bare_app:
+#   step N/6 NAME     a step begins (check, verify, format, unpack, keep, boot)
+#   progress P        percent of the unpacking
+#   done VERSION      installed: the next start boots it
+# Errors on stderr, exit status 1; the slot is left without a system then
+# (its extlinux.conf missing: U-Boot passes it over).
+
+STEPS=6
+WORK=/run/system-update
+LOCK=$WORK.lock
+
+die() {
+	echo "system-update: $*" >&2
+	exit 1
+}
+
+step() {
+	echo "step $1/$STEPS $2"
+	logger -t system-update "$2" 2>/dev/null
+}
+
+# a value of update.ini (in $ini)
+ini_get() {
+	echo "$ini" | sed -n "s/^$1=//p" | head -n 1
+}
+
+info() {
+	[ -r "$1" ] || die "$1: no such file"
+	tar -xOf "$1" update.ini 2>/dev/null || die "$1: not an update (no update.ini)"
+}
+
+[ "$1" = --info ] && { info "$2"; exit 0; }
+[ $# -eq 1 ] || die "usage: system-update FILE | --info FILE"
+file=$1
+
+mkdir "$LOCK" 2>/dev/null || die "an update is being installed already"
+slot_dir=$WORK/slot
+installed=
+cleanup() {
+	# a slot left half done: without its extlinux.conf U-Boot passes it over
+	if mountpoint -q "$slot_dir"; then
+		[ -n "$installed" ] || rm -f "$slot_dir/boot/extlinux/extlinux.conf"
+		umount "$slot_dir"
+	fi
+	rmdir "$slot_dir" "$WORK" 2>/dev/null
+	rmdir "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+
+step 1 check
+ini=$(info "$file") || exit 1
+firmware=$(ini_get FIRMWARE)
+version=$(ini_get VERSION)
+system=$(ini_get SYSTEM)
+sum=$(ini_get SHA256)
+size_mb=$(ini_get SIZE_MB)
+mine=$(sed -n 's/^FIRMWARE=//p' /etc/sdk-release 2>/dev/null)
+[ -n "$firmware" ] && [ -n "$system" ] && [ -n "$sum" ] || die "$file: update.ini without FIRMWARE, SYSTEM or SHA256"
+[ "$firmware" = "$mine" ] || die "$file is for \"$firmware\", this is \"$mine\""
+running=$(ab-state running) || exit 1
+[ -n "$running" ] || die "the system does not run from an A/B slot"
+target=$(ab-state other) || exit 1
+[ -b "$target" ] || die "no second slot ($target): the disk is not laid out for updates"
+case $running in a) next=b ;; *) next=a ;; esac
+grep -q "^$target " /proc/mounts && die "$target is mounted"
+
+step 2 verify
+got=$(tar -xOf "$file" "$system" | sha256sum | cut -d' ' -f1)
+[ "$got" = "$sum" ] || die "$file: $system is damaged (its checksum does not match)"
+
+step 3 format
+mke2fs -q -F -t ext4 -L "system-$next" "$target" || die "cannot format $target"
+mkdir -p "$slot_dir"
+mount -t ext4 -o noatime "$target" "$slot_dir" || die "cannot mount $target"
+
+step 4 unpack
+(tar -xOf "$file" "$system" | xz -dc | tar -xf - -C "$slot_dir") &
+pid=$!
+used0=$(df -m "$slot_dir" | awk 'NR == 2 { print $3 }')
+while kill -0 $pid 2>/dev/null; do
+	sleep 2
+	if [ -n "$size_mb" ] && [ "$size_mb" -gt 0 ]; then
+		used=$(df -m "$slot_dir" | awk 'NR == 2 { print $3 }')
+		p=$(( (used - used0) * 100 / size_mb ))
+		[ $p -le 99 ] || p=99
+		echo "progress $p"
+	fi
+done
+wait $pid || die "cannot unpack $system into $target"
+echo "progress 100"
+[ -f "$slot_dir/boot/extlinux/extlinux.conf" ] || die "$system has no /boot/extlinux/extlinux.conf"
+
+step 5 keep
+# what this device keeps from one system to the next: either one's list
+for p in $(cat /etc/system-keep "$slot_dir/etc/system-keep" 2>/dev/null | sed 's/#.*//' | sort -u); do
+	p=${p#/}
+	[ -e "/$p" ] || continue
+	case $p in *..*) continue ;; esac
+	dst=$slot_dir/$p
+	mkdir -p "$slot_dir/$(dirname "$p")" 2>/dev/null
+	# never through a link of the new system: it may point out of the
+	# slot (an absolute one is this system's path while it is mounted)
+	case $(readlink -f "$(dirname "$dst")") in
+	"$slot_dir"|"$slot_dir"/*) ;;
+	*) echo "system-update: /$p: its directory is a link in the new system, not kept" >&2
+	   continue ;;
+	esac
+	# a link where the device has its own: the device's (/etc/dropbear
+	# links to /var/run/dropbear: the host key would change every start)
+	[ -L "$dst" ] && rm -f "$dst"
+	if [ -d "/$p" ]; then
+		mkdir -p "$dst"
+		cp -a "/$p/." "$dst/" || die "cannot keep /$p"
+	else
+		cp -a "/$p" "$dst" || die "cannot keep /$p"
+	fi
+done
+
+step 6 boot
+# its root= this disk's partition of the slot
+disk_id=$(sed -n 's/.*root=PARTUUID=\([0-9a-f]*\)-[0-9]*.*/\1/p' /proc/cmdline)
+[ -n "$disk_id" ] || die "no root=PARTUUID= in the kernel's command line"
+num=${target##*[!0-9]}
+sed -i "s/root=PARTUUID=[0-9a-fA-F]*-[0-9]*/root=PARTUUID=$disk_id-0$num/" \
+	"$slot_dir/boot/extlinux/extlinux.conf" || die "cannot write its extlinux.conf"
+grep -q "root=PARTUUID=$disk_id-0$num" "$slot_dir/boot/extlinux/extlinux.conf" ||
+	die "its extlinux.conf has no root="
+installed=1
+sync
+umount "$slot_dir" || die "cannot unmount $target"
+ab-state try "$next" || exit 1
+echo "done $version"
+logger -t system-update "$version installed in slot $next: the next start boots it" 2>/dev/null

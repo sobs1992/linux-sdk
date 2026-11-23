@@ -1,0 +1,11 @@
+# What a device keeps from one system to the next (/usr/sbin/system-update
+# copies these from the running system into the new one): its own files in
+# the root file system. Paths from /; a directory with all in it.
+etc/bare_app.conf
+etc/bare_app_sticks.conf
+etc/wpa_supplicant.conf
+etc/dropbear
+root/.ssh
+root/.config/.xash_id
+.config/.xash_id
+var/lib/bluetooth
