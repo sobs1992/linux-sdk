@@ -1,4 +1,4 @@
-/* phyreg: read/write Synopsys DDR PHY CSRs on Amlogic G12B (APB at 0xfe000000, csr<<1, 16-bit) */
+/* ddr-phyreg: read/write Synopsys DDR PHY CSRs on Amlogic G12B (APB at 0xfe000000, csr<<1, 16-bit) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +13,7 @@ static unsigned rd(unsigned csr) { return m[csr]; }          /* byte addr = csr<
 static void wr(unsigned csr, unsigned v) { m[csr] = v; }
 int main(int argc, char **argv)
 {
-	if (argc < 2) { fprintf(stderr, "phyreg rd CSR [N] | wr CSR VAL | dump\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "ddr-phyreg rd CSR [N] | wr CSR VAL | dump\n"); return 2; }
 	int fd = open("/dev/mem", O_RDWR | O_SYNC);
 	if (fd < 0) { perror("/dev/mem"); return 1; }
 	m = mmap(0, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, BASE);

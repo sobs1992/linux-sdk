@@ -1,0 +1,11 @@
+config BR2_PACKAGE_DDR_TOOLS
+	bool "ddr-tools"
+	depends on BR2_aarch64
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  The read eye of the Amlogic G12B's DDR PHY at run time
+	  (docs/boards/ogu.md, "Память: подстройка задержек чтения"):
+	  ddr-phyreg (read and write its registers), ddr-eyescan (move
+	  one delay until memory reads wrong) and ddr-calibrate (find
+	  the lanes BL2's training leaves off-centre; ddr-tune keeps the
+	  result for U-Boot).

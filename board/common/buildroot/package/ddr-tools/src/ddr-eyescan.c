@@ -1,7 +1,7 @@
 /*
- * eyescan: a read-eye scan of the G12B DDR PHY (Synopsys) at run time.
+ * ddr-eyescan: a read-eye scan of the G12B DDR PHY (Synopsys) at run time.
  *
- *   eyescan [-t dwell_ms] [-m MB per cpu] [-n max steps] [-c cpus] [-s step]
+ *   ddr-eyescan [-t dwell_ms] [-m MB per cpu] [-n max steps] [-c cpus] [-s step]
  *           [-k] CSR[,CSR...] {+|-}
  *
  * Memory checkers run on the CPUs (own buffers, random 64-bit words, read
@@ -63,8 +63,8 @@ static void restore_all(void)
 static void on_sig(int s)
 {
 	restore_all();
-	static const char m[] = "eyescan: fatal signal, CSRs restored\n";
-	write(1, m, sizeof m - 1);
+	static const char m[] = "ddr-eyescan: fatal signal, CSRs restored\n";
+	if (write(1, m, sizeof m - 1) < 0) { }
 	_exit(128 + s);
 }
 
@@ -143,7 +143,7 @@ int main(int argc, char **argv)
 		default: return 2;
 		}
 	if (argc - optind != 2) {
-		fprintf(stderr, "usage: eyescan [-t ms] [-m MB] [-n steps] [-c cpus] [-s step] [-k] CSR[,CSR] +|-\n");
+		fprintf(stderr, "usage: ddr-eyescan [-t ms] [-m MB] [-n steps] [-c cpus] [-s step] [-k] CSR[,CSR] +|-\n");
 		return 2;
 	}
 	for (char *p = strtok(argv[optind], ","); p && ncsr < MAXCSR; p = strtok(0, ","))
