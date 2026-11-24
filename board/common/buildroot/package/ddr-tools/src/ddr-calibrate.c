@@ -8,7 +8,8 @@
  *   ddr-calibrate -s     "unfinished N this|before|running": the nibbles the
  *                        last run did if it did not end; "this": it was
  *                        killed at this start (also "unfinished 0 this":
- *                        before a nibble ended; -R is due), "before": the
+ *                        before a nibble ended; -R is due while its lock's
+ *                        file is there, -r goes on with it after), "before": the
  *                        board went down in it, "running": it goes on now;
  *                        "unfinished 0": nothing
  *   ddr-calibrate -R     after a run that was killed (SIGKILL): the registers
@@ -571,7 +572,7 @@ static int lift(int db, int u, double R, int s, int up)
 /* BL2's value of a register: /chosen/ddr-tune "CSR:trained>now ..." if U-Boot moved it */
 static unsigned trained(unsigned csr)
 {
-	static char buf[1024];	/* 40 CSRs (32 delays, 8 strobes) of "CSR:was>now " */
+	static char buf[1024];	/* 44 CSRs (36 delays, 8 strobes) of "CSR:was>now " */
 	static int read_once;
 	char key[8];
 
@@ -791,6 +792,7 @@ static int restore_saved(void)
 		write_all(n, csr, val);
 		printf("restored %d registers\n", n);
 	} else {
+		thaw();
 		close(fd);
 		return 1;
 	}
@@ -1014,7 +1016,11 @@ int main(int argc, char **argv)
 		ws[nw].words = (size_t)mb << 17;
 		ws[nw].buf = mmap(0, (size_t)mb << 20, PROT_READ | PROT_WRITE,
 				  MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
-		if (ws[nw].buf == MAP_FAILED) { perror("mmap"); return 1; }
+		if (ws[nw].buf == MAP_FAILED) {
+			perror("mmap");
+			unlink(path_saved);	/* nothing was moved: no run to restore */
+			return 1;
+		}
 		mlock(ws[nw].buf, (size_t)mb << 20);
 	}
 #endif
