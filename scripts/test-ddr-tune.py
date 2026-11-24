@@ -261,7 +261,11 @@ def real_flash(m, work, helper, line, sec, size):
     shutil.copy(helper, os.path.join(d, "keep-sectors.sh"))
     stubs = {
         "lsblk": '#!/bin/bash\ncase "$*" in *TYPE*) echo disk ;; *RM*) echo 1 ;; *MOUNTPOINT*) ;; *) echo stub ;; esac\n',
-        "sudo": '#!/bin/bash\n"$@"; rc=$?\ncase "$*" in *bs=4M*) [ -z "$SLOW" ] || sleep 30 ;; esac\nexit $rc\n',
+        # root may not create into another user's file in /tmp (protected_regular): of= into TMPDIR refused;
+        # SLOW: the image's dd sleeps 30 s after it wrote, SLOW_BEFORE: 2 s before it starts
+        "sudo": ('#!/bin/bash\ncase "$*" in *of="$TMPDIR"*) echo "dd: Permission denied" >&2; exit 1 ;; esac\n'
+                 'case "$*" in *bs=4M*) [ -z "$SLOW_BEFORE" ] || sleep 2 ;; esac\n'
+                 '"$@"; rc=$?\ncase "$*" in *bs=4M*) [ -z "$SLOW" ] || sleep 30 ;; esac\nexit $rc\n'),
         "eject": "#!/bin/bash\nexit 0\n",
     }
     for n, t in stubs.items():
@@ -302,6 +306,20 @@ def real_flash(m, work, helper, line, sec, size):
     m.cell("flash.sh empty sector: the image's, no warning about its zeros",
            r.returncode == 0 and at(dev, sec) == b"\x22" * 512 and "warning" not in r.stderr,
            "rc %d %s" % (r.returncode, r.stderr[-300:]))
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        # the signal to flash.sh alone, before its dd has written: the trap stops dd first
+        dev = disk("dev-alone-%d" % sig)
+        p = subprocess.Popen(["bash", os.path.join(d, "flash.sh"), image, dev, "0"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=dict(env, SLOW_BEFORE="1"), start_new_session=True)
+        p.stdin.write("yes\n")
+        p.stdin.flush()
+        time.sleep(1.0)
+        p.send_signal(sig)
+        out, err = p.communicate(timeout=30)
+        time.sleep(3)   # a dd left running would have written by now
+        m.cell("flash.sh signal %d to the script alone: dd stopped, the line stays" % sig,
+               at(dev, sec) == line.ljust(512, b"\0") and p.returncode != 0, "rc %s: %s" % (p.returncode, err[-300:]))
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         dev = disk("dev-%d" % sig)
         p = subprocess.Popen(["bash", os.path.join(d, "flash.sh"), image, dev, "0"], stdin=subprocess.PIPE,

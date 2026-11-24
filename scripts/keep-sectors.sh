@@ -11,6 +11,7 @@ KEPT_SECTORS=()
 KEPT_FILES=()
 KEPT_DEV=
 KEPT_DUE=	# 1: kept sectors read, the image may be over them, not written back yet
+DD_PID=		# flash_write's dd while it runs
 
 # keep_check: KEEP's entries are SECTOR:PREFIX (before anything is asked)
 keep_check() {
@@ -36,7 +37,9 @@ keep_read() {
 		[ "$s" -ge "$start" ] && [ "$s" -lt "$end" ] || continue
 		f=$(mktemp)
 		KEPT_FILES+=("$f")
-		$SUDO dd if="$dev" of="$f" bs=512 skip="$s" count=1 status=none || return 1
+		# the shell opens the copy, not dd under sudo: root may not create
+		# into another user's file in /tmp (fs.protected_regular)
+		$SUDO dd if="$dev" bs=512 skip="$s" count=1 status=none > "$f" || return 1
 		if printf '%s' "$prefix" | cmp -s -n "${#prefix}" - "$f"; then
 			echo "Keeping sector $s of $dev: $(tr -d '\0' < "$f" | tr '\n' ' ')"
 			KEPT_SECTORS+=("$s")
@@ -59,12 +62,19 @@ keep_write() {
 }
 
 # keep_finish STATUS (the EXIT trap): kept sectors not written back yet (a
-# write that failed, a signal: bash runs the trap once dd has ended) go back
-# now; if they cannot, their files stay and what they hold is said in full.
-# Then the files go. Not $?: after a signal the EXIT trap sees 0.
+# write that failed, a signal) go back now - after the image's dd has ended
+# (a signal to this script alone runs the trap while dd still writes: it is
+# stopped and waited for first); if they cannot, their files stay and what
+# they hold is said in full. Then the files go. Not $?: after a signal the
+# EXIT trap sees 0.
 keep_finish() {
 	local st=$1 i f
 	trap - EXIT INT TERM HUP
+	if [ -n "$DD_PID" ]; then
+		kill "$DD_PID" 2>/dev/null || true
+		wait "$DD_PID" 2>/dev/null || true
+		DD_PID=
+	fi
 	if [ -n "$KEPT_DUE" ]; then
 		[ "$st" -ne 0 ] || st=1
 		if keep_write; then
@@ -87,7 +97,7 @@ keep_finish() {
 }
 
 # keep_traps: the trap a script that calls flash_write sets first (bash
-# runs it at every exit, after a signal too, once dd has ended)
+# runs it at every exit, after a signal too)
 keep_traps() {
 	trap 'keep_finish $?' EXIT
 }
@@ -97,7 +107,11 @@ keep_traps() {
 flash_write() {
 	local file=$1 dev=$2 sector=$3
 	keep_read "$dev" "$(stat -c %s "$file")" "$sector"
+	# in the background, waited for: keep_finish can stop it before it writes back
 	$SUDO dd if="$file" of="$dev" bs=4M seek=$(( sector * 512 )) oflag=seek_bytes conv=notrunc,fsync \
-		status="${DD_STATUS:-progress}"
+		status="${DD_STATUS:-progress}" < /dev/null &
+	DD_PID=$!
+	wait "$DD_PID"
+	DD_PID=
 	keep_write
 }
