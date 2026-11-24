@@ -6,9 +6,11 @@
  *
  *   ddr-calibrate [-w] [-v] [-r] [-p] [-d DBYTES] [-c ms] [-f ms] [-t steps]
  *   ddr-calibrate -s     "unfinished N this|before|running": the nibbles the
- *                        last run did if it did not end (0: it did); "this":
- *                        it was killed at this start, "before": the board went
- *                        down in it, "running": it goes on now
+ *                        last run did if it did not end; "this": it was
+ *                        killed at this start (also "unfinished 0 this":
+ *                        before a nibble ended; -R is due), "before": the
+ *                        board went down in it, "running": it goes on now;
+ *                        "unfinished 0": nothing
  *   ddr-calibrate -R     after a run that was killed (SIGKILL): the registers
  *                        as they were at its start (only at that same start)
  *                        and /data thawed
@@ -109,6 +111,12 @@ static int verbose;	/* -v: each edge and lift */
 
 #ifdef DDR_SIM
 static char sim_frozen[512];
+static atomic_int sim_frozen_writes;	/* writes into /data while it is frozen: they would sleep */
+#define DATA_WRITE() (access(sim_frozen, F_OK) == 0 ? (void)atomic_fetch_add(&sim_frozen_writes, 1) : (void)0)
+#else
+#define DATA_WRITE() ((void)0)
+#endif
+#ifdef DDR_SIM
 static atomic_int sim_bad;	/* values out of 0..3f found in a register after a write */
 static int sim_kill_probe;	/* DDR_SIM_KILL_PROBE: SIGKILL in that probe, its registers moved */
 static double tscale = 0.05;	/* DDR_SIM_SCALE: waits that much shorter */
@@ -235,11 +243,20 @@ static void wdt_close(void)
  */
 static void on_sig(int s)
 {
-	char m[] = "ddr_tune= (stopped: signal 00)\n";
+	char m[48] = "ddr_tune= (stopped: signal ";
+	int n = sizeof "ddr_tune= (stopped: signal " - 1;
+	struct timespec t0, t;
 
+	/* a worker putting a probe back finishes first; a fault inside
+	 * disarm_restore itself (SIGBUS) must not wait for ever: 200 ms */
 	atomic_store(&armed, 0);
-	while (atomic_load(&in_restore))
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	while (atomic_load(&in_restore)) {
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		if ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 > 200)
+			break;
 		sched_yield();
+	}
 	restore_all();
 #ifdef DDR_SIM
 	if (sim_sig_in_restore)
@@ -247,9 +264,12 @@ static void on_sig(int s)
 #endif
 	thaw();
 	if (log_fd >= 0) {
-		m[sizeof m - 5] = '0' + s / 10 % 10;
-		m[sizeof m - 4] = '0' + s % 10;
-		if (write(log_fd, m, sizeof m - 1) < 0) { }
+		if (s >= 10)
+			m[n++] = '0' + s / 10 % 10;
+		m[n++] = '0' + s % 10;
+		m[n++] = ')';
+		m[n++] = '\n';
+		if (write(log_fd, m, n) < 0) { }
 		fsync(log_fd);
 	}
 	unlink(path_saved);
@@ -681,15 +701,24 @@ static int csr_ours(unsigned c)
 /* The lock of the one run: 0 taken, -1 another run holds it, -2 no file */
 static int take_lock(void)
 {
-	saved_fd = open(path_saved, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-	if (saved_fd < 0)
-		return -2;
-	if (flock(saved_fd, LOCK_EX | LOCK_NB)) {
+	for (int tries = 0; tries < 10; tries++) {
+		struct stat a, b;
+
+		saved_fd = open(path_saved, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		if (saved_fd < 0)
+			return -2;
+		if (flock(saved_fd, LOCK_EX | LOCK_NB)) {
+			close(saved_fd);
+			saved_fd = -1;
+			return -1;
+		}
+		/* the run before unlinked it between our open and flock: again */
+		if (!fstat(saved_fd, &a) && !stat(path_saved, &b) && a.st_ino == b.st_ino && a.st_dev == b.st_dev)
+			return 0;
 		close(saved_fd);
-		saved_fd = -1;
-		return -1;
 	}
-	return 0;
+	saved_fd = -1;
+	return -1;
 }
 
 /* the registers' values at the run's start into the lock's file, for -R */
@@ -835,6 +864,7 @@ static void log_begin(int resume, time_t t0)
 	/* no signal before the header: on_sig would end the block before it */
 	outside_signals(&set);
 	pthread_sigmask(SIG_BLOCK, &set, &old);
+	DATA_WRITE();
 	log_fd = open(path_log, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
 	if (log_fd >= 0 && (write(log_fd, b, n) != n || fsync(log_fd)))
 		perror(path_log);
@@ -851,6 +881,7 @@ static void log_end(const char *line, long secs)
 	outside_signals(&set);
 	pthread_sigmask(SIG_BLOCK, &set, &old);
 	if (log_fd >= 0) {
+		DATA_WRITE();
 		if (write(log_fd, b, n) != n)
 			perror(path_log);
 		fsync(log_fd);
@@ -897,11 +928,16 @@ int main(int argc, char **argv)
 		char ub[40];
 		int n = unfinished(done, NULL, 0, &o, 0, ub, sizeof ub), fd = open(path_saved, O_RDWR | O_CLOEXEC);
 		int running = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB);
+		unsigned c[48], v[48];
+		/* its lock's file left at this start: killed, maybe before a nibble ended */
+		int killed = fd >= 0 && !running && read_saved(fd, c, v, 48) > 0;
 
 		if (fd >= 0)
 			close(fd);
 		if (running)
 			printf("unfinished %d running\n", n);
+		else if (killed)
+			printf("unfinished %d this\n", n);
 		else if (n)
 			printf("unfinished %d %s\n", n, boot_id[0] && !strcmp(ub, boot_id) ? "this" : "before");
 		else
@@ -923,6 +959,9 @@ int main(int argc, char **argv)
 	}
 	if (map_phy())
 		return 1;
+	/* a run killed at this start may have left /data frozen: every write
+	 * there (the log) would sleep for good; the lock says no run freezes it */
+	thaw();
 	{
 		/* a run killed at this start left its registers moved: back first */
 		unsigned csr[48], val[48];
@@ -1173,6 +1212,7 @@ int main(int argc, char **argv)
 				printf("dbyte %d nibble %d: a lane below 0, the nibble %d steps later\n", db, u, lift_all);
 			/* the nibble's result on disk before the next one */
 			thaw();
+			DATA_WRITE();
 			lg = fopen(path_log, "a");
 			if (lg) {
 				fprintf(lg, "%s keep:%s%s\n", nib, nline > nline0 && nline0 ? "" : " ", line + nline0);
@@ -1216,7 +1256,8 @@ out:
 	if (atomic_load(&clamped))
 		fprintf(stderr, "ddr-calibrate: %d values out of 0..3f were clamped: a bug\n", atomic_load(&clamped));
 #ifdef DDR_SIM
-	fprintf(stderr, "sim: clamped %d, out of field %d\n", atomic_load(&clamped), atomic_load(&sim_bad));
+	fprintf(stderr, "sim: clamped %d, out of field %d, frozen writes %d\n", atomic_load(&clamped),
+		atomic_load(&sim_bad), atomic_load(&sim_frozen_writes));
 #endif
 	if (writeit) {
 		if (!nline) {

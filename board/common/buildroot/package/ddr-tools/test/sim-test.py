@@ -208,7 +208,7 @@ def common_after(c, b, binary, r, start_regs):
             {hex(k): (start_regs[k], v) for k, v in b.regs().items() if start_regs[k] != v})
     c.check(not os.path.exists(b.path("frozen")), "/data left frozen")
     c.check(not os.path.exists(b.path("run/ddr-calibrate.saved")), "the lock's file left")
-    c.check("sim: clamped 0, out of field 0" in r.stderr or "stopped" in r.stderr,
+    c.check("sim: clamped 0, out of field 0, frozen writes 0" in r.stderr or "stopped" in r.stderr,
             "values out of the field: " + r.stderr.strip()[-200:])
 
 
@@ -304,11 +304,41 @@ def cell_run_after_kill(binary, d):
     s0 = b.regs()
     run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "300"})
     c.check(b.regs() != s0, "no register moved at the kill: the cell tests nothing")
+    c.check(os.path.exists(b.path("frozen")), "/data not left frozen by the kill: the cell tests less")
     r = run(binary, b, ["-p", "-d", "3"])
     exp = {k: v for k, v in b.expected().items() if (k >> 12 & 3) == 3}
     c.check(result_of(r) == exp, "line %s, expected %s" % (result_of(r), exp))
     c.check("killed run restored first" in r.stderr, "not said: " + r.stderr[-200:])
     common_after(c, b, binary, r, s0)
+    return c
+
+
+def cell_kill_early(binary, d):
+    c = Cell("kill_early: SIGKILL before a nibble ended: -s 'unfinished 0 this', -R puts all back")
+    b = base_board(d)
+    s0 = b.regs()
+    r = run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "5"})
+    c.check(r.returncode == -9 and b.regs() != s0, "not killed in a probe: %d" % r.returncode)
+    st = status(binary, b)
+    c.check(st == "unfinished 0 this", "-s: " + st)
+    r2 = run(binary, b, ["-R"])
+    c.check("restored 40 registers" in r2.stdout, "-R: " + r2.stdout)
+    common_after(c, b, binary, subprocess.CompletedProcess([], 0, "", "stopped"), s0)
+    c.check(status(binary, b) == "unfinished 0", "-s after -R: " + status(binary, b))
+    return c
+
+
+def cell_sigint(binary, d):
+    c = Cell("sigint: SIGINT: the stop's line says signal 2")
+    b = base_board(d)
+    s0 = b.regs()
+    p = start(binary, b, ["-p"])
+    wait_for(p, lambda l: l.startswith("progress"))
+    p.send_signal(signal.SIGINT)
+    out, err = p.communicate(timeout=30)
+    common_after(c, b, binary, subprocess.CompletedProcess([], 0, out, err), s0)
+    last = open(b.path("ddr-calibrate.log")).read().rstrip().splitlines()[-1]
+    c.check(last == "ddr_tune= (stopped: signal 2)", "the stop's line: " + last)
     return c
 
 
@@ -426,7 +456,7 @@ def cell_no_sim_dir(binary, d):
 
 
 CELLS = [cell_base, cell_moved32, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
-         cell_status_running, cell_kill_same_boot, cell_reboot_resume,
+         cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 
 
