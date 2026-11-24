@@ -4,7 +4,13 @@
  * leaves off-centre against the others of their nibble (docs/boards/ogu.md,
  * "Память: подстройка задержек чтения").
  *
- *   ddr-calibrate [-w] [-v] [-r] [-d DBYTES] [-c ms] [-f ms] [-t steps]
+ *   ddr-calibrate [-w] [-v] [-r] [-p] [-d DBYTES] [-c ms] [-f ms] [-t steps]
+ *   ddr-calibrate -s     "unfinished N this|before": the nibbles the last run
+ *                        did if it did not end (0: it did); "this": it was
+ *                        killed at this start, "before": the board went down
+ *   ddr-calibrate -R     after a run that was killed (SIGKILL): the registers
+ *                        as they were at its start (only at that same start)
+ *                        and /data thawed
  *
  * Memory checkers run on all CPUs (own buffers, random words, read back
  * over and over). For each lane:
@@ -29,8 +35,17 @@
  * A step at an edge reads wrong words; they can hit the kernel. /data is
  * frozen while measuring (a wrong line written back stays in RAM only), the
  * hardware watchdog (if free) resets a hung board. Log: /data/ddr-calibrate.log
- * (one block per run, a line per nibble). A run takes some 10 minutes; no
- * game should run.
+ * (one block per run: "== DATE boot ID", a line per nibble, "ddr_tune=..."
+ * at its end). A run takes some 8 minutes; no game should run.
+ *
+ * Every value written to a delay goes through put(): within 0..3f always.
+ * A signal (SIGTERM: Stop) puts every register back, thaws /data and ends
+ * the run's block ("ddr_tune= (stopped: signal N)"): nothing to go on with.
+ * One run at a time: it holds a lock on /run/ddr-calibrate.saved, which
+ * keeps the registers' values from its start for -R.
+ *
+ * Built with -DDDR_SIM it runs against a simulated PHY instead (DDR_SIM_DIR,
+ * ../test/sim-test.py): no /dev/mem, no /data, no watchdog.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -45,27 +60,74 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PHY_BASE	0xfe000000UL
 #define PHY_SIZE	0x200000UL
+#ifdef DDR_SIM
+#define PHY_BASE_MAP	0
+#else
+#define PHY_BASE_MAP	PHY_BASE
+#endif
 #define CSR_PBD(db, r)	(0x10000u | (db) << 12 | (r) << 8 | 0x68)
 #define CSR_CLK(db, u)	(0x10000u | (db) << 12 | (u) << 8 | 0x8c)
 #define CSR_LNSEL(db, b) (0x10000u | (db) << 12 | (0xa0 + (b)))
 #define VMAX		0x3f
-#define LOG		"/data/ddr-calibrate.log"
+
+static const char *path_log = "/data/ddr-calibrate.log",
+	*path_chosen = "/proc/device-tree/chosen/ddr-tune",
+	*path_saved = "/run/ddr-calibrate.saved",
+	*path_boot = "/proc/sys/kernel/random/boot_id",
+	*path_data = "/data",
+	*path_wdt = "/dev/watchdog";
+
+#ifdef __aarch64__
+#define phy_sync()	__asm__ volatile("dsb sy" ::: "memory")
+#else
+#define phy_sync()	__sync_synchronize()
+#endif
 
 static volatile uint16_t *phy;
-static int data_fd = -1, wdt_fd = -1;
+#ifndef DDR_SIM
+static int data_fd = -1;
+#endif
+static int wdt_fd = -1, log_fd = -1, saved_fd = -1;
+static char boot_id[40];
 static atomic_int stop;
 static atomic_ullong errbits;	/* XOR bits of the wrong words since the probe began */
 static atomic_int nerr;
 static int verbose;	/* -v: each edge and lift */
+
+#ifdef DDR_SIM
+static char sim_frozen[512];
+static atomic_int sim_bad;	/* values out of 0..3f found in a register after a write */
+static int sim_kill_probe;	/* DDR_SIM_KILL_PROBE: SIGKILL in that probe, its registers moved */
+static double tscale = 0.05;	/* DDR_SIM_SCALE: waits that much shorter */
+#else
+#define tscale 1.0
+#endif
+static atomic_int clamped;	/* values put() had to bring into 0..3f: a bug */
+
+/* The one way a register is written: the value within its field (0..3f) */
+static void put(unsigned csr, int v)
+{
+	if (v < 0 || v > VMAX) {
+		atomic_fetch_add(&clamped, 1);
+		v = v < 0 ? 0 : VMAX;
+	}
+	phy[csr] = (uint16_t)v;
+#ifdef DDR_SIM
+	if (phy[csr] > VMAX)
+		atomic_fetch_add(&sim_bad, 1);
+#endif
+}
 
 /*
  * The probe in flight: the worker that reads the first wrong word puts its
@@ -79,8 +141,8 @@ static void disarm_restore(void)
 {
 	if (atomic_exchange(&armed, 0)) {
 		for (unsigned i = 0; i < armed_n; i++)
-			phy[armed_csr[i]] = armed_back[i];
-		__asm__ volatile("dsb sy" ::: "memory");
+			put(armed_csr[i], armed_back[i]);
+		phy_sync();
 	}
 }
 
@@ -96,21 +158,34 @@ static void save(unsigned csr)
 static void restore_all(void)
 {
 	for (unsigned i = 0; i < nsaved; i++)
-		phy[saved_csr[i]] = saved_val[i];
-	__asm__ volatile("dsb sy" ::: "memory");
+		put(saved_csr[i], saved_val[i]);
+	phy_sync();
 }
 
+/* async-signal-safe: on_sig thaws too */
 static void thaw(void)
 {
+#ifdef DDR_SIM
+	unlink(sim_frozen);
+#else
+	if (data_fd < 0)
+		data_fd = open(path_data, O_RDONLY | O_CLOEXEC);
 	if (data_fd >= 0)
 		ioctl(data_fd, FITHAW, 0);
+#endif
 }
 
 static void freeze(void)
 {
+#ifdef DDR_SIM
+	close(open(sim_frozen, O_WRONLY | O_CREAT | O_CLOEXEC, 0600));
+#else
 	sync();
+	if (data_fd < 0)
+		data_fd = open(path_data, O_RDONLY | O_CLOEXEC);
 	if (data_fd >= 0 && ioctl(data_fd, FIFREEZE, 0) && errno != EBUSY)
 		perror("freeze /data");
+#endif
 }
 
 static void wdt_close(void)
@@ -122,14 +197,38 @@ static void wdt_close(void)
 	}
 }
 
+/*
+ * A signal: every register back, /data thawed, the run's block in the log
+ * ended (a stopped run is not one to go on with), the lock's file gone.
+ * The workers block the signals that come from outside, so this runs in
+ * the main thread and nothing writes a register after restore_all().
+ */
 static void on_sig(int s)
 {
+	char m[] = "ddr_tune= (stopped: signal 00)\n";
+
 	restore_all();
 	thaw();
+	if (log_fd >= 0) {
+		m[sizeof m - 4] = '0' + s / 10 % 10;
+		m[sizeof m - 3] = '0' + s % 10;
+		if (write(log_fd, m, sizeof m - 1) < 0) { }
+		fsync(log_fd);
+	}
+	unlink(path_saved);
 	wdt_close();
-	static const char m[] = "ddr-calibrate: fatal signal, registers restored\n";
-	if (write(2, m, sizeof m - 1) < 0) { }
+	static const char e[] = "ddr-calibrate: stopped by a signal, registers restored\n";
+	if (write(2, e, sizeof e - 1) < 0) { }
 	_exit(128 + s);
+}
+
+/* the signals from outside, which on_sig handles in the main thread */
+static void outside_signals(sigset_t *set)
+{
+	sigemptyset(set);
+	sigaddset(set, SIGINT);
+	sigaddset(set, SIGTERM);
+	sigaddset(set, SIGHUP);
 }
 
 static inline uint64_t mix(uint64_t x)
@@ -141,6 +240,7 @@ static inline uint64_t mix(uint64_t x)
 
 struct worker { int cpu; size_t words; uint64_t *buf; };
 
+#ifndef DDR_SIM
 static void *work(void *a)
 {
 	struct worker *w = a;
@@ -170,6 +270,7 @@ static void *work(void *a)
 	}
 	return 0;
 }
+#endif
 
 static double now(void)
 {
@@ -191,7 +292,7 @@ static void wdt_ping(void)
 
 static void idle_ms(int ms)
 {
-	double end = now() + ms / 1000.0;
+	double end = now() + ms * tscale / 1000.0;
 
 	while (now() < end) {
 		wdt_ping();
@@ -223,6 +324,41 @@ static int cpu_bit(int db, int r)	/* the odd-beat bit of lane r, as memcheck log
 	return -1;
 }
 
+#ifdef DDR_SIM
+/*
+ * The simulated lanes: lane (db, r) samples at x = its delay - R * its
+ * nibble's strobe and reads wrong outside [lo, hi] (DDR_SIM_DIR/spec:
+ * "R 2.5", "eye DB R LO HI"); wrong words carry the lane's odd-beat bit.
+ */
+static double sim_R = 2.5, sim_lo[4][8], sim_hi[4][8] = { { 0 } };
+
+static void *work(void *a)
+{
+	(void)a;
+	while (!atomic_load(&stop)) {
+		uint64_t bits = 0;
+
+		for (int db = 0; db < 4; db++)
+			for (int r = 0; r < 8; r++) {
+				double x = phy[CSR_PBD(db, r)] - sim_R * phy[CSR_CLK(db, r / 4)];
+				int b = cpu_bit(db, r);
+
+				if ((x > sim_hi[db][r] || x < sim_lo[db][r]) && b >= 0)
+					bits |= 1ull << b;
+			}
+		if (bits) {
+			disarm_restore();
+			atomic_fetch_or(&errbits, bits);
+			atomic_fetch_add(&nerr, 1);
+		}
+		usleep(100);
+	}
+	return 0;
+}
+
+static int sim_probes;
+#endif
+
 /*
  * Set n registers to val[] for up to ms; back to back[] at once at the first
  * wrong word. Returns the lanes that read wrong (0: none).
@@ -239,9 +375,13 @@ static uint32_t probe(int n, const unsigned *csr, const unsigned *val, const uns
 	}
 	atomic_store(&armed, 1);
 	for (int i = 0; i < n; i++)
-		phy[csr[i]] = val[i];
-	__asm__ volatile("dsb sy" ::: "memory");
-	double end = now() + ms / 1000.0;
+		put(csr[i], val[i]);
+	phy_sync();
+#ifdef DDR_SIM
+	if (sim_kill_probe && ++sim_probes == sim_kill_probe)
+		kill(getpid(), SIGKILL);
+#endif
+	double end = now() + ms * tscale / 1000.0;
 	int bad = 0;
 
 	while (now() < end) {
@@ -254,8 +394,8 @@ static uint32_t probe(int n, const unsigned *csr, const unsigned *val, const uns
 	}
 	atomic_store(&armed, 0);
 	for (int i = 0; i < n; i++)
-		phy[csr[i]] = back[i];
-	__asm__ volatile("dsb sy" ::: "memory");
+		put(csr[i], back[i]);
+	phy_sync();
 	if (!bad)
 		return 0;
 	idle_ms(300);	/* the wrong words counted, the workers past them */
@@ -344,12 +484,12 @@ static int lift(int db, int u, double R, int s, int up)
 		int jj = up ? j : s - j + 1, inc = lift_step(R, jj), before = atomic_load(&nerr);
 
 		if (!up)
-			phy[cc] -= 1;
+			put(cc, phy[cc] - 1);
 		for (int i = 0; i < 4; i++)
-			phy[CSR_PBD(db, 4 * u + i)] += up ? inc : -inc;
+			put(CSR_PBD(db, 4 * u + i), phy[CSR_PBD(db, 4 * u + i)] + (up ? inc : -inc));
 		if (up)
-			phy[cc] += 1;
-		__asm__ volatile("dsb sy" ::: "memory");
+			put(cc, phy[cc] + 1);
+		phy_sync();
 		idle_ms(30);
 		bad = atomic_load(&nerr) != before;
 	}
@@ -360,12 +500,12 @@ static int lift(int db, int u, double R, int s, int up)
 		int jj = up ? j : s - j + 1, inc = lift_step(R, jj);
 
 		if (up)
-			phy[cc] -= 1;
+			put(cc, phy[cc] - 1);
 		for (int i = 0; i < 4; i++)
-			phy[CSR_PBD(db, 4 * u + i)] += up ? -inc : inc;
+			put(CSR_PBD(db, 4 * u + i), phy[CSR_PBD(db, 4 * u + i)] + (up ? -inc : inc));
 		if (!up)
-			phy[cc] += 1;
-		__asm__ volatile("dsb sy" ::: "memory");
+			put(cc, phy[cc] + 1);
+		phy_sync();
 	}
 	idle_ms(300);
 	return -1;
@@ -374,12 +514,12 @@ static int lift(int db, int u, double R, int s, int up)
 /* BL2's value of a register: /chosen/ddr-tune "CSR:trained>now ..." if U-Boot moved it */
 static unsigned trained(unsigned csr)
 {
-	static char buf[256];
+	static char buf[1024];	/* 40 CSRs (32 delays, 8 strobes) of "CSR:was>now " */
 	static int read_once;
 	char key[8];
 
 	if (!read_once) {
-		FILE *f = fopen("/proc/device-tree/chosen/ddr-tune", "r");
+		FILE *f = fopen(path_chosen, "r");
 
 		if (f) {
 			size_t n = fread(buf, 1, sizeof buf - 1, f);
@@ -396,19 +536,26 @@ static unsigned trained(unsigned csr)
 }
 
 /*
- * The last run in the log, if it did not end (the board went down): its
- * nibbles done[][], their "keep:" parts of the line appended to line.
- * Returns the nibbles done, 0: nothing to go on with. -r goes on with it;
+ * The last run in the log, if it did not end (the board went down, or it
+ * was killed): its nibbles done[][], their "keep:" parts of the line
+ * appended to line, the boot ID of its last part into boot. Returns the
+ * nibbles done, 0: nothing to go on with. -r goes on with it;
  * a lane against its nibble does not depend on the start, so nibbles of
  * runs from different starts add up.
  */
-static int unfinished(int done[4][2], char *line, size_t size, int *nline, int say)
+static int unfinished(int done[4][2], char *line, size_t size, int *nline, int say, char *boot, size_t bsize)
 {
-	FILE *f = fopen(LOG, "r");
+	FILE *f = fopen(path_log, "r");
 	char l[512], blk[16][512];
 	int nb = 0, open = 0, n = 0;
 
+	if (boot)
+		boot[0] = 0;
 	while (f && fgets(l, sizeof l, f)) {
+		char *b = strstr(l, " boot ");
+
+		if (boot && (!strncmp(l, "== ", 3) || !strncmp(l, "-- resumed ", 11)))
+			snprintf(boot, bsize, "%.*s", b ? (int)strcspn(b + 6, " \n") : 0, b ? b + 6 : "");
 		if (!strncmp(l, "== ", 3)) {
 			nb = 0;
 			open = 1;
@@ -453,43 +600,257 @@ static int cmp_int(const void *a, const void *b)
 	return *(const int *)a - *(const int *)b;
 }
 
+static void read_boot_id(void)
+{
+	FILE *f = fopen(path_boot, "r");
+
+	boot_id[0] = 0;
+	if (f) {
+		if (fgets(boot_id, sizeof boot_id, f))
+			boot_id[strcspn(boot_id, "\n")] = 0;
+		fclose(f);
+	}
+}
+
+static int map_phy(void)
+{
+#ifdef DDR_SIM
+	char path[512];
+	int fd;
+
+	snprintf(path, sizeof path, "%s/phy", getenv("DDR_SIM_DIR"));
+	fd = open(path, O_RDWR | O_CLOEXEC);
+#else
+	int fd = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
+#endif
+	if (fd < 0) { perror("/dev/mem"); return -1; }
+	phy = mmap(0, PHY_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PHY_BASE_MAP);
+	if (phy == MAP_FAILED) { perror("mmap"); return -1; }
+	if (phy[0xd0000] != 0) {
+		fprintf(stderr, "ddr-calibrate: the PHY's registers are not open to the CPU (MicroContMuxSel)\n");
+		return -1;
+	}
+	return 0;
+}
+
+/* A register a run may touch: a DBYTE's RxPBDly (lanes 0-8) or RxClkDly (nibbles 0-1) */
+static int csr_ours(unsigned c)
+{
+	unsigned db = c >> 12 & 15, r = c >> 8 & 15, reg = c & 0xff;
+
+	return c >> 16 == 1 && db <= 3 && ((reg == 0x68 && r <= 8) || (reg == 0x8c && r <= 1));
+}
+
+/* The lock of the one run: 0 taken, -1 another run holds it, -2 no file */
+static int take_lock(void)
+{
+	saved_fd = open(path_saved, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (saved_fd < 0)
+		return -2;
+	if (flock(saved_fd, LOCK_EX | LOCK_NB)) {
+		close(saved_fd);
+		saved_fd = -1;
+		return -1;
+	}
+	return 0;
+}
+
+/* the registers' values at the run's start into the lock's file, for -R */
+static void write_saved(void)
+{
+	char b[64 + 48 * 12];
+	int n = snprintf(b, sizeof b, "boot %s\n", boot_id);
+
+	for (unsigned i = 0; i < nsaved; i++)
+		n += snprintf(b + n, sizeof b - n, "%05x %04x\n", saved_csr[i], saved_val[i]);
+	if (ftruncate(saved_fd, 0) || pwrite(saved_fd, b, n, 0) != n)
+		perror(path_saved);
+}
+
+/* -R: a killed run's registers back (saved at this start only), /data thawed */
+static int restore_saved(void)
+{
+	int fd = open(path_saved, O_RDWR | O_CLOEXEC), n = 0;
+	char l[64], boot[40] = "";
+	FILE *f;
+
+	if (fd < 0) {
+		thaw();
+		printf("nothing to restore\n");
+		return 0;
+	}
+	if (flock(fd, LOCK_EX | LOCK_NB)) {
+		fprintf(stderr, "ddr-calibrate: a run goes on: not restored\n");
+		close(fd);
+		return 1;
+	}
+	f = fdopen(fd, "r");
+	if (f && fgets(l, sizeof l, f) && !strncmp(l, "boot ", 5))
+		snprintf(boot, sizeof boot, "%.*s", (int)strcspn(l + 5, "\n"), l + 5);
+	if (!boot_id[0] || strcmp(boot, boot_id)) {
+		printf("saved at another start: not restored\n");
+	} else if (map_phy() == 0) {
+		unsigned c, v;
+
+		/* in the order saved: the strobes first */
+		while (fgets(l, sizeof l, f))
+			if (sscanf(l, "%x %x", &c, &v) == 2 && csr_ours(c) && v <= VMAX) {
+				put(c, v);
+				n++;
+			}
+		phy_sync();
+		printf("restored %d registers\n", n);
+	} else {
+		fclose(f);
+		return 1;
+	}
+	unlink(path_saved);
+	thaw();
+	fclose(f);
+	return 0;
+}
+
+#ifdef DDR_SIM
+/* DDR_SIM_DIR: phy (the registers), spec, boot_id, ddr-calibrate.log, chosen, run/, data/ */
+static char sim_paths[5][512];
+
+static int sim_setup(void)
+{
+	const char *d = getenv("DDR_SIM_DIR"), *k = getenv("DDR_SIM_KILL_PROBE"), *sc = getenv("DDR_SIM_SCALE");
+	char spec[512], l[128];
+	struct stat st;
+	FILE *f;
+
+	if (!d || !*d || stat(d, &st) || !S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "ddr-calibrate (sim): DDR_SIM_DIR is not a directory\n");
+		return -1;
+	}
+	snprintf(sim_paths[0], 512, "%s/ddr-calibrate.log", d);
+	snprintf(sim_paths[1], 512, "%s/chosen", d);
+	snprintf(sim_paths[2], 512, "%s/run/ddr-calibrate.saved", d);
+	snprintf(sim_paths[3], 512, "%s/boot_id", d);
+	snprintf(sim_paths[4], 512, "%s/data", d);
+	snprintf(sim_frozen, sizeof sim_frozen, "%s/frozen", d);
+	path_log = sim_paths[0];
+	path_chosen = sim_paths[1];
+	path_saved = sim_paths[2];
+	path_boot = sim_paths[3];
+	path_data = sim_paths[4];
+	path_wdt = "";
+	sim_kill_probe = k ? atoi(k) : 0;
+	if (sc && *sc)
+		tscale = atof(sc);
+	snprintf(spec, sizeof spec, "%s/spec", d);
+	if (!(f = fopen(spec, "r"))) {
+		perror(spec);
+		return -1;
+	}
+	for (int db = 0; db < 4; db++)
+		for (int r = 0; r < 8; r++)
+			sim_lo[db][r] = -1e9, sim_hi[db][r] = 1e9;
+	while (fgets(l, sizeof l, f)) {
+		int db, r;
+		double lo, hi;
+
+		if (sscanf(l, "R %lf", &lo) == 1)
+			sim_R = lo;
+		else if (sscanf(l, "eye %d %d %lf %lf", &db, &r, &lo, &hi) == 4 && db >= 0 && db < 4 && r >= 0 && r < 8)
+			sim_lo[db][r] = lo, sim_hi[db][r] = hi;
+	}
+	fclose(f);
+	return 0;
+}
+#endif
+
+/* "== DATE boot ID" (a new run) or "-- resumed DATE boot ID" into the log */
+static void log_begin(int resume, time_t t0)
+{
+	char b[128];
+	int n = snprintf(b, sizeof b, "%s %.24s boot %s\n", resume ? "-- resumed" : "==", ctime(&t0),
+			 boot_id[0] ? boot_id : "?");
+
+	log_fd = open(path_log, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+	if (log_fd >= 0 && (write(log_fd, b, n) != n || fsync(log_fd)))
+		perror(path_log);
+}
+
+/* the run's block ended; no signal in between: on_sig would end it twice */
+static void log_end(const char *line, long secs)
+{
+	sigset_t set, old;
+	char b[640];
+	int n = snprintf(b, sizeof b, "ddr_tune=%s (%ld s)\n", line, secs);
+
+	outside_signals(&set);
+	pthread_sigmask(SIG_BLOCK, &set, &old);
+	if (log_fd >= 0) {
+		if (write(log_fd, b, n) != n)
+			perror(path_log);
+		fsync(log_fd);
+		close(log_fd);
+		log_fd = -1;
+	}
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
 int main(int argc, char **argv)
 {
-	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, status = 0, done[4][2] = { { 0 } };
+	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, status = 0, restore = 0, done[4][2] = { { 0 } };
 	char dbytes[8] = "0123";
 
-	while ((o = getopt(argc, argv, "wvrpsd:c:f:t:m:")) != -1)
+	while ((o = getopt(argc, argv, "wvrpsRd:c:f:t:m:")) != -1)
 		switch (o) {
 		case 'w': writeit = 1; break;
 		case 'v': verbose = 1; break;
 		case 'r': resume = 1; break;
 		case 'p': progress = 1; break;
 		case 's': status = 1; break;
+		case 'R': restore = 1; break;
 		case 'd': snprintf(dbytes, sizeof dbytes, "%s", optarg); break;
 		case 'c': coarse_ms = atoi(optarg); break;
 		case 'f': fine_ms = atoi(optarg); break;
 		case 't': thresh = atoi(optarg); break;
 		case 'm': mb = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: ddr-calibrate [-w] [-v] [-r] [-p] [-s] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n");
+			fprintf(stderr, "usage: ddr-calibrate [-w] [-v] [-r] [-p] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n"
+					"       ddr-calibrate -s | -R\n");
 			return 2;
 		}
+#ifdef DDR_SIM
+	if (sim_setup())
+		return 2;
+	if (writeit) {
+		fprintf(stderr, "ddr-calibrate (sim): no -w\n");
+		return 2;
+	}
+#endif
+	read_boot_id();
 
 	if (status) {
-		/* -s: "unfinished N", the nibbles an interrupted run did (0: none) */
-		printf("unfinished %d\n", unfinished(done, NULL, 0, &o, 0));
+		char ub[40];
+		int n = unfinished(done, NULL, 0, &o, 0, ub, sizeof ub);
+
+		if (n)
+			printf("unfinished %d %s\n", n, boot_id[0] && !strcmp(ub, boot_id) ? "this" : "before");
+		else
+			printf("unfinished 0\n");
 		return 0;
 	}
+	if (restore)
+		return restore_saved();
 
-	int fd = open("/dev/mem", O_RDWR | O_SYNC);
-
-	if (fd < 0) { perror("/dev/mem"); return 1; }
-	phy = mmap(0, PHY_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PHY_BASE);
-	if (phy == MAP_FAILED) { perror("mmap"); return 1; }
-	if (phy[0xd0000] != 0) {
-		fprintf(stderr, "ddr-calibrate: the PHY's registers are not open to the CPU (MicroContMuxSel)\n");
+	switch (take_lock()) {
+	case -1:
+		fprintf(stderr, "ddr-calibrate: another run goes on\n");
+		if (progress)
+			printf("fail busy\n");
+		return 1;
+	case -2:
+		perror(path_saved);
 		return 1;
 	}
+	if (map_phy())
+		return 1;
 	for (int db = 0; db < 4; db++)
 		for (int b = 0; b < 8; b++)
 			lnsel[db][b] = phy[CSR_LNSEL(db, b)] & 7;
@@ -501,6 +862,7 @@ int main(int argc, char **argv)
 	for (int db = 0; db < 4; db++)
 		for (int r = 0; r < 8; r++)
 			save(CSR_PBD(db, r));
+	write_saved();
 	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGABRT, SIGSEGV, SIGBUS, SIGILL };
 
 	for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
@@ -508,8 +870,8 @@ int main(int argc, char **argv)
 	signal(SIGPIPE, SIG_IGN);
 	setvbuf(stdout, 0, _IOLBF, 0);
 
-	data_fd = open("/data", O_RDONLY);
-	wdt_fd = open("/dev/watchdog", O_WRONLY);
+	if (*path_wdt)
+		wdt_fd = open(path_wdt, O_WRONLY | O_CLOEXEC);
 	if (wdt_fd >= 0) {
 		int t = 30;
 
@@ -519,6 +881,11 @@ int main(int argc, char **argv)
 	struct worker ws[8];
 	pthread_t th[8];
 	int nw = 0;
+#ifdef DDR_SIM
+	nw = 1;
+	(void)ws;
+	(void)mb;
+#else
 	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
 
 	for (int c = 0; c < ncpu && nw < 8; c++, nw++) {
@@ -529,25 +896,31 @@ int main(int argc, char **argv)
 		if (ws[nw].buf == MAP_FAILED) { perror("mmap"); return 1; }
 		mlock(ws[nw].buf, (size_t)mb << 20);
 	}
+#endif
 
 	FILE *lg = NULL;
 	time_t t0 = time(0);
 	char line[512] = "";
 	int nline = 0;
 
-	if (resume && !unfinished(done, line, sizeof line, &nline, 1))
+	if (resume && !unfinished(done, line, sizeof line, &nline, 1, NULL, 0))
 		resume = 0;
-	{
-		FILE *f = fopen(LOG, "a");
-
-		if (f) {
-			fprintf(f, resume ? "-- resumed %s" : "== %s", ctime(&t0));
-			fclose(f);
-		}
-	}
+	log_begin(resume, t0);
 	freeze();
-	for (int i = 0; i < nw; i++)
-		pthread_create(&th[i], 0, work, &ws[i]);
+	{
+		/* the workers never take the signals from outside: on_sig runs in this thread */
+		sigset_t set, old;
+
+		outside_signals(&set);
+		pthread_sigmask(SIG_BLOCK, &set, &old);
+		for (int i = 0; i < nw; i++)
+#ifdef DDR_SIM
+			pthread_create(&th[i], 0, work, NULL);
+#else
+			pthread_create(&th[i], 0, work, &ws[i]);
+#endif
+		pthread_sigmask(SIG_SETMASK, &old, NULL);
+	}
 	idle_ms(1000);
 	if (atomic_load(&nerr)) {
 		fprintf(stderr, "ddr-calibrate: wrong words at the trained values: stopping\n");
@@ -555,7 +928,6 @@ int main(int argc, char **argv)
 			printf("fail trained\n");
 		goto out;
 	}
-
 	for (const char *dp = dbytes; *dp; dp++)
 		if (*dp >= '0' && *dp <= '3')
 			for (int u = 0; u < 2; u++)
@@ -570,7 +942,7 @@ int main(int argc, char **argv)
 		for (int u = 0; u < 2; u++) {
 			if (done[db][u])
 				continue;
-			int E[4], T[4], ce[4], ct[4], nline0 = nline, tot[4], put[4];
+			int E[4], T[4], ce[4], ct[4], nline0 = nline, tot[4], keep[4];
 			unsigned bl2v[4];
 			double S[4], R = 2.5;
 			char rnote[64] = "";
@@ -596,12 +968,12 @@ int main(int argc, char **argv)
 			if (d >= 2 && !ce[x]) {
 				int c2;
 
-				phy[cc] = cb - d;
-				__asm__ volatile("dsb sy" ::: "memory");
+				put(cc, cb - d);
+				phy_sync();
 				int E2 = early_edge(db, 4 * u + x, &c2);
 
-				phy[cc] = cb;
-				__asm__ volatile("dsb sy" ::: "memory");
+				put(cc, cb);
+				phy_sync();
 				double r = (double)(E[x] - E2) / d;
 
 				if (!c2 && r >= 1 && r <= 4)
@@ -612,7 +984,10 @@ int main(int argc, char **argv)
 				snprintf(rnote, sizeof rnote, " (R not measured: 2.5 taken)");
 			}
 
-			/* lift the nibble as far as the highest delay allows (16 strobe steps at most) */
+			/*
+			 * lift the nibble as far as the highest delay and the strobe
+			 * allow (16 strobe steps at most)
+			 */
 			int maxb = 0, lifted = 0;
 
 			for (int i = 0; i < 4; i++)
@@ -620,6 +995,8 @@ int main(int argc, char **argv)
 					maxb = phy[CSR_PBD(db, 4 * u + i)];
 			int sl = (int)((VMAX - maxb) / (R + 0.5));
 
+			if (sl > VMAX - (int)phy[cc])
+				sl = VMAX - (int)phy[cc];
 			for (sl = sl > 16 ? 16 : sl; sl >= 2; sl -= 3) {
 				if (lift(db, u, R, sl, 1) == 0) {
 					lifted = sl;
@@ -675,14 +1052,14 @@ int main(int argc, char **argv)
 				int moved = (int)cur - (int)trained(c);
 
 				bl2v[i] = trained(c);
-				put[i] = 0;
+				keep[i] = 0;
 				tot[i] = 0;
 				if (ok && (abs(reli) >= thresh || moved)) {
 					tot[i] = moved + reli;
-					put[i] = 1;
+					keep[i] = 1;
 				} else if (!ok && moved) {
 					tot[i] = moved;
-					put[i] = 1;
+					keep[i] = 1;
 				}
 			}
 			/*
@@ -695,18 +1072,18 @@ int main(int argc, char **argv)
 			int lift_all = 0;
 
 			for (int i = 0; i < 4; i++)
-				if (put[i] && (int)bl2v[i] + tot[i] < -lift_all)
+				if (keep[i] && (int)bl2v[i] + tot[i] < -lift_all)
 					lift_all = -((int)bl2v[i] + tot[i]);
 			for (int i = 0; i < 4; i++) {
 				unsigned c = CSR_PBD(db, 4 * u + i);
 
 				if (lift_all) {
 					tot[i] += lift_all;
-					put[i] = 1;
+					keep[i] = 1;
 				}
 				if ((int)bl2v[i] + tot[i] > VMAX)
 					tot[i] = VMAX - (int)bl2v[i];
-				if (put[i] && tot[i])
+				if (keep[i] && tot[i])
 					nline += snprintf(line + nline, sizeof line - nline, "%s%05x%c%x",
 							  nline ? " " : "", c, tot[i] < 0 ? '-' : '+', abs(tot[i]));
 			}
@@ -714,7 +1091,7 @@ int main(int argc, char **argv)
 				printf("dbyte %d nibble %d: a lane below 0, the nibble %d steps later\n", db, u, lift_all);
 			/* the nibble's result on disk before the next one */
 			thaw();
-			lg = fopen(LOG, "a");
+			lg = fopen(path_log, "a");
 			if (lg) {
 				fprintf(lg, "%s keep:%s%s\n", nib, nline > nline0 && nline0 ? "" : " ", line + nline0);
 				fflush(lg);
@@ -751,11 +1128,14 @@ out:
 	restore_all();
 	thaw();
 	wdt_close();
-	lg = fopen(LOG, "a");
-	if (lg) {
-		fprintf(lg, "ddr_tune=%s (%ld s)\n", line, (long)(time(0) - t0));
-		fclose(lg);
-	}
+	log_end(line, (long)(time(0) - t0));
+	unlink(path_saved);
+	close(saved_fd);
+	if (atomic_load(&clamped))
+		fprintf(stderr, "ddr-calibrate: %d values out of 0..3f were clamped: a bug\n", atomic_load(&clamped));
+#ifdef DDR_SIM
+	fprintf(stderr, "sim: clamped %d, out of field %d\n", atomic_load(&clamped), atomic_load(&sim_bad));
+#endif
 	if (writeit) {
 		if (!nline) {
 			printf("nothing to keep: ddr-tune left as it is\n");
