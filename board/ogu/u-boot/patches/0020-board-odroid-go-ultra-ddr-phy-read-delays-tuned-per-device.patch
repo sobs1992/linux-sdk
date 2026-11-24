@@ -1,16 +1,20 @@
 From: OdroidLinux SDK
 Subject: [PATCH] board: odroid-go-ultra: DDR PHY read delays tuned per device
 
-One GO Ultra reads bit 42 of a 64-bit word wrong now and then under GPU
+GO Ultras read bit 42 of a 64-bit word wrong now and then under GPU
 load (the cache line wrong, DRAM right: Oopses, panics, games crashing).
 A scan of the PHY's read eye at run time (move one delay, check memory,
 put it back at the first wrong word) found the cause: BL2's training
 leaves that bit, DBYTE1 lane 6, at the late edge of its eye - one step of
-the read strobe and it fails, its neighbours stand five or six - and on
-that unit only its odd beats fail (bits 40-47, never 8-15). Its own read
-delay (RxPBDly) 16 steps later puts it among its neighbours: a DOOM 3
-soak with the GPU at 800 MHz ran 15 minutes without an error; with the
-trained delays the first wrong word came after 28 s and a panic after 90.
+the read strobe and it fails, its neighbours stand five or six. The
+training differs from start to start: with a bad one both units tried
+failed (the second one less often, and on even beats too, bit 10).
+Its own read delay (RxPBDly) 16 steps later puts it among its
+neighbours: DOOM 3 soaks with a memory check, GPU at 800 MHz, ran
+without an error for 6.7 hours over 5 starts on the first unit and 4
+hours over 3 starts on the second; without it the first unit's first
+wrong word came after 28 s and a panic after 90, the second one's 7
+wrong words in an 82-minute run.
 
 BL2 is Amlogic's binary and trains at every start, so U-Boot moves the
 trained delays before the kernel: steps per CSR from a sector of the
@@ -41,7 +45,7 @@ kernel's device tree records the trained and the new values.
  /*
 + * The DDR PHY's read delays, tuned per device (docs/boards/ogu.md,
 + * "Память: подстройка задержек чтения"). BL2 trains them at every start;
-+ * on one GO Ultra the training leaves one data bit (bit 42 of the 64-bit
++ * on the GO Ultra the training leaves one data bit (bit 42 of the 64-bit
 + * word: DBYTE1 lane 6) at the edge of its eye, and under GPU load its
 + * odd beats are read wrong now and then (the cache line wrong, DRAM
 + * right). A line of the eMMC's sector OGU_TUNE_SECTOR, between the FIP
