@@ -5,7 +5,12 @@
 #   device after <file>; the partition table after them stays.
 # EJECT=1: eject the device afterwards (a board showing its eMMC as a USB
 # disk then restarts).
+# KEEP="SECTOR:PREFIX ...": sectors of the unit the image must not
+# overwrite (keep-sectors.sh; the Makefile passes IMAGE_KEEP_SECTORS).
 set -euo pipefail
+. "$(dirname "$0")/keep-sectors.sh"
+SUDO=sudo
+trap keep_clean EXIT
 
 FILE=$1 DEV=${2:-} SECTOR=${3:-0} MBR=${4:-}
 die() { echo "flash: $*" >&2; exit 1; }
@@ -36,7 +41,9 @@ read -r -p "Write $what to $DEV at sector $SECTOR? Data on $DEV will be lost. Ty
 for part in $(lsblk -lnpo NAME,MOUNTPOINT "$DEV" | awk '$2 != "" {print $1}'); do
 	sudo umount "$part"
 done
+keep_read "$DEV" "$(stat -c %s "$FILE")" "$SECTOR"
 sudo dd if="$FILE" of="$DEV" bs=4M seek=$(( SECTOR * 512 )) oflag=seek_bytes conv=fsync status=progress
+keep_write "$DEV"
 if [ -n "$MBR" ]; then
 	sudo dd if="$MBR" of="$DEV" conv=notrunc,fsync status=none
 fi

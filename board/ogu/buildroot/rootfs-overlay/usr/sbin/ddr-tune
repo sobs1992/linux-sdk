@@ -9,8 +9,8 @@
 #
 # CSR (hex: block << 16 | instance << 12 | r << 8 | register), + or -,
 # steps (hex). Taken: the DBYTEs' RxPBDly (register 68, lanes r 0-8, one
-# bit's delay) and RxClkDly (8c, nibbles u 0-1, the read strobe); a value
-# stays within 0..3f. The CPU's bit b of byte n (of a 64-bit word) is DBYTE
+# bit's delay) and RxClkDly (8c, nibbles u 0-1, the read strobe), each CSR
+# once (40 at most); a value stays within 0..3f. The CPU's bit b of byte n (of a 64-bit word) is DBYTE
 # n%4, lane DqbLnSel (register a0+b of that DBYTE): bit 42 = 11668.
 #
 #   ddr-tune               the line kept, what U-Boot did at this start
@@ -32,7 +32,7 @@ emmc() {
 	done
 	return 1
 }
-DISK=$(emmc) || die "no eMMC"
+disk() { DISK=$(emmc) || die "no eMMC"; }
 
 kept() {
 	dd if="$DISK" bs=512 skip=$SECTOR count=1 2>/dev/null | tr -d '\0' | sed -n 's/^ddr_tune=//p'
@@ -48,18 +48,24 @@ csr_ok() {
 	r=$((c >> 8 & 15)) reg=$((c & 255))
 	{ [ $reg -eq $((0x68)) ] && [ $r -le 8 ]; } || { [ $reg -eq $((0x8c)) ] && [ $r -le 1 ]; }
 }
+# U-Boot moves a CSR as often as the line names it: once only
 check() {
+	seen=" "
 	for t in $1; do
 		set -- $(parse "$t")
 		[ $# -eq 3 ] || die "not CSR+STEPS or CSR-STEPS: $t"
 		csr_ok "$1" || die "not a DBYTE RxPBDly (..68) or RxClkDly (..8c) register: $1"
 		[ $((0x$3)) -le 63 ] || die "more than 3f steps: $t"
+		c=$(printf '%05x' $((0x$1)))
+		case $seen in *" $c "*) die "$c twice" ;; esac
+		seen="$seen$c "
 	done
 }
 addr() { printf '0x%x' $((PHY + (0x$1 << 1))); }
 
 case $1 in
 "")
+	disk
 	line=$(kept)
 	echo "kept: ${line:-none}"
 	done=
@@ -73,6 +79,7 @@ case $1 in
 set)
 	[ -n "$2" ] || die "set 'CSR+STEPS ...'"
 	check "$2"
+	disk
 	old=$(dd if="$DISK" bs=512 skip=$SECTOR count=1 2>/dev/null | tr -d '\0')
 	case $old in ""|ddr_tune=*) ;; *) die "sector $SECTOR of $DISK holds something else: not written" ;; esac
 	printf 'ddr_tune=%s\n' "$2" | dd of="$DISK" bs=512 seek=$SECTOR count=1 conv=sync,notrunc,fsync 2>/dev/null ||
@@ -80,12 +87,14 @@ set)
 	echo "kept: $2 (from the next start on; now: ddr-tune apply)"
 	;;
 clear)
+	disk
 	dd if=/dev/zero of="$DISK" bs=512 seek=$SECTOR count=1 conv=notrunc,fsync 2>/dev/null || die "cannot write $DISK"
 	echo "kept: none (from the next start on)"
 	;;
 apply)
 	[ -e /proc/device-tree/chosen/ddr-tune ] && die "U-Boot applied it at this start already"
 	[ -e /run/ddr-tune.applied ] && die "applied at this start already"
+	disk
 	line=$(kept)
 	[ -n "$line" ] || die "nothing kept"
 	check "$line"

@@ -445,7 +445,7 @@ endef
 # 440 bytes only: the partition table stays)
 define flash-boot-area
 	@test -f $(IMAGES_DIR)/$(1).sector || { echo "Run 'make image' first"; exit 1; }
-	$(3) $(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/$(1).bin $(2) $$(cat $(IMAGES_DIR)/$(1).sector) \
+	$(3) KEEP='$(IMAGE_KEEP_SECTORS)' $(SDK_DIR)/scripts/flash.sh $(IMAGES_DIR)/$(1).bin $(2) $$(cat $(IMAGES_DIR)/$(1).sector) \
 		$(if $(IMAGE_MBR_CODE),$(IMAGES_DIR)/$(1).mbr)
 endef
 
@@ -468,7 +468,7 @@ update: check-fw
 
 # make flash DEV=/dev/sdX
 flash: check-fw
-	$(SDK_DIR)/scripts/flash.sh $(IMAGE_FILE) $(DEV) 0
+	KEEP='$(IMAGE_KEEP_SECTORS)' $(SDK_DIR)/scripts/flash.sh $(IMAGE_FILE) $(DEV) 0
 
 # Rewrite the bootloader and the BOOT partition (kernel, dtbs, extlinux),
 # keeping the partition table and the rootfs: make flash-boot DEV=/dev/sdX.
@@ -482,7 +482,7 @@ flash-boot: check-fw
 EMMC_DEV = $(or $(DEV),$(shell $(SDK_DIR)/scripts/usb-disk.sh $(EMMC_UMS_USB_ID)))
 flash-emmc: check-fw
 	@test -n "$(IMAGE_EMMC_FILE)" || { echo "$(FW) has no eMMC image (IMAGE_EMMC_DISK_ID)"; exit 1; }
-	EJECT=1 $(SDK_DIR)/scripts/flash.sh $(IMAGE_EMMC_FILE) $(EMMC_DEV) 0
+	EJECT=1 KEEP='$(IMAGE_KEEP_SECTORS)' $(SDK_DIR)/scripts/flash.sh $(IMAGE_EMMC_FILE) $(EMMC_DEV) 0
 
 flash-emmc-boot: check-fw
 	@test -n "$(IMAGE_EMMC_FILE)" || { echo "$(FW) has no eMMC image (IMAGE_EMMC_DISK_ID)"; exit 1; }

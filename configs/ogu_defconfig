@@ -119,3 +119,7 @@ IMAGE_DISK_ID := 0x4f475531
 # flash-emmc-boot); the disk is found by U-Boot's gadget USB id.
 IMAGE_EMMC_DISK_ID := 0x4f475545
 EMMC_UMS_USB_ID    := 1b8e:fada
+# Sectors of the unit, not of the image: the DDR tune line (U-Boot patch
+# 0020, /usr/sbin/ddr-tune) stays when an image is written over it
+# (scripts/flash.sh, KEEP)
+IMAGE_KEEP_SECTORS := 32510:ddr_tune=
