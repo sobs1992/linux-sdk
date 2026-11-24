@@ -304,6 +304,18 @@ def main():
         app2.ctl("launch doom")
         cell("orphan: a game refused meanwhile", app2.wait_log("doom not started: the memory calibration runs", 5),
              app2.log()[-400:])
+        app2.key("b")
+        mark = len(app2.log())
+        app2.ctl("open memcal")
+        time.sleep(1)
+        app2.shot("screen")
+        app2.key("a")         # no row to start from: nothing happens
+        app2.key("down")
+        app2.key("a")
+        time.sleep(1)
+        cell("orphan: nothing offered to start, none started",
+             "ddr-calibrate -p" not in app2.log()[mark:] and "fail busy" not in app2.log()[mark:],
+             app2.log()[mark:][-400:])
         cell("orphan: its end seen, -R, guards gone", app2.wait_log("the calibration started before has ended", 90),
              app2.log()[-400:])
         time.sleep(0.5)
