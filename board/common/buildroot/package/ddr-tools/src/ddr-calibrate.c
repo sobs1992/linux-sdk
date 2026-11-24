@@ -4,25 +4,27 @@
  * leaves off-centre against the others of their nibble (docs/boards/ogu.md,
  * "Память: подстройка задержек чтения").
  *
- *   ddr-calibrate [-w] [-d DBYTES] [-c ms] [-f ms] [-t steps]
+ *   ddr-calibrate [-w] [-v] [-r] [-d DBYTES] [-c ms] [-f ms] [-t steps]
  *
  * Memory checkers run on all CPUs (own buffers, random words, read back
  * over and over). For each lane:
  *   early edge  its own read delay (RxPBDly) later, step by step, until the
  *               first wrong word: E steps;
- *   late edge   its nibble's read strobe (RxClkDly) later until the first
- *               wrong word on this lane, the other three lanes held 20 steps
- *               later meanwhile so that they do not fail first: T strobe
- *               steps;
- * and per nibble the strobe step in RxPBDly steps, R: the early edge of one
- * lane again with the strobe a few steps earlier. At the first wrong word
- * every register goes back at once (also on a fatal signal). The lane's
- * centre is S = (E - R*T) / 2 steps later; what is kept is the lane against
+ *   late edge   its own delay earlier until the first wrong word: T steps;
+ *               for room below it the nibble is lifted first (its four
+ *               delays later, its strobe later by as much, step by step:
+ *               each lane samples where it did), see lift();
+ * and per nibble the strobe step in RxPBDly steps, R (for the lift): the
+ * early edge of one lane again with the strobe a few steps earlier. At the
+ * first wrong word every register goes back at once (also on a fatal
+ * signal). The lane's centre is S = (E - T) / 2 steps later; what is kept is the lane against
  * its nibble, S - median(S of the nibble): the nibble's own position (its
  * strobe) is trained anew at every start, a lane's skew against its
  * neighbours is the same every time. Lanes off by -t steps or more (4) make
  * the ddr-tune line, from BL2's training (/chosen/ddr-tune says what U-Boot
- * moved at this start); -w keeps it (ddr-tune set), from the next start on.
+ * moved at this start); a lane that would go below 0 lifts its whole nibble
+ * instead. -w keeps the line (ddr-tune set), from the next start on; -r goes
+ * on with an interrupted run (the board went down) from its next nibble.
  *
  * A step at an edge reads wrong words; they can hit the kernel. /data is
  * frozen while measuring (a wrong line written back stays in RAM only), the
@@ -45,6 +47,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -54,7 +58,6 @@
 #define CSR_CLK(db, u)	(0x10000u | (db) << 12 | (u) << 8 | 0x8c)
 #define CSR_LNSEL(db, b) (0x10000u | (db) << 12 | (0xa0 + (b)))
 #define VMAX		0x3f
-#define PROTECT		20	/* the other lanes of the nibble, late-edge scans */
 #define LOG		"/data/ddr-calibrate.log"
 
 static volatile uint16_t *phy;
@@ -62,6 +65,24 @@ static int data_fd = -1, wdt_fd = -1;
 static atomic_int stop;
 static atomic_ullong errbits;	/* XOR bits of the wrong words since the probe began */
 static atomic_int nerr;
+static int verbose;	/* -v: each edge and lift */
+
+/*
+ * The probe in flight: the worker that reads the first wrong word puts its
+ * registers back itself, at once - the fewer wrong words the rest of the
+ * system (kernel, network, the display) reads meanwhile, the better.
+ */
+static unsigned armed_n, armed_csr[8], armed_back[8];
+static atomic_int armed;
+
+static void disarm_restore(void)
+{
+	if (atomic_exchange(&armed, 0)) {
+		for (unsigned i = 0; i < armed_n; i++)
+			phy[armed_csr[i]] = armed_back[i];
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+}
 
 /* every register this run may touch, with the value it had at the start */
 static unsigned saved_csr[48], saved_val[48], nsaved;
@@ -128,6 +149,8 @@ static void *work(void *a)
 	CPU_ZERO(&s);
 	CPU_SET(w->cpu, &s);
 	sched_setaffinity(0, sizeof s, &s);
+	/* below the main thread (it puts the registers back) and ssh */
+	setpriority(PRIO_PROCESS, syscall(SYS_gettid), 10);
 	for (unsigned pass = 0; !atomic_load(&stop); pass++) {
 		uint64_t sd = (uint64_t)w->cpu << 56 ^ mix(pass);
 
@@ -138,6 +161,7 @@ static void *work(void *a)
 				uint64_t e = mix(i ^ sd), g = w->buf[i];
 
 				if (g != e) {
+					disarm_restore();
 					atomic_fetch_or(&errbits, g ^ e);
 					atomic_fetch_add(&nerr, 1);
 					w->buf[i] = e;
@@ -208,6 +232,12 @@ static uint32_t probe(int n, const unsigned *csr, const unsigned *val, const uns
 	atomic_store(&errbits, 0);
 	int before = atomic_load(&nerr);
 
+	armed_n = n;
+	for (int i = 0; i < n; i++) {
+		armed_csr[i] = csr[i];
+		armed_back[i] = back[i];
+	}
+	atomic_store(&armed, 1);
 	for (int i = 0; i < n; i++)
 		phy[csr[i]] = val[i];
 	__asm__ volatile("dsb sy" ::: "memory");
@@ -222,12 +252,15 @@ static uint32_t probe(int n, const unsigned *csr, const unsigned *val, const uns
 		wdt_ping();
 		usleep(200);
 	}
+	atomic_store(&armed, 0);
 	for (int i = 0; i < n; i++)
 		phy[csr[i]] = back[i];
 	__asm__ volatile("dsb sy" ::: "memory");
 	if (!bad)
 		return 0;
 	idle_ms(300);	/* the wrong words counted, the workers past them */
+	if (verbose)
+		printf("  %05x=%02x: wrong bits %016llx\n", csr[0], val[0], (unsigned long long)atomic_load(&errbits));
 	return lanes_of(atomic_load(&errbits)) | 0x80000000u;
 }
 
@@ -237,18 +270,20 @@ static int coarse_ms = 150, fine_ms = 1000;
  * Edges are found one step at a time, never more: one step past an edge
  * reads a word wrong now and then, three or four steps past it nearly every
  * word of the lane, and before the registers go back such a burst can reach
- * the kernel. A pass with short waits (coarse_ms) stops at the first wrong
- * word; the two steps before it are tried again with long waits (fine_ms),
- * the edge being the first that reads wrong.
+ * the kernel. That rules out the strobe for it: one strobe step is two or
+ * three delay steps. A pass with short waits (coarse_ms) stops at the first
+ * wrong word; the two steps before it are tried again with long waits
+ * (fine_ms), the edge being the first that reads wrong. dir: +1 the delay
+ * later (towards the early edge), -1 earlier (the late edge).
  */
-static int edge(unsigned c, unsigned base, uint32_t lane, int *cens)
+static int edge(unsigned c, unsigned base, int dir, uint32_t lane, int *cens)
 {
 	unsigned v;
 	int k;
 
 	*cens = 2;
-	for (k = 1; base + k <= VMAX; k++) {
-		v = base + k;
+	for (k = 1; dir > 0 ? base + k <= VMAX : (int)base - k >= 0; k++) {
+		v = base + dir * k;
 		uint32_t l = probe(1, &c, &v, &base, coarse_ms);
 
 		if (l) {
@@ -257,9 +292,9 @@ static int edge(unsigned c, unsigned base, uint32_t lane, int *cens)
 		}
 	}
 	if (*cens == 2)
-		return VMAX - base + 1;
+		return dir > 0 ? VMAX - (int)base + 1 : (int)base + 1;
 	for (int kk = k - 2 > 0 ? k - 2 : 1; kk < k; kk++) {
-		v = base + kk;
+		v = base + dir * kk;
 		uint32_t l = probe(1, &c, &v, &base, fine_ms);
 
 		if (l) {
@@ -270,41 +305,70 @@ static int edge(unsigned c, unsigned base, uint32_t lane, int *cens)
 	return k;
 }
 
-/* the early edge of lane (db, r): steps of its own delay to the first wrong word; *cens: none up to 3f */
-static int early_edge(int db, int r, int *cens)
+/* the edge of lane (db, r) its own delay reaches moving dir: steps to the first wrong word */
+static int lane_edge(int db, int r, int dir, int *cens)
 {
 	unsigned c = CSR_PBD(db, r);
-	int k = edge(c, phy[c], 1u << (db * 8 + r), cens);
+	int k = edge(c, phy[c], dir, 1u << (db * 8 + r), cens);
 
 	if (*cens == 1)	/* another lane read wrong: moving this one should not do that */
 		*cens = 0;
 	return k;
 }
 
-/*
- * The late edge of lane (db, 4u+i): steps of the nibble's strobe to its first
- * wrong word, the other lanes held later by hold[] meanwhile. *cens: another
- * lane failed first (1) or none up to 3f (2): the edge is at least that far.
- */
-static int late_edge(int db, int u, int i, const int *hold, int *cens)
+static int early_edge(int db, int r, int *cens)
 {
-	unsigned c = CSR_CLK(db, u), base = phy[c], pc[4], pb[4], pv[4];
-	int np = 0, k;
+	return lane_edge(db, r, +1, cens);
+}
 
-	for (int j = 0; j < 4; j++)
-		if (j != i && hold[j] > 0) {
-			pc[np] = CSR_PBD(db, 4 * u + j);
-			pb[np] = phy[pc[np]];
-			pv[np] = pb[np] + hold[j] > VMAX ? VMAX : pb[np] + hold[j];
-			phy[pc[np]] = pv[np];
-			np++;
-		}
-	__asm__ volatile("dsb sy" ::: "memory");
-	k = edge(c, base, 1u << (db * 8 + 4 * u + i), cens);
-	for (int j = 0; j < np; j++)
-		phy[pc[j]] = pb[j];
-	__asm__ volatile("dsb sy" ::: "memory");
-	return k;
+/*
+ * The late edge needs room below a lane's delay, which is often 0. The
+ * nibble is lifted first, s times: its four delays later by R's share of a
+ * strobe step (towards the early edges, far off), then its strobe one step
+ * later (back): every lane samples where it did, give or take R's error
+ * (the same for the four, so it drops out of a lane against its nibble).
+ * Lowered the other way round: the strobe first. A wrong word on the way:
+ * -1, back where it began.
+ */
+static int lift_step(double R, int j)
+{
+	return (int)(R * j + 0.5) - (int)(R * (j - 1) + 0.5);
+}
+
+static int lift(int db, int u, double R, int s, int up)
+{
+	unsigned cc = CSR_CLK(db, u);
+	int done = 0, bad = 0;
+
+	for (int j = 1; j <= s && !bad; j++, done++) {
+		int jj = up ? j : s - j + 1, inc = lift_step(R, jj), before = atomic_load(&nerr);
+
+		if (!up)
+			phy[cc] -= 1;
+		for (int i = 0; i < 4; i++)
+			phy[CSR_PBD(db, 4 * u + i)] += up ? inc : -inc;
+		if (up)
+			phy[cc] += 1;
+		__asm__ volatile("dsb sy" ::: "memory");
+		idle_ms(30);
+		bad = atomic_load(&nerr) != before;
+	}
+	if (!bad)
+		return 0;
+	/* undo what was done, strobe first going down */
+	for (int j = done; j >= 1; j--) {
+		int jj = up ? j : s - j + 1, inc = lift_step(R, jj);
+
+		if (up)
+			phy[cc] -= 1;
+		for (int i = 0; i < 4; i++)
+			phy[CSR_PBD(db, 4 * u + i)] += up ? -inc : inc;
+		if (!up)
+			phy[cc] += 1;
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+	idle_ms(300);
+	return -1;
 }
 
 /* BL2's value of a register: /chosen/ddr-tune "CSR:trained>now ..." if U-Boot moved it */
@@ -338,19 +402,21 @@ static int cmp_int(const void *a, const void *b)
 
 int main(int argc, char **argv)
 {
-	int writeit = 0, thresh = 4, o, mb = 24;
+	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, done[4][2] = { { 0 } };
 	char dbytes[8] = "0123";
 
-	while ((o = getopt(argc, argv, "wd:c:f:t:m:")) != -1)
+	while ((o = getopt(argc, argv, "wvrd:c:f:t:m:")) != -1)
 		switch (o) {
 		case 'w': writeit = 1; break;
+		case 'v': verbose = 1; break;
+		case 'r': resume = 1; break;
 		case 'd': snprintf(dbytes, sizeof dbytes, "%s", optarg); break;
 		case 'c': coarse_ms = atoi(optarg); break;
 		case 'f': fine_ms = atoi(optarg); break;
 		case 't': thresh = atoi(optarg); break;
 		case 'm': mb = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: ddr-calibrate [-w] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n");
+			fprintf(stderr, "usage: ddr-calibrate [-w] [-v] [-r] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n");
 			return 2;
 		}
 
@@ -366,12 +432,14 @@ int main(int argc, char **argv)
 	for (int db = 0; db < 4; db++)
 		for (int b = 0; b < 8; b++)
 			lnsel[db][b] = phy[CSR_LNSEL(db, b)] & 7;
+	/* strobes first: put back in this order, a lifted nibble comes down by its early side */
 	for (int db = 0; db < 4; db++) {
-		for (int r = 0; r < 8; r++)
-			save(CSR_PBD(db, r));
 		save(CSR_CLK(db, 0));
 		save(CSR_CLK(db, 1));
 	}
+	for (int db = 0; db < 4; db++)
+		for (int r = 0; r < 8; r++)
+			save(CSR_PBD(db, r));
 	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGABRT, SIGSEGV, SIGBUS, SIGILL };
 
 	for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
@@ -406,11 +474,50 @@ int main(int argc, char **argv)
 	char line[512] = "";
 	int nline = 0;
 
+	/*
+	 * -r: go on with the last run in the log if it did not end (the board went
+	 * down): its nibbles are done, their "keep:" parts of the line are taken.
+	 * A lane against its nibble does not depend on the start, so nibbles of
+	 * runs from different starts add up.
+	 */
+	if (resume) {
+		FILE *f = fopen(LOG, "r");
+		char l[512], blk[16][512];
+		int nb = 0, open = 0;
+
+		while (f && fgets(l, sizeof l, f)) {
+			if (!strncmp(l, "== ", 3)) {
+				nb = 0;
+				open = 1;
+			} else if (!strncmp(l, "ddr_tune=", 9)) {
+				open = 0;
+			} else if (open && !strncmp(l, "dbyte ", 6) && nb < 16) {
+				snprintf(blk[nb++], sizeof blk[0], "%s", l);
+			}
+		}
+		if (f)
+			fclose(f);
+		if (!open)
+			nb = 0;
+		for (int i = 0; i < nb; i++) {
+			int db, u;
+			char *k = strstr(blk[i], " keep:");
+
+			if (sscanf(blk[i], "dbyte %d nibble %d:", &db, &u) != 2 || db < 0 || db > 3 || u < 0 || u > 1)
+				continue;
+			done[db][u] = 1;
+			for (char *t = k ? strtok(k + 6, " \n") : NULL; t; t = strtok(NULL, " \n"))
+				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
+			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
+		}
+		if (!nb)
+			resume = 0;
+	}
 	{
 		FILE *f = fopen(LOG, "a");
 
 		if (f) {
-			fprintf(f, "== %s", ctime(&t0));
+			fprintf(f, resume ? "-- resumed %s" : "== %s", ctime(&t0));
 			fclose(f);
 		}
 	}
@@ -430,16 +537,15 @@ int main(int argc, char **argv)
 		if (db < 0 || db > 3)
 			continue;
 		for (int u = 0; u < 2; u++) {
-			int E[4], T[4], ce[4], ct[4], hold[4];
-			double S[4], R = 2;
-			char rnote[32] = "";
+			if (done[db][u])
+				continue;
+			int E[4], T[4], ce[4], ct[4], nline0 = nline, tot[4], put[4];
+			unsigned bl2v[4];
+			double S[4], R = 2.5;
+			char rnote[64] = "";
 
 			for (int i = 0; i < 4; i++)
 				E[i] = early_edge(db, 4 * u + i, &ce[i]);
-			for (int i = 0; i < 4; i++)
-				hold[i] = E[i] - 6 < PROTECT ? (E[i] - 6 > 0 ? E[i] - 6 : 0) : PROTECT;
-			for (int i = 0; i < 4; i++)
-				T[i] = late_edge(db, u, i, hold, &ct[i]);
 
 			/* strobe step in delay steps: the lane with the most early margin, strobe d earlier */
 			unsigned cc = CSR_CLK(db, u), cb = phy[cc];
@@ -449,9 +555,8 @@ int main(int argc, char **argv)
 			for (int i = 0; i < 4; i++)
 				if (E[i] < emin)
 					emin = E[i];
-			while (d > 0 && 2 * d > emin - 6)
+			while (d > 0 && 3 * d > emin - 6)
 				d--;
-
 			for (int i = 1; i < 4; i++)
 				if (!ce[i] && (ce[x] || E[i] > E[x]))
 					x = i;
@@ -466,18 +571,42 @@ int main(int argc, char **argv)
 				__asm__ volatile("dsb sy" ::: "memory");
 				double r = (double)(E[x] - E2) / d;
 
-				if (!c2 && r >= 0.5 && r <= 5)
+				if (!c2 && r >= 1 && r <= 4)
 					R = r;
 				else
-					snprintf(rnote, sizeof rnote, " (R measured %.1f: 2 taken)", r);
+					snprintf(rnote, sizeof rnote, " (R measured %.1f: 2.5 taken)", r);
 			} else {
-				snprintf(rnote, sizeof rnote, " (R not measured: 2 taken)");
+				snprintf(rnote, sizeof rnote, " (R not measured: 2.5 taken)");
 			}
+
+			/* lift the nibble as far as the highest delay allows (16 strobe steps at most) */
+			int maxb = 0, lifted = 0;
+
+			for (int i = 0; i < 4; i++)
+				if (phy[CSR_PBD(db, 4 * u + i)] > (unsigned)maxb)
+					maxb = phy[CSR_PBD(db, 4 * u + i)];
+			int sl = (int)((VMAX - maxb) / (R + 0.5));
+
+			for (sl = sl > 16 ? 16 : sl; sl >= 2; sl -= 3) {
+				if (lift(db, u, R, sl, 1) == 0) {
+					lifted = sl;
+					break;
+				}
+				if (verbose)
+					printf("  lift by %d read wrong: less\n", sl);
+			}
+			for (int i = 0; i < 4; i++)
+				T[i] = lane_edge(db, 4 * u + i, -1, &ct[i]);
+			if (lifted && lift(db, u, R, lifted, 0)) {
+				fprintf(stderr, "ddr-calibrate: lowering dbyte %d nibble %d read wrong: stopping\n", db, u);
+				goto out;
+			}
+			snprintf(rnote + strlen(rnote), sizeof rnote - strlen(rnote), ", lifted %d", lifted);
 
 			int Sm[4], n = 0;
 
 			for (int i = 0; i < 4; i++) {
-				S[i] = (E[i] - R * T[i]) / 2;
+				S[i] = (E[i] - T[i]) / 2.0;
 				if (!ce[i] && !ct[i])
 					Sm[n++] = (int)(S[i] >= 0 ? S[i] + 0.5 : S[i] - 0.5);
 			}
@@ -505,24 +634,51 @@ int main(int argc, char **argv)
 				 * moved at this start (ddr-tune) stays in the line: measured, its
 				 * move is corrected; not measured, it is kept as it is.
 				 */
-				int moved = (int)cur - (int)trained(c), total = 0, put = 0;
+				int moved = (int)cur - (int)trained(c);
 
+				bl2v[i] = trained(c);
+				put[i] = 0;
+				tot[i] = 0;
 				if (ok && (abs(reli) >= thresh || moved)) {
-					total = moved + (abs(reli) >= thresh || moved ? reli : 0);
-					put = 1;
+					tot[i] = moved + reli;
+					put[i] = 1;
 				} else if (!ok && moved) {
-					total = moved;
-					put = 1;
+					tot[i] = moved;
+					put[i] = 1;
 				}
-				if (put && total)
-					nline += snprintf(line + nline, sizeof line - nline, "%s%05x%c%x",
-							  nline ? " " : "", c, total < 0 ? '-' : '+', abs(total));
 			}
+			/*
+			 * A delay cannot go below 0: a lane that needs to (BL2 left it at 0
+			 * or near) gets there by its three neighbours going up as much -
+			 * the same skew within the nibble; the nibble as a whole later,
+			 * which is where the eyes' middles are (BL2 samples near the late
+			 * edges, see docs).
+			 */
+			int lift_all = 0;
+
+			for (int i = 0; i < 4; i++)
+				if (put[i] && (int)bl2v[i] + tot[i] < -lift_all)
+					lift_all = -((int)bl2v[i] + tot[i]);
+			for (int i = 0; i < 4; i++) {
+				unsigned c = CSR_PBD(db, 4 * u + i);
+
+				if (lift_all) {
+					tot[i] += lift_all;
+					put[i] = 1;
+				}
+				if ((int)bl2v[i] + tot[i] > VMAX)
+					tot[i] = VMAX - (int)bl2v[i];
+				if (put[i] && tot[i])
+					nline += snprintf(line + nline, sizeof line - nline, "%s%05x%c%x",
+							  nline ? " " : "", c, tot[i] < 0 ? '-' : '+', abs(tot[i]));
+			}
+			if (lift_all)
+				printf("dbyte %d nibble %d: a lane below 0, the nibble %d steps later\n", db, u, lift_all);
 			/* the nibble's result on disk before the next one */
 			thaw();
 			lg = fopen(LOG, "a");
 			if (lg) {
-				fprintf(lg, "%s\n", nib);
+				fprintf(lg, "%s keep:%s%s\n", nib, nline > nline0 && nline0 ? "" : " ", line + nline0);
 				fflush(lg);
 				fsync(fileno(lg));
 				fclose(lg);
