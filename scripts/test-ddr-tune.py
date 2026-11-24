@@ -183,7 +183,7 @@ def keep(m, work, helper):
 
     def flash(dev, start, keep_var, img=image, sudo=""):
         # flash.sh's own write (flash_write) under flash.sh's trap
-        sh = ('set -euo pipefail; . "$1"; SUDO=$6; DD_STATUS=none; trap \'keep_finish $?\' EXIT; KEEP="$2"; '
+        sh = ('set -euo pipefail; . "$1"; SUDO=$6; DD_STATUS=none; keep_traps; KEEP="$2"; '
               'keep_check; flash_write "$4" "$3" "$5"')
         env = dict(os.environ, TMPDIR=tmp)
         return subprocess.run(["bash", "-c", sh, "x", helper, keep_var, dev, img, str(start), sudo],
@@ -239,9 +239,86 @@ def keep(m, work, helper):
         os.unlink(kept.group(1).rstrip(":"))
     m.cell("keep clean: no temporary file left", not os.listdir(tmp), str(os.listdir(tmp)))
     fs = open(os.path.join(SDK, "scripts/flash.sh")).read()
-    m.cell("flash.sh: its write is flash_write, under trap keep_finish, KEEP checked before asking",
-           "trap 'keep_finish $?' EXIT" in fs and 'flash_write "$FILE" "$DEV" "$SECTOR"' in fs and
+    m.cell("flash.sh: its write is flash_write, under keep_traps, KEEP checked before asking",
+           "keep_traps" in fs and 'flash_write "$FILE" "$DEV" "$SECTOR"' in fs and
            fs.index("keep_check") < fs.index("read -r -p"), "flash.sh wiring")
+    real_flash(m, work, helper, line, sec, size)
+
+
+def real_flash(m, work, helper, line, sec, size):
+    """flash.sh itself on a file: only its block-device check made a file check,
+    lsblk, sudo and eject stubbed; SLOW=1: the image's dd sleeps 30 s after it wrote"""
+    import shutil
+    import signal
+    import time
+    d = os.path.join(work, "real")
+    os.makedirs(os.path.join(d, "bin"))
+    os.makedirs(os.path.join(d, "tmp"))
+    src = open(os.path.join(SDK, "scripts/flash.sh")).read()
+    assert src.count('[ -b "$DEV" ]') == 1
+    with open(os.path.join(d, "flash.sh"), "w") as f:
+        f.write(src.replace('[ -b "$DEV" ]', '[ -f "$DEV" ]'))
+    shutil.copy(helper, os.path.join(d, "keep-sectors.sh"))
+    stubs = {
+        "lsblk": '#!/bin/bash\ncase "$*" in *TYPE*) echo disk ;; *RM*) echo 1 ;; *MOUNTPOINT*) ;; *) echo stub ;; esac\n',
+        "sudo": '#!/bin/bash\n"$@"; rc=$?\ncase "$*" in *bs=4M*) [ -z "$SLOW" ] || sleep 30 ;; esac\nexit $rc\n',
+        "eject": "#!/bin/bash\nexit 0\n",
+    }
+    for n, t in stubs.items():
+        with open(os.path.join(d, "bin", n), "w") as f:
+            f.write(t)
+        os.chmod(os.path.join(d, "bin", n), 0o755)
+    image = os.path.join(d, "image")
+    with open(image, "wb") as f:
+        f.write(b"\x22" * size)
+
+    def disk(name):
+        p = os.path.join(d, name)
+        with open(p, "wb") as f:
+            f.write(b"\x11" * size)
+            f.seek(sec * 512)
+            f.write(line.ljust(512, b"\0"))
+        return p
+
+    def at(p, s):
+        with open(p, "rb") as f:
+            f.seek(s * 512)
+            return f.read(512)
+
+    env = dict(os.environ, PATH=os.path.join(d, "bin") + ":" + os.environ["PATH"], KEEP="32510:ddr_tune=",
+               TMPDIR=os.path.join(d, "tmp"), EJECT="1")
+    dev = disk("dev1")
+    r = subprocess.run(["bash", os.path.join(d, "flash.sh"), image, dev, "0"], input="yes\n", env=env,
+                       capture_output=True, text=True)
+    m.cell("flash.sh whole: the image written, the tune line kept, no warning, no file left",
+           r.returncode == 0 and at(dev, sec) == line.ljust(512, b"\0") and at(dev, sec + 1) == b"\x22" * 512 and
+           "warning" not in r.stderr and not os.listdir(env["TMPDIR"]), "rc %d %s" % (r.returncode, r.stderr[-300:]))
+    dev = disk("dev0")
+    with open(dev, "r+b") as f:
+        f.seek(sec * 512)
+        f.write(b"\0" * 512)
+    r = subprocess.run(["bash", os.path.join(d, "flash.sh"), image, dev, "0"], input="yes\n", env=env,
+                       capture_output=True, text=True)
+    m.cell("flash.sh empty sector: the image's, no warning about its zeros",
+           r.returncode == 0 and at(dev, sec) == b"\x22" * 512 and "warning" not in r.stderr,
+           "rc %d %s" % (r.returncode, r.stderr[-300:]))
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        dev = disk("dev-%d" % sig)
+        p = subprocess.Popen(["bash", os.path.join(d, "flash.sh"), image, dev, "0"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=dict(env, SLOW="1"), start_new_session=True)
+        p.stdin.write("yes\n")
+        p.stdin.flush()
+        end = time.time() + 10
+        while time.time() < end and at(dev, sec + 1) != b"\x22" * 512:
+            time.sleep(0.1)
+        overwritten = at(dev, sec) != line.ljust(512, b"\0")
+        os.killpg(p.pid, sig)
+        out, err = p.communicate(timeout=30)
+        m.cell("flash.sh signal %d to the group past the sector: the line back, failed, file gone" % sig,
+               overwritten and at(dev, sec) == line.ljust(512, b"\0") and p.returncode != 0 and
+               "kept sectors are back" in err and not os.listdir(env["TMPDIR"]),
+               "overwritten %s rc %s: %s" % (overwritten, p.returncode, err[-300:]))
 
 
 def main():

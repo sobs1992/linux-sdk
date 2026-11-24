@@ -3,13 +3,14 @@
 # kept when an image is written over them. KEEP="SECTOR:PREFIX ...": a
 # sector the write covers whose content starts with PREFIX (the GO Ultra's
 # DDR tune line, configs/ogu_defconfig IMAGE_KEEP_SECTORS) is read before
-# the write and put back after it, also when the write stops half way
-# (flash.sh: trap keep_finish). $SUDO runs dd (flash.sh: sudo;
+# the write and put back after it, also when the write stops half way or
+# a signal ends it (flash.sh: keep_traps). $SUDO runs dd (flash.sh: sudo;
 # scripts/test-ddr-tune.py: nothing, on files).
 
 KEPT_SECTORS=()
 KEPT_FILES=()
 KEPT_DEV=
+KEPT_DUE=	# 1: kept sectors read, the image may be over them, not written back yet
 
 # keep_check: KEEP's entries are SECTOR:PREFIX (before anything is asked)
 keep_check() {
@@ -36,13 +37,14 @@ keep_read() {
 		f=$(mktemp)
 		KEPT_FILES+=("$f")
 		$SUDO dd if="$dev" of="$f" bs=512 skip="$s" count=1 status=none || return 1
-		if [ "$(head -c ${#prefix} "$f")" = "$prefix" ]; then
+		if printf '%s' "$prefix" | cmp -s -n "${#prefix}" - "$f"; then
 			echo "Keeping sector $s of $dev: $(tr -d '\0' < "$f" | tr '\n' ' ')"
 			KEPT_SECTORS+=("$s")
 		else
 			KEPT_SECTORS+=("")
 		fi
 	done
+	[ -z "${KEPT_SECTORS[*]}" ] || KEPT_DUE=1
 }
 
 # keep_write: the sectors keep_read kept, back where they were
@@ -53,15 +55,18 @@ keep_write() {
 		$SUDO dd if="${KEPT_FILES[$i]}" of="$KEPT_DEV" bs=512 seek="${KEPT_SECTORS[$i]}" count=1 \
 			conv=notrunc,fsync status=none || return 1
 	done
+	KEPT_DUE=
 }
 
-# keep_finish STATUS (the EXIT trap): after a write that stopped (STATUS not
-# 0) the kept sectors go back too; if they cannot, their files stay and
-# what they hold is said in full. Then the files go.
+# keep_finish STATUS (the EXIT trap): kept sectors not written back yet (a
+# write that failed, a signal: bash runs the trap once dd has ended) go back
+# now; if they cannot, their files stay and what they hold is said in full.
+# Then the files go. Not $?: after a signal the EXIT trap sees 0.
 keep_finish() {
 	local st=$1 i f
 	trap - EXIT INT TERM HUP
-	if [ "$st" -ne 0 ] && [ -n "${KEPT_SECTORS[*]}" ]; then
+	if [ -n "$KEPT_DUE" ]; then
+		[ "$st" -ne 0 ] || st=1
 		if keep_write; then
 			echo "flash: the write stopped; the kept sectors are back on $KEPT_DEV" >&2
 		else
@@ -81,8 +86,14 @@ keep_finish() {
 	return "$st"
 }
 
+# keep_traps: the trap a script that calls flash_write sets first (bash
+# runs it at every exit, after a signal too, once dd has ended)
+keep_traps() {
+	trap 'keep_finish $?' EXIT
+}
+
 # flash_write FILE DEV SECTOR: FILE onto DEV at SECTOR, the KEEP sectors
-# it covers kept (the caller sets: trap 'keep_finish $?' EXIT)
+# it covers kept (the caller has set keep_traps)
 flash_write() {
 	local file=$1 dev=$2 sector=$3
 	keep_read "$dev" "$(stat -c %s "$file")" "$sector"

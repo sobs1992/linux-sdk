@@ -10,7 +10,7 @@
 set -euo pipefail
 . "$(dirname "$0")/keep-sectors.sh"
 SUDO=sudo
-trap 'keep_finish $?' EXIT
+keep_traps
 
 FILE=$1 DEV=${2:-} SECTOR=${3:-0} MBR=${4:-}
 die() { echo "flash: $*" >&2; exit 1; }
