@@ -322,6 +322,41 @@ def main():
         cell("orphan: registers as at the start, /data thawed", b3.regs() == s3 and not os.path.exists(b3.path("frozen")))
     finally:
         app2.quit()
+    # bare_app and then its ddr-calibrate killed, nobody watching: the next bare_app runs -R at its start
+    work5 = os.path.join(work, "unwatched")
+    os.makedirs(work5)
+    b5 = sim.base_board(os.path.join(work5, "board"))
+    s5 = b5.regs()
+    app = App(a.app, work5, a.shots, board=b5, prefix="unwatched-")
+    app.ctl("open memcal")
+    time.sleep(0.8)
+    app.key("a")
+    app.key("down")
+    app.key("a")
+    time.sleep(2)
+    app.p.kill()
+    app.p.wait()
+    moved = False
+    end = time.time() + 30
+    while time.time() < end and not moved:
+        time.sleep(0.05)
+        if b5.regs() != s5:
+            subprocess.run(["pkill", "-STOP", "-f", app.binary])
+            moved = b5.regs() != s5
+            if not moved:
+                subprocess.run(["pkill", "-CONT", "-f", app.binary])
+    subprocess.run(["pkill", "-KILL", "-f", app.binary])
+    time.sleep(0.5)
+    cell("unwatched: killed with a register moved, /data frozen", moved and os.path.exists(b5.path("frozen")))
+    w6 = os.path.join(work5, "second")
+    os.makedirs(w6)
+    app2 = App(a.app, w6, a.shots, board=b5, prefix="unwatched2-")
+    try:
+        time.sleep(1)
+        cell("unwatched: the next bare_app put the registers back at its start, /data thawed",
+             b5.regs() == s5 and not os.path.exists(b5.path("frozen")), app2.log()[-400:])
+    finally:
+        app2.quit()
     print("%d cells failed" % len(bad))
     if bad:
         print("log: " + app.logf.name)
