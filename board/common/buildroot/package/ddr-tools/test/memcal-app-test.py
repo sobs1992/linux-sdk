@@ -146,7 +146,7 @@ def main():
         mark = len(app.log())
         app.key("a")            # Start (the first row)
         app.shot("ask")
-        app.key("right")        # Cancel -> Start
+        app.key("down")         # Cancel -> Start
         app.key("a")
         cell("start: ddr-calibrate -p runs", app.wait_log("memcal: %s -p" % os.path.join(work, "ddr-calibrate"), 5, mark),
              app.log()[mark:][-500:])
@@ -157,8 +157,8 @@ def main():
         app.ctl("back")
         time.sleep(0.5)
         app.shot("running-settings-statusbar")
-        app.ctl("launch bench")
-        cell("launch while running: refused", app.wait_log("bench not started: the memory calibration runs", 5, mark),
+        app.ctl("launch doom")
+        cell("launch while running: refused", app.wait_log("doom not started: the memory calibration runs", 5, mark),
              app.log()[mark:][-800:])
         time.sleep(1)
         app.shot("game-refused")
@@ -187,8 +187,10 @@ def main():
         app.ctl("back")
         app.ctl("open memcal")
         time.sleep(0.5)
-        app.key("a")             # Start (first: no interrupted run)
-        app.key("right")
+        app.shot("saved-reopened")
+        app.key("down")          # Restart now -> Start the calibration
+        app.key("a")
+        app.key("down")
         app.key("a")
         app.wait_log("progress", 5, mark)
         time.sleep(2)
@@ -203,7 +205,7 @@ def main():
         # a run killed (SIGKILL): bare_app puts its registers back
         mark = len(app.log())
         app.key("a")             # Start (the rows: Start, Remove)
-        app.key("right")
+        app.key("down")
         app.key("a")
         app.wait_log("progress", 5, mark)
         time.sleep(4)
