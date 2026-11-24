@@ -39,9 +39,12 @@ esac
 
 
 class App:
-    def __init__(self, app, work, shots):
-        self.work, self.shots, self.n = work, shots, 0
-        self.board = sim.base_board(os.path.join(work, "board"))
+    def __init__(self, app, work, shots, board=None, kept=None, prefix=""):
+        self.work, self.shots, self.n, self.prefix = work, shots, 0, prefix
+        self.board = board or sim.base_board(os.path.join(work, "board"))
+        if kept:
+            with open(os.path.join(work, "kept"), "w") as f:
+                f.write(kept + "\n")
         self.binary = os.path.join(work, "ddr-calibrate-sim")
         subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread", "-DDDR_SIM",
                         "-o", self.binary, sim.SRC], check=True)
@@ -99,7 +102,7 @@ class App:
         time.sleep(0.6)
         if os.path.exists(self.shot_ppm):
             self.n += 1
-            out = os.path.join(self.shots, "%02d-%s.png" % (self.n, name))
+            out = os.path.join(self.shots, "%s%02d-%s.png" % (self.prefix, self.n, name))
             subprocess.run(["convert", self.shot_ppm, out], check=False)
 
     def calls(self):
@@ -150,8 +153,7 @@ def main():
         app.key("a")
         cell("start: ddr-calibrate -p runs", app.wait_log("memcal: %s -p" % os.path.join(work, "ddr-calibrate"), 5, mark),
              app.log()[mark:][-500:])
-        app.wait_log("progress", 3)
-        time.sleep(3)
+        time.sleep(4)
         app.shot("running")
         # a game is refused meanwhile
         app.ctl("back")
@@ -192,8 +194,7 @@ def main():
         app.key("a")
         app.key("down")
         app.key("a")
-        app.wait_log("progress", 5, mark)
-        time.sleep(2)
+        time.sleep(3)
         app.key("a")             # Stop the calibration
         cell("stop: it ended as stopped", app.wait_log("ended (status", 10, mark) and "stopped" in app.log()[mark:],
              app.log()[mark:][-500:])
@@ -207,19 +208,108 @@ def main():
         app.key("a")             # Start (the rows: Start, Remove)
         app.key("down")
         app.key("a")
-        app.wait_log("progress", 5, mark)
-        time.sleep(4)
-        moved = b.regs() != s0
+        # SIGKILL while a register is moved (a probe or a lift), so -R has something to do
+        moved = False
+        end = time.time() + 30
+        while time.time() < end and not moved:
+            time.sleep(0.05)
+            if b.regs() != s0:
+                subprocess.run(["pkill", "-STOP", "-f", app.binary])
+                moved = b.regs() != s0
+                if not moved:
+                    subprocess.run(["pkill", "-CONT", "-f", app.binary])
         subprocess.run(["pkill", "-KILL", "-f", app.binary])
+        cell("kill: it was killed with a register moved", moved)
         cell("kill: ended as killed", app.wait_log("killed", 10, mark), app.log()[mark:][-500:])
         time.sleep(0.8)
         cell("kill: -R put the registers back, /data thawed", b.regs() == s0 and not os.path.exists(b.path("frozen")),
              "moved at the kill %s, now %s" % (moved, {hex(k): v for k, v in b.regs().items() if s0[k] != v}))
-        cell("kill: the interrupted run is offered (this start)", "(1)" in app.log()[mark:].split("killed")[-1],
-             app.log()[mark:][-600:])
+        # parts done: offered to go on (this start); none: nothing to go on with, "killed" said
+        import re
+        st = re.findall(r"interrupted run: (\d+) part\(s\) \((\d)\)", app.log()[mark:].split("killed")[-1])
+        cell("kill: an interrupted run with parts is offered (this start), none is not",
+             bool(st) and (st[-1][1] == "1" if int(st[-1][0]) > 0 else st[-1][1] == "0"), str(st))
         app.shot("killed")
     finally:
         app.quit()
+
+    # one line to correct (bit 42): "bit", not "bits"
+    work1 = os.path.join(work, "one")
+    os.makedirs(work1)
+    b1 = sim.base_board(os.path.join(work1, "board"), override={(3, 4): (0, 31, 11), (3, 5): (2, 31, 11)})
+    app = App(a.app, work1, a.shots, board=b1, prefix="one-")
+    try:
+        exp1 = b1.expected()
+        mark = len(app.log())
+        app.ctl("open memcal")
+        time.sleep(0.8)
+        app.key("a")
+        app.key("down")
+        app.key("a")
+        cell("one: done with one lane", len(exp1) == 1 and
+             app.wait_log("memcal: done: 1 lane(s) to correct", 90, mark), str(exp1))
+        time.sleep(0.5)
+        cell("one: the note says 'бит 42'", "памяти, бит 42." in app.log()[mark:], app.log()[mark:][-400:])
+        app.shot("done")
+    finally:
+        app.quit()
+
+    # nothing to correct, corrections kept from before: saving removes them, and says so
+    work2 = os.path.join(work, "none")
+    os.makedirs(work2)
+    b2 = sim.base_board(os.path.join(work2, "board"),
+                        override={(1, 6): (2, 31, 11), (3, 4): (0, 31, 11), (3, 5): (2, 31, 11)})
+    app = App(a.app, work2, a.shots, board=b2, kept="11668+c 13568+7", prefix="none-")
+    try:
+        mark = len(app.log())
+        app.ctl("open memcal")
+        time.sleep(0.8)
+        app.key("a")
+        app.key("down")
+        app.key("a")
+        cell("none: done with nothing to correct", b2.expected() == {} and
+             app.wait_log("memcal: done: 0 lane(s) to correct", 90, mark), str(b2.expected()))
+        time.sleep(0.5)
+        cell("none: it says Save removes the 2 lines kept", "(2 линии) больше не нужны" in app.log()[mark:],
+             app.log()[mark:][-400:])
+        app.shot("done")
+        app.key("down")      # Save
+        app.key("a")
+        time.sleep(1)
+        cell("none: Save cleared them (ddr-tune clear)", "clear" in app.calls() and app.kept() is None,
+             str(app.calls()))
+        app.shot("saved")
+    finally:
+        app.quit()
+    # a run left by a bare_app that died: the next one keeps the guards until it ends
+    work3 = os.path.join(work, "orphan")
+    os.makedirs(work3)
+    b3 = sim.base_board(os.path.join(work3, "board"))
+    s3 = b3.regs()
+    app = App(a.app, work3, a.shots, board=b3, prefix="orphan-")
+    app.ctl("open memcal")
+    time.sleep(0.8)
+    app.key("a")
+    app.key("down")
+    app.key("a")
+    time.sleep(2)
+    app.p.kill()
+    app.p.wait()
+    w4 = os.path.join(work3, "second")
+    os.makedirs(w4)
+    app2 = App(a.app, w4, a.shots, board=b3, prefix="orphan2-")
+    try:
+        cell("orphan: the next bare_app sees it run", app2.wait_log("a calibration started before runs", 5),
+             app2.log()[-400:])
+        app2.ctl("launch doom")
+        cell("orphan: a game refused meanwhile", app2.wait_log("doom not started: the memory calibration runs", 5),
+             app2.log()[-400:])
+        cell("orphan: its end seen, -R, guards gone", app2.wait_log("the calibration started before has ended", 90),
+             app2.log()[-400:])
+        time.sleep(0.5)
+        cell("orphan: registers as at the start, /data thawed", b3.regs() == s3 and not os.path.exists(b3.path("frozen")))
+    finally:
+        app2.quit()
     print("%d cells failed" % len(bad))
     if bad:
         print("log: " + app.logf.name)
