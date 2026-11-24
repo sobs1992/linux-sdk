@@ -280,9 +280,49 @@ def cell_stop(binary, d):
     r = subprocess.CompletedProcess([], p.returncode, out, err)
     common_after(c, b, binary, r, s0)
     c.check(log_closed(b), "the log's block not ended")
+    c.check(open(b.path("ddr-calibrate.log")).read().rstrip().endswith("ddr_tune= (stopped: signal 15)"),
+            "the stop's line: " + open(b.path("ddr-calibrate.log")).read().rstrip().splitlines()[-1])
     c.check(status(binary, b) == "unfinished 0", "-s: " + status(binary, b))
     r2 = run(binary, b, ["-p", "-r", "-d", "0"])
     c.check("done before" not in r2.stdout, "-r went on with a stopped run")
+    return c
+
+
+def cell_stop_in_restore(binary, d):
+    c = Cell("stop_in_restore: SIGTERM while a worker puts a lifted probe back: all at the start values")
+    b = base_board(d)
+    s0 = b.regs()
+    r = run(binary, b, ["-p"], {"DDR_SIM_SIG_IN_RESTORE": "1"})
+    c.check(r.returncode == 128 + 15, "exit %d: %s" % (r.returncode, r.stderr[-200:]))
+    common_after(c, b, binary, r, s0)
+    return c
+
+
+def cell_run_after_kill(binary, d):
+    c = Cell("run_after_kill: a new run at the same start after SIGKILL: the killed run's registers back first")
+    b = base_board(d)
+    s0 = b.regs()
+    run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "300"})
+    c.check(b.regs() != s0, "no register moved at the kill: the cell tests nothing")
+    r = run(binary, b, ["-p", "-d", "3"])
+    exp = {k: v for k, v in b.expected().items() if (k >> 12 & 3) == 3}
+    c.check(result_of(r) == exp, "line %s, expected %s" % (result_of(r), exp))
+    c.check("killed run restored first" in r.stderr, "not said: " + r.stderr[-200:])
+    common_after(c, b, binary, r, s0)
+    return c
+
+
+def cell_status_running(binary, d):
+    c = Cell("status_running: -s while a run goes on says 'running'")
+    b = base_board(d)
+    s0 = b.regs()
+    p = start(binary, b, ["-p"])
+    wait_for(p, lambda l: l.startswith("progress"))
+    st = status(binary, b)
+    c.check(st.startswith("unfinished ") and st.endswith(" running"), "-s: " + st)
+    p.send_signal(signal.SIGTERM)
+    out, err = p.communicate(timeout=30)
+    common_after(c, b, binary, subprocess.CompletedProcess([], 0, out, err), s0)
     return c
 
 
@@ -385,7 +425,8 @@ def cell_no_sim_dir(binary, d):
     return c
 
 
-CELLS = [cell_base, cell_moved32, cell_strobe_high, cell_stop, cell_kill_same_boot, cell_reboot_resume,
+CELLS = [cell_base, cell_moved32, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
+         cell_status_running, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 
 

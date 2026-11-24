@@ -5,9 +5,10 @@
  * "Память: подстройка задержек чтения").
  *
  *   ddr-calibrate [-w] [-v] [-r] [-p] [-d DBYTES] [-c ms] [-f ms] [-t steps]
- *   ddr-calibrate -s     "unfinished N this|before": the nibbles the last run
- *                        did if it did not end (0: it did); "this": it was
- *                        killed at this start, "before": the board went down
+ *   ddr-calibrate -s     "unfinished N this|before|running": the nibbles the
+ *                        last run did if it did not end (0: it did); "this":
+ *                        it was killed at this start, "before": the board went
+ *                        down in it, "running": it goes on now
  *   ddr-calibrate -R     after a run that was killed (SIGKILL): the registers
  *                        as they were at its start (only at that same start)
  *                        and /data thawed
@@ -42,7 +43,8 @@
  * A signal (SIGTERM: Stop) puts every register back, thaws /data and ends
  * the run's block ("ddr_tune= (stopped: signal N)"): nothing to go on with.
  * One run at a time: it holds a lock on /run/ddr-calibrate.saved, which
- * keeps the registers' values from its start for -R.
+ * keeps the registers' values from its start for -R (a new run at the same
+ * start puts them back first, as -R does).
  *
  * Built with -DDDR_SIM it runs against a simulated PHY instead (DDR_SIM_DIR,
  * ../test/sim-test.py): no /dev/mem, no /data, no watchdog.
@@ -136,18 +138,45 @@ static void put(unsigned csr, int v)
  */
 static unsigned armed_n, armed_csr[8], armed_back[8];
 static atomic_int armed;
+static atomic_int in_restore;	/* workers in disarm_restore(): on_sig waits for them */
 
+/* every register this run may touch, with the value it had at the start */
+static unsigned saved_csr[48], saved_val[48], nsaved;
+
+#ifdef DDR_SIM
+static int sim_sig_in_restore, sim_sig_sent;	/* DDR_SIM_SIG_IN_RESTORE: SIGTERM while a worker restores */
+
+static int sim_moved(unsigned c, unsigned v)	/* v is not the run's start value of c */
+{
+	for (unsigned i = 0; i < nsaved; i++)
+		if (saved_csr[i] == c)
+			return saved_val[i] != v;
+	return 0;
+}
+#endif
+
+/*
+ * A worker that saw a wrong word: the probe's registers back. Whoever takes
+ * armed writes them; on_sig takes it too and then waits until no worker is
+ * inside, so no worker writes a probe's value after on_sig put all back.
+ */
 static void disarm_restore(void)
 {
+	atomic_fetch_add(&in_restore, 1);
 	if (atomic_exchange(&armed, 0)) {
+#ifdef DDR_SIM
+		if (sim_sig_in_restore && !sim_sig_sent && sim_moved(armed_csr[0], armed_back[0])) {
+			sim_sig_sent = 1;
+			kill(getpid(), SIGTERM);
+			usleep(50000);
+		}
+#endif
 		for (unsigned i = 0; i < armed_n; i++)
 			put(armed_csr[i], armed_back[i]);
 		phy_sync();
 	}
+	atomic_fetch_sub(&in_restore, 1);
 }
-
-/* every register this run may touch, with the value it had at the start */
-static unsigned saved_csr[48], saved_val[48], nsaved;
 
 static void save(unsigned csr)
 {
@@ -201,17 +230,25 @@ static void wdt_close(void)
  * A signal: every register back, /data thawed, the run's block in the log
  * ended (a stopped run is not one to go on with), the lock's file gone.
  * The workers block the signals that come from outside, so this runs in
- * the main thread and nothing writes a register after restore_all().
+ * the main thread, which then writes no register itself; a worker still
+ * putting a probe back is waited for (disarm_restore) before restore_all().
  */
 static void on_sig(int s)
 {
 	char m[] = "ddr_tune= (stopped: signal 00)\n";
 
+	atomic_store(&armed, 0);
+	while (atomic_load(&in_restore))
+		sched_yield();
 	restore_all();
+#ifdef DDR_SIM
+	if (sim_sig_in_restore)
+		usleep(100000);	/* as long as an fsync on the eMMC can take */
+#endif
 	thaw();
 	if (log_fd >= 0) {
-		m[sizeof m - 4] = '0' + s / 10 % 10;
-		m[sizeof m - 3] = '0' + s % 10;
+		m[sizeof m - 5] = '0' + s / 10 % 10;
+		m[sizeof m - 4] = '0' + s % 10;
 		if (write(log_fd, m, sizeof m - 1) < 0) { }
 		fsync(log_fd);
 	}
@@ -667,12 +704,44 @@ static void write_saved(void)
 		perror(path_saved);
 }
 
+/*
+ * The lock's file a killed run left (fd, locked): its registers into
+ * csr[]/val[] in the order saved (the strobes first). Returns how many,
+ * 0 nothing in it, -1 saved at another start (BL2 trained anew since).
+ */
+static int read_saved(int fd, unsigned *csr, unsigned *val, int max)
+{
+	char b[64 + 48 * 12 + 1], boot[40] = "", *l, *save = NULL;
+	ssize_t len = pread(fd, b, sizeof b - 1, 0);
+	int n = 0;
+
+	if (len <= 0)
+		return 0;
+	b[len] = 0;
+	l = strtok_r(b, "\n", &save);
+	if (!l || strncmp(l, "boot ", 5))
+		return 0;
+	snprintf(boot, sizeof boot, "%s", l + 5);
+	if (!boot_id[0] || strcmp(boot, boot_id))
+		return -1;
+	while ((l = strtok_r(NULL, "\n", &save)) && n < max)
+		if (sscanf(l, "%x %x", &csr[n], &val[n]) == 2 && csr_ours(csr[n]) && val[n] <= VMAX)
+			n++;
+	return n;
+}
+
+static void write_all(int n, const unsigned *csr, const unsigned *val)
+{
+	for (int i = 0; i < n; i++)
+		put(csr[i], val[i]);
+	phy_sync();
+}
+
 /* -R: a killed run's registers back (saved at this start only), /data thawed */
 static int restore_saved(void)
 {
-	int fd = open(path_saved, O_RDWR | O_CLOEXEC), n = 0;
-	char l[64], boot[40] = "";
-	FILE *f;
+	int fd = open(path_saved, O_RDWR | O_CLOEXEC), n;
+	unsigned csr[48], val[48];
 
 	if (fd < 0) {
 		thaw();
@@ -684,29 +753,21 @@ static int restore_saved(void)
 		close(fd);
 		return 1;
 	}
-	f = fdopen(fd, "r");
-	if (f && fgets(l, sizeof l, f) && !strncmp(l, "boot ", 5))
-		snprintf(boot, sizeof boot, "%.*s", (int)strcspn(l + 5, "\n"), l + 5);
-	if (!boot_id[0] || strcmp(boot, boot_id)) {
+	n = read_saved(fd, csr, val, 48);
+	if (n < 0) {
 		printf("saved at another start: not restored\n");
+	} else if (n == 0) {
+		printf("nothing to restore\n");
 	} else if (map_phy() == 0) {
-		unsigned c, v;
-
-		/* in the order saved: the strobes first */
-		while (fgets(l, sizeof l, f))
-			if (sscanf(l, "%x %x", &c, &v) == 2 && csr_ours(c) && v <= VMAX) {
-				put(c, v);
-				n++;
-			}
-		phy_sync();
+		write_all(n, csr, val);
 		printf("restored %d registers\n", n);
 	} else {
-		fclose(f);
+		close(fd);
 		return 1;
 	}
 	unlink(path_saved);
 	thaw();
-	fclose(f);
+	close(fd);
 	return 0;
 }
 
@@ -738,6 +799,7 @@ static int sim_setup(void)
 	path_data = sim_paths[4];
 	path_wdt = "";
 	sim_kill_probe = k ? atoi(k) : 0;
+	sim_sig_in_restore = getenv("DDR_SIM_SIG_IN_RESTORE") != NULL;
 	if (sc && *sc)
 		tscale = atof(sc);
 	snprintf(spec, sizeof spec, "%s/spec", d);
@@ -768,10 +830,15 @@ static void log_begin(int resume, time_t t0)
 	char b[128];
 	int n = snprintf(b, sizeof b, "%s %.24s boot %s\n", resume ? "-- resumed" : "==", ctime(&t0),
 			 boot_id[0] ? boot_id : "?");
+	sigset_t set, old;
 
+	/* no signal before the header: on_sig would end the block before it */
+	outside_signals(&set);
+	pthread_sigmask(SIG_BLOCK, &set, &old);
 	log_fd = open(path_log, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
 	if (log_fd >= 0 && (write(log_fd, b, n) != n || fsync(log_fd)))
 		perror(path_log);
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
 /* the run's block ended; no signal in between: on_sig would end it twice */
@@ -828,9 +895,14 @@ int main(int argc, char **argv)
 
 	if (status) {
 		char ub[40];
-		int n = unfinished(done, NULL, 0, &o, 0, ub, sizeof ub);
+		int n = unfinished(done, NULL, 0, &o, 0, ub, sizeof ub), fd = open(path_saved, O_RDWR | O_CLOEXEC);
+		int running = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB);
 
-		if (n)
+		if (fd >= 0)
+			close(fd);
+		if (running)
+			printf("unfinished %d running\n", n);
+		else if (n)
 			printf("unfinished %d %s\n", n, boot_id[0] && !strcmp(ub, boot_id) ? "this" : "before");
 		else
 			printf("unfinished 0\n");
@@ -851,6 +923,16 @@ int main(int argc, char **argv)
 	}
 	if (map_phy())
 		return 1;
+	{
+		/* a run killed at this start left its registers moved: back first */
+		unsigned csr[48], val[48];
+		int n = read_saved(saved_fd, csr, val, 48);
+
+		if (n > 0) {
+			write_all(n, csr, val);
+			fprintf(stderr, "ddr-calibrate: %d registers of a killed run restored first\n", n);
+		}
+	}
 	for (int db = 0; db < 4; db++)
 		for (int b = 0; b < 8; b++)
 			lnsel[db][b] = phy[CSR_LNSEL(db, b)] & 7;
