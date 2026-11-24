@@ -56,6 +56,9 @@ work = lab/images/work
 ;              as cover.png in the game's directory
 ;   cover_back a picture (as cover) blurred and darker under the cover, which
 ;              is then put whole on it: for an icon
+;   cover_alt, cover_alt_crop  a picture of the game itself (game:PATH) for
+;              the board when cover is a file of the PC's only (Steam's
+;              library art, a box picture in lab/)
 ;   detect     files of the game ("a.exe | Data/b.dat", relative to its
 ;              directory, any case): the board's game-install finds the game
 ;              in a directory copied onto the card by these (scripts/
@@ -121,6 +124,8 @@ install = halflife
 source = ${steam}/steamapps/common/Half-Life
 cover = ${steam}/appcache/librarycache/70/library_600x900.jpg
 cover_crop = top
+cover_alt = game:valve/game.ico
+cover_alt_crop = fit
 
 [pirates]
 detect = Pirates!.exe
@@ -131,6 +136,8 @@ exclude = *.log
 file = apps/bare_app/ports/wine/wine.ini -> wine.ini
 cover = ${steam}/appcache/librarycache/3920/library_600x900.jpg
 cover_crop = top
+cover_alt = game:Support/Images/PiratesLogo.gif
+cover_alt_crop = fit
 
 [daemonica]
 detect = GameRus.exe | res_levels.wrs
@@ -226,6 +233,8 @@ overlay = games/monkey1/overlay
 file = lab/redist/SysWOW64/D3DX9_41.dll
 cover = lab/games/Tales of Monkey Island/goggame-1207659066.ico
 cover_crop = fit
+cover_alt = game:MonkeyIsland101.exe:icon
+cover_alt_crop = fit
 
 [monkey2]
 detect = MonkeyIsland102.exe
@@ -371,6 +380,8 @@ run = games/shade/prepare.sh
 cover = lab/games/Shade Wrath of Angels/cover.jpg
 ; the box art from below its "PC CD-ROM" corner: the title whole
 cover_crop = 110 45 530
+cover_alt = game:GFX/last_screen.jpg
+cover_alt_crop = fit
 
 [nfsu]
 detect = Speed.exe | SpeechStreams | Tracks
@@ -462,6 +473,8 @@ run = games/corsairs/prepare.sh
 ; cover: its loading screen (the title and a ship) as the GO Ultra shows it
 cover = lab/games/Corsairs/cover.png
 cover_crop = 230 70 400
+cover_alt = game:README/img/1.jpg
+cover_alt_crop = 36 60 88
 
 [bardstale]
 detect = The Bard's Tale.exe

@@ -374,6 +374,8 @@ def install_game(name, g, games, data, source=None, move=False, strict=True, log
 
     if src and not os.path.isdir(src):
         raise RecipeError("[%s] source %s: not a directory" % (name, src))
+    if src and os.path.realpath(src) == os.path.realpath(dest):
+        raise RecipeError("[%s] source %s is the game's own directory" % (name, src))
     orig_src = src
     later = []	# moved: what the excludes name, deleted once the cover is made
     keep = None	# the board: VCMI's mods of a heroes3 being replaced, kept aside
@@ -443,7 +445,15 @@ def install_game(name, g, games, data, source=None, move=False, strict=True, log
         except (RecipeError, OSError) as e:
             if strict:
                 raise
-            missing("cover (%s)" % e)
+            try:
+                # the board: cover_alt, a picture of the game itself (cover is
+                # one of the PC's: Steam's library art, a box picture of lab/)
+                if not g.get("cover_alt"):
+                    raise
+                make_cover(here(in_game(g["cover_alt"])), os.path.join(dest, "cover.png"),
+                           g.get("cover_alt_crop", "center"))
+            except (RecipeError, OSError):
+                missing("cover (%s)" % e)
     _delete(later)	# before the icon: not one of an excluded uninstaller
     if not strict and not os.path.exists(os.path.join(dest, "cover.png")):
         icon_cover(dest, log)

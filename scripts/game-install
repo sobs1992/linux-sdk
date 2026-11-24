@@ -606,6 +606,13 @@ def scan(top):
 
 # ---- installing -----------------------------------------------------------------
 
+def card_present():
+    """the games card is mounted at /games (tests name another directory,
+    GAME_INSTALL_GAMES: as it is); without it /games is a directory of the
+    root file system, where nothing is to be written"""
+    return "GAME_INSTALL_GAMES" in os.environ or os.path.ismount(GAMES)
+
+
 def card_rw(rw):
     """the card writable (the mount's own flag: it is read-only while games
     run), or read-only again"""
@@ -668,6 +675,23 @@ def remove_tree(p):
 def free_mib():
     st = os.statvfs(GAMES)
     return (st.f_bavail * st.f_frsize) >> 20
+
+
+# what GOG's installers unpack beside the game: their redistributables
+# (DirectX kept by keep_directx() first), GOG Galaxy's and temporary files.
+# Not __support: what the installer's script copies into the game (Cold
+# Fear's saves/COLDFEAR.DAT), which a recipe's "run" does instead
+INSTALLER_PARTS = ("__redist", "commonappdata", "tmp")
+
+
+def drop_installer_parts(work):
+    """the installer's own folders at the top of what it unpacked: GOG's
+    newer installers put the game there too (Cold Fear), the older ones in
+    app/ beside them"""
+    for n in os.listdir(work):
+        p = os.path.join(work, n)
+        if n.lower() in INSTALLER_PARTS and os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p)
 
 
 def drop(work):
@@ -738,8 +762,14 @@ def resolve(entry, root_hint, secs, exe, title, replace):
 
 def install(entry, replace, exe, title):
     entry = os.path.abspath(entry)
+    if not card_present():
+        die("no games card", "card", "")
     if not os.path.exists(entry):
         die("%s: not there" % entry, "gone", entry)
+    if not in_install(entry):
+        # only what the install folder holds is moved (and an installer
+        # deleted after): never a game of the card itself or a PC's copy
+        die("%s: not an entry of %s" % (entry, INSTALL))
     n = len(STEPS)
     told = set()
 
@@ -784,6 +814,7 @@ def install(entry, replace, exe, title):
             step("unpack")
             unpack(setup, work, language)
             keep_directx(work)
+            drop_installer_parts(work)
             _extra.append(work)	# its DirectX for this game's recipe too
             reset_redist()
             root_hint = os.path.join(work, pre) if pre else work
@@ -816,7 +847,10 @@ def install(entry, replace, exe, title):
             with open(os.path.join(dest, "wine.ini"), "w", encoding="utf-8") as f:
                 f.write("; a Windows game installed on the device without a recipe (game-install):\n"
                         "; bare_app_wine's defaults (apps/bare_app/ports/wine/wine.ini says the keys)\n"
-                        "name = %s\nexe = %s\n" % (title, g["exe"]))	# relative: with "/"
+                        "name = %s\nexe = %s\n"
+                        "; UTF-8 for Wine (a path in Russian: \"Игра.exe\"), Windows' Russian code page\n"
+                        "; (as every recipe's wine.ini)\n"
+                        "locale = ru_RU\n" % (title, g["exe"]))	# relative: with "/"
             step("cover")
             gamerecipe.icon_cover(dest, log=log)
         for s in skipped:
@@ -855,6 +889,8 @@ def install(entry, replace, exe, title):
 
 def remove(entry):
     entry = os.path.abspath(entry)
+    if not card_present():
+        die("no games card", "card", "")
     if not os.path.lexists(entry):
         die("%s: not there" % entry, "gone", entry)
     if not in_install(entry):
@@ -909,8 +945,8 @@ DirectX: Microsoft's directx_Jun2010_redist.exe as it is.
 
 def prepare_card():
     """the install and redist folders, with what goes into them"""
-    if not os.path.isdir(GAMES):
-        die("%s: no games card" % GAMES, "card", "")
+    if not card_present():
+        return	# no card in: nothing to prepare (and not the root file system's /games)
     todo = [(INSTALL, "КАК УСТАНОВИТЬ ИГРУ.txt", INSTALL_README),
             (REDIST, "ЧТО СЮДА КЛАСТЬ.txt", REDIST_README)]
     todo = [t for t in todo if not os.path.isfile(os.path.join(t[0], t[1]))]
