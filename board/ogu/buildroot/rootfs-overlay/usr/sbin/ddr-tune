@@ -3,15 +3,17 @@
 # trained (docs/boards/ogu.md, "Память: подстройка задержек чтения").
 # U-Boot applies them at every start, before the kernel (U-Boot patch
 # 0020), from one sector of the eMMC that belongs to the unit, SECTOR (between
-# the FIP and p1, next to the A/B sector; a system image never writes it):
+# the FIP and p1, next to the A/B sector; flash.sh puts it back over an
+# image, a system update does not touch it):
 #
 #   ddr_tune=11668+10 1118c-2
 #
 # CSR (hex: block << 16 | instance << 12 | r << 8 | register), + or -,
 # steps (hex). Taken: the DBYTEs' RxPBDly (register 68, lanes r 0-8, one
 # bit's delay) and RxClkDly (8c, nibbles u 0-1, the read strobe), each CSR
-# once (40 at most); a value stays within 0..3f. The CPU's bit b of byte n (of a 64-bit word) is DBYTE
-# n%4, lane DqbLnSel (register a0+b of that DBYTE): bit 42 = 11668.
+# once (44 at most: 36 delays, 8 strobes); a value stays within 0..3f. The
+# CPU's bit b of byte n (of a 64-bit word) is DBYTE n%4, lane DqbLnSel
+# (register a0+b of that DBYTE): bit 42 = 11668.
 #
 #   ddr-tune               the line kept, what U-Boot did at this start
 #                          (/chosen/ddr-tune: CSR:trained>now) and the CSRs now

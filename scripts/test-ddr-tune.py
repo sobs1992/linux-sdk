@@ -5,7 +5,8 @@
 
 - U-Boot patch 0020: ogu_tune_csr_ok() and ogu_ddr_tune() compiled from
   the patch itself (the "+" lines) against stubs for the eMMC and the PHY:
-  a line of all 40 CSRs is applied and all 40 recorded for /chosen.
+  a line of all 44 CSRs (36 delays, 8 strobes) is applied and all 44
+  recorded for /chosen.
 - /usr/sbin/ddr-tune set: the line checked before the eMMC is looked for,
   a CSR named twice refused (U-Boot would move it twice).
 - scripts/keep-sectors.sh (flash.sh): an image written over the tune
@@ -74,7 +75,7 @@ int main(int argc, char **argv)
 	ogu_ddr_tune();
 	printf("done %s\n", ogu_tune_done);
 	for (int db = 0; db < 4; db++) {
-		for (int r = 0; r < 8; r++)
+		for (int r = 0; r < 9; r++)
 			printf("%05x=%d\n", 0x10000 | db << 12 | r << 8 | 0x68, regs[0x10000 | db << 12 | r << 8 | 0x68]);
 		for (int u = 0; u < 2; u++)
 			printf("%05x=%d\n", 0x10000 | db << 12 | u << 8 | 0x8c, regs[0x10000 | db << 12 | u << 8 | 0x8c]);
@@ -83,7 +84,7 @@ int main(int argc, char **argv)
 }
 """
 
-ALL40 = ["%05x" % (0x10000 | db << 12 | r << 8 | 0x68) for db in range(4) for r in range(8)] + \
+ALL44 = ["%05x" % (0x10000 | db << 12 | r << 8 | 0x68) for db in range(4) for r in range(9)] + \
         ["%05x" % (0x10000 | db << 12 | u << 8 | 0x8c) for db in range(4) for u in range(2)]
 
 
@@ -121,10 +122,10 @@ def uboot(m, work, patch):
         regs = dict(l.split("=") for l in out if re.match(r"^[0-9a-f]{5}=", l))
         return done, {k: int(v) for k, v in regs.items()}
 
-    done, regs = run(" ".join(c + "+1" for c in ALL40))
-    m.cell("uboot all40: 40 CSRs moved", all(regs[c] == 6 for c in ALL40), str(regs))
-    m.cell("uboot all40: 40 CSRs recorded for /chosen", len(done) == 40 and
-           [d[:5] for d in done] == ALL40 and all(d.endswith(":0005>0006") for d in done),
+    done, regs = run(" ".join(c + "+1" for c in ALL44))
+    m.cell("uboot all44: 44 CSRs moved", len(ALL44) == 44 and all(regs[c] == 6 for c in ALL44), str(regs))
+    m.cell("uboot all44: 44 CSRs recorded for /chosen", len(done) == 44 and
+           [d[:5] for d in done] == ALL44 and all(d.endswith(":0005>0006") for d in done),
            "%d recorded: %s" % (len(done), done[-3:]))
     done, regs = run("11668+10 1118c-2 11668x 13768+3f")
     m.cell("uboot parse: a bad entry ends the line, the ones before it stay",
@@ -143,8 +144,8 @@ def ddr_tune(m, script):
     r = run("set", "11668+c 1118C+2 1118c-1")
     m.cell("ddr-tune twice: upper and lower case are one CSR", r.returncode == 1 and "1118c twice" in r.stderr,
            r.stderr)
-    r = run("set", " ".join(c + "+1" for c in ALL40))
-    m.cell("ddr-tune all40: 40 different CSRs pass the check (then: no eMMC on the PC)",
+    r = run("set", " ".join(c + "+1" for c in ALL44))
+    m.cell("ddr-tune all44: 44 different CSRs pass the check (then: no eMMC on the PC)",
            r.returncode == 1 and "no eMMC" in r.stderr, r.stderr)
     r = run("set", "11668+40")
     m.cell("ddr-tune steps: more than 3f refused", r.returncode == 1 and "more than 3f" in r.stderr, r.stderr)
@@ -164,18 +165,29 @@ def keep(m, work, helper):
             f.write(content_at_sec.ljust(512, b"\0"))
         return p
 
+    tmp = os.path.join(work, "tmp")
+    os.makedirs(tmp)
+    # dd that stops after 16280 KiB (past the sector: a USB disk gone half way)
+    limited = os.path.join(work, "limited")
+    with open(limited, "w") as f:
+        f.write('#!/bin/bash\ncase "$*" in *bs=4M*) ulimit -f 16280 ;; esac\nexec "$@"\n')
+    os.chmod(limited, 0o755)
+    # dd that cannot write the kept sector back either (the disk gone for good)
+    gone = os.path.join(work, "gone")
+    with open(gone, "w") as f:
+        f.write('#!/bin/bash\ncase "$*" in *bs=4M*) ulimit -f 16280 ;; *seek=*) exit 1 ;; esac\nexec "$@"\n')
+    os.chmod(gone, 0o755)
     image = os.path.join(work, "image")
     with open(image, "wb") as f:
         f.write(b"\x22" * size)
 
-    def flash(dev, start, keep_var, img=image):
-        # what flash.sh does around its dd, with the image written by dd as there
-        sh = ('set -euo pipefail; . "$1"; SUDO=; trap keep_clean EXIT; KEEP="$2"; '
-              'keep_read "$3" "$(stat -c %s "$4")" "$5"; '
-              'dd if="$4" of="$3" bs=4M seek=$(( $5 * 512 )) oflag=seek_bytes conv=notrunc status=none; '
-              'keep_write "$3"')
-        return subprocess.run(["bash", "-c", sh, "x", helper, keep_var, dev, img, str(start)],
-                              capture_output=True, text=True)
+    def flash(dev, start, keep_var, img=image, sudo=""):
+        # flash.sh's own write (flash_write) under flash.sh's trap
+        sh = ('set -euo pipefail; . "$1"; SUDO=$6; DD_STATUS=none; trap \'keep_finish $?\' EXIT; KEEP="$2"; '
+              'keep_check; flash_write "$4" "$3" "$5"')
+        env = dict(os.environ, TMPDIR=tmp)
+        return subprocess.run(["bash", "-c", sh, "x", helper, keep_var, dev, img, str(start), sudo],
+                              capture_output=True, text=True, env=env)
 
     def at(dev, s):
         with open(dev, "rb") as f:
@@ -212,26 +224,33 @@ def keep(m, work, helper):
     r = flash(d, 0, "32510")
     m.cell("keep bad: an entry without a prefix stops before writing", r.returncode != 0 and
            at(d, 0) == b"\x11" * 512, r.stdout + r.stderr)
-    left = [f for f in os.listdir(tempfile.gettempdir()) if f.startswith("tmp")]
-    m.cell("keep clean: no temporary file left", True if not left_new(left) else False, str(left_new(left)))
-
-
-_before = None
-
-
-def left_new(now):
-    return sorted(set(now) - _before)
+    d = disk("emmc7", line)
+    r = flash(d, 0, "32510:ddr_tune=", sudo=limited)
+    m.cell("keep stopped: the write stops past the sector: the line is put back, the flash fails",
+           r.returncode != 0 and at(d, sec) == line.ljust(512, b"\0") and "kept sectors are back" in r.stderr,
+           "rc %d: %s" % (r.returncode, r.stderr[-300:]))
+    d = disk("emmc8", line)
+    r = flash(d, 0, "32510:ddr_tune=", sudo=gone)
+    kept = re.search(r"it is kept in (\S+): (.*)", r.stderr)
+    m.cell("keep gone: it cannot be put back: its file stays, the line said in full",
+           r.returncode != 0 and kept is not None and os.path.exists(kept.group(1).rstrip(":")) and
+           "ddr_tune=11668+c 13568+7" in kept.group(2), r.stderr[-300:])
+    if kept:
+        os.unlink(kept.group(1).rstrip(":"))
+    m.cell("keep clean: no temporary file left", not os.listdir(tmp), str(os.listdir(tmp)))
+    fs = open(os.path.join(SDK, "scripts/flash.sh")).read()
+    m.cell("flash.sh: its write is flash_write, under trap keep_finish, KEEP checked before asking",
+           "trap 'keep_finish $?' EXIT" in fs and 'flash_write "$FILE" "$DEV" "$SECTOR"' in fs and
+           fs.index("keep_check") < fs.index("read -r -p"), "flash.sh wiring")
 
 
 def main():
-    global _before
     ap = argparse.ArgumentParser()
     ap.add_argument("--patch", default=PATCH)
     ap.add_argument("--ddr-tune", default=DDR_TUNE)
     ap.add_argument("--keep", default=KEEP)
     a = ap.parse_args()
     m = Matrix()
-    _before = set(f for f in os.listdir(tempfile.gettempdir()) if f.startswith("tmp"))
     with tempfile.TemporaryDirectory(prefix="ddr-tune-test-") as work:
         uboot(m, work, a.patch)
         ddr_tune(m, a.ddr_tune)

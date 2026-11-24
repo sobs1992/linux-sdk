@@ -10,7 +10,7 @@
 set -euo pipefail
 . "$(dirname "$0")/keep-sectors.sh"
 SUDO=sudo
-trap keep_clean EXIT
+trap 'keep_finish $?' EXIT
 
 FILE=$1 DEV=${2:-} SECTOR=${3:-0} MBR=${4:-}
 die() { echo "flash: $*" >&2; exit 1; }
@@ -23,6 +23,7 @@ fi
 [ -f "$FILE" ] || die "$FILE not found: build it first"
 [ -z "$MBR" ] || [ -f "$MBR" ] || die "$MBR not found: build it first"
 [ -z "$MBR" ] || [ "$(stat -c %s "$MBR")" -le 440 ] || die "$MBR is larger than 440 bytes"
+keep_check || exit 1
 [ -b "$DEV" ] || die "$DEV is not a block device"
 [ "$(lsblk -dno TYPE "$DEV")" = disk ] || die "$DEV is a partition, pass the whole disk"
 if [ "$(lsblk -dno RM "$DEV")" != 1 ] && [ "$(lsblk -dno TRAN "$DEV")" != usb ] && [[ $DEV != /dev/mmcblk* ]]; then
@@ -41,9 +42,7 @@ read -r -p "Write $what to $DEV at sector $SECTOR? Data on $DEV will be lost. Ty
 for part in $(lsblk -lnpo NAME,MOUNTPOINT "$DEV" | awk '$2 != "" {print $1}'); do
 	sudo umount "$part"
 done
-keep_read "$DEV" "$(stat -c %s "$FILE")" "$SECTOR"
-sudo dd if="$FILE" of="$DEV" bs=4M seek=$(( SECTOR * 512 )) oflag=seek_bytes conv=fsync status=progress
-keep_write "$DEV"
+flash_write "$FILE" "$DEV" "$SECTOR"
 if [ -n "$MBR" ]; then
 	sudo dd if="$MBR" of="$DEV" conv=notrunc,fsync status=none
 fi

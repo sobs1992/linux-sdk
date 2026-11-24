@@ -57,8 +57,8 @@ kernel's device tree records the trained and the new values.
 + * register), + or -, steps (hex). Only the DBYTEs' RxPBDly (register 0x68,
 + * lanes r 0-8: a bit's own delay) and RxClkDly (0x8c, nibbles u 0-1: the
 + * read strobe) are taken, each kept within 0..0x3f. The sector is the
-+ * unit's own (/usr/sbin/ddr-tune writes it; an image of the system never
-+ * does): the eMMC's, also when Linux starts from the SD card. U-Boot moves
++ * unit's own (/usr/sbin/ddr-tune writes it; scripts/flash.sh puts it back
++ * over an image): the eMMC's, also when Linux starts from the SD card. U-Boot moves
 + * them before the kernel, also before one that resumes from hibernation
 + * (its Linux runs no init scripts). /chosen/ddr-tune of the device tree
 + * says what was done: "CSR:trained>now ...".
@@ -66,7 +66,7 @@ kernel's device tree records the trained and the new values.
 +#define OGU_TUNE_SECTOR		0x7efe
 +#define OGU_PHY_CSR(csr)	((void __iomem *)(0xfe000000UL + ((csr) << 1)))
 +
-+static char ogu_tune_done[640];	/* "CSR:was>now " (16 bytes) for all 40 CSRs taken */
++static char ogu_tune_done[704];	/* "CSR:was>now " (16 bytes) for all 44 CSRs taken */
 +
 +static bool ogu_tune_csr_ok(ulong csr)
 +{
