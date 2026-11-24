@@ -395,6 +395,59 @@ static unsigned trained(unsigned csr)
 	return p ? strtoul(p + 6, 0, 16) : phy[csr];
 }
 
+/*
+ * The last run in the log, if it did not end (the board went down): its
+ * nibbles done[][], their "keep:" parts of the line appended to line.
+ * Returns the nibbles done, 0: nothing to go on with. -r goes on with it;
+ * a lane against its nibble does not depend on the start, so nibbles of
+ * runs from different starts add up.
+ */
+static int unfinished(int done[4][2], char *line, size_t size, int *nline, int say)
+{
+	FILE *f = fopen(LOG, "r");
+	char l[512], blk[16][512];
+	int nb = 0, open = 0, n = 0;
+
+	while (f && fgets(l, sizeof l, f)) {
+		if (!strncmp(l, "== ", 3)) {
+			nb = 0;
+			open = 1;
+		} else if (!strncmp(l, "ddr_tune=", 9)) {
+			open = 0;
+		} else if (open && !strncmp(l, "dbyte ", 6) && nb < 16) {
+			snprintf(blk[nb++], sizeof blk[0], "%s", l);
+		}
+	}
+	if (f)
+		fclose(f);
+	if (!open)
+		return 0;
+	for (int i = 0; i < nb; i++) {
+		int db, u;
+		char *k = strstr(blk[i], " keep:");
+
+		if (sscanf(blk[i], "dbyte %d nibble %d:", &db, &u) != 2 || db < 0 || db > 3 || u < 0 || u > 1 ||
+		    done[db][u])
+			continue;
+		done[db][u] = 1;
+		n++;
+		for (char *t = k ? strtok(k + 6, " \n") : NULL; t && line; t = strtok(NULL, " \n"))
+			*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
+		if (say)
+			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
+	}
+	return n;
+}
+
+/* -p: "progress PERCENT" of the whole run (nibbles done, the part of this one) */
+static int progress, nib_done, nib_total;
+
+static void say_progress(int part)
+{
+	if (progress && nib_total)
+		printf("progress %d\n", (nib_done * 100 + part) / nib_total);
+}
+
 static int cmp_int(const void *a, const void *b)
 {
 	return *(const int *)a - *(const int *)b;
@@ -402,23 +455,31 @@ static int cmp_int(const void *a, const void *b)
 
 int main(int argc, char **argv)
 {
-	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, done[4][2] = { { 0 } };
+	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, status = 0, done[4][2] = { { 0 } };
 	char dbytes[8] = "0123";
 
-	while ((o = getopt(argc, argv, "wvrd:c:f:t:m:")) != -1)
+	while ((o = getopt(argc, argv, "wvrpsd:c:f:t:m:")) != -1)
 		switch (o) {
 		case 'w': writeit = 1; break;
 		case 'v': verbose = 1; break;
 		case 'r': resume = 1; break;
+		case 'p': progress = 1; break;
+		case 's': status = 1; break;
 		case 'd': snprintf(dbytes, sizeof dbytes, "%s", optarg); break;
 		case 'c': coarse_ms = atoi(optarg); break;
 		case 'f': fine_ms = atoi(optarg); break;
 		case 't': thresh = atoi(optarg); break;
 		case 'm': mb = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: ddr-calibrate [-w] [-v] [-r] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n");
+			fprintf(stderr, "usage: ddr-calibrate [-w] [-v] [-r] [-p] [-s] [-d DBYTES] [-c ms] [-f ms] [-t steps] [-m MB]\n");
 			return 2;
 		}
+
+	if (status) {
+		/* -s: "unfinished N", the nibbles an interrupted run did (0: none) */
+		printf("unfinished %d\n", unfinished(done, NULL, 0, &o, 0));
+		return 0;
+	}
 
 	int fd = open("/dev/mem", O_RDWR | O_SYNC);
 
@@ -474,45 +535,8 @@ int main(int argc, char **argv)
 	char line[512] = "";
 	int nline = 0;
 
-	/*
-	 * -r: go on with the last run in the log if it did not end (the board went
-	 * down): its nibbles are done, their "keep:" parts of the line are taken.
-	 * A lane against its nibble does not depend on the start, so nibbles of
-	 * runs from different starts add up.
-	 */
-	if (resume) {
-		FILE *f = fopen(LOG, "r");
-		char l[512], blk[16][512];
-		int nb = 0, open = 0;
-
-		while (f && fgets(l, sizeof l, f)) {
-			if (!strncmp(l, "== ", 3)) {
-				nb = 0;
-				open = 1;
-			} else if (!strncmp(l, "ddr_tune=", 9)) {
-				open = 0;
-			} else if (open && !strncmp(l, "dbyte ", 6) && nb < 16) {
-				snprintf(blk[nb++], sizeof blk[0], "%s", l);
-			}
-		}
-		if (f)
-			fclose(f);
-		if (!open)
-			nb = 0;
-		for (int i = 0; i < nb; i++) {
-			int db, u;
-			char *k = strstr(blk[i], " keep:");
-
-			if (sscanf(blk[i], "dbyte %d nibble %d:", &db, &u) != 2 || db < 0 || db > 3 || u < 0 || u > 1)
-				continue;
-			done[db][u] = 1;
-			for (char *t = k ? strtok(k + 6, " \n") : NULL; t; t = strtok(NULL, " \n"))
-				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
-			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
-		}
-		if (!nb)
-			resume = 0;
-	}
+	if (resume && !unfinished(done, line, sizeof line, &nline, 1))
+		resume = 0;
 	{
 		FILE *f = fopen(LOG, "a");
 
@@ -527,9 +551,16 @@ int main(int argc, char **argv)
 	idle_ms(1000);
 	if (atomic_load(&nerr)) {
 		fprintf(stderr, "ddr-calibrate: wrong words at the trained values: stopping\n");
+		if (progress)
+			printf("fail trained\n");
 		goto out;
 	}
 
+	for (const char *dp = dbytes; *dp; dp++)
+		if (*dp >= '0' && *dp <= '3')
+			for (int u = 0; u < 2; u++)
+				nib_total++, nib_done += done[*dp - '0'][u];
+	say_progress(0);
 	printf("lane  bit  now  early  late  S    vs nibble\n");
 	for (const char *dp = dbytes; *dp; dp++) {
 		int db = *dp - '0';
@@ -544,8 +575,10 @@ int main(int argc, char **argv)
 			double S[4], R = 2.5;
 			char rnote[64] = "";
 
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				E[i] = early_edge(db, 4 * u + i, &ce[i]);
+				say_progress(10 * (i + 1));
+			}
 
 			/* strobe step in delay steps: the lane with the most early margin, strobe d earlier */
 			unsigned cc = CSR_CLK(db, u), cb = phy[cc];
@@ -595,10 +628,15 @@ int main(int argc, char **argv)
 				if (verbose)
 					printf("  lift by %d read wrong: less\n", sl);
 			}
-			for (int i = 0; i < 4; i++)
+			say_progress(50);
+			for (int i = 0; i < 4; i++) {
 				T[i] = lane_edge(db, 4 * u + i, -1, &ct[i]);
+				say_progress(50 + 12 * (i + 1));
+			}
 			if (lifted && lift(db, u, R, lifted, 0)) {
 				fprintf(stderr, "ddr-calibrate: lowering dbyte %d nibble %d read wrong: stopping\n", db, u);
+				if (progress)
+					printf("fail lowering\n");
 				goto out;
 			}
 			snprintf(rnote + strlen(rnote), sizeof rnote - strlen(rnote), ", lifted %d", lifted);
@@ -684,9 +722,24 @@ int main(int argc, char **argv)
 				fclose(lg);
 			}
 			freeze();
+			nib_done++;
+			say_progress(0);
 		}
 	}
 
+	if (progress) {
+		/* the line's lanes: CSR, the bit of the 64-bit word (odd beat), steps */
+		char tmp[512];
+
+		snprintf(tmp, sizeof tmp, "%s", line);
+		for (char *t = strtok(tmp, " "); t; t = strtok(NULL, " ")) {
+			unsigned c = strtoul(t, 0, 16);
+			int steps = (int)strtol(t + 5, 0, 16);	/* "+b", "-4" */
+
+			printf("lane %05x %d %+d\n", c, cpu_bit(c >> 12 & 3, c >> 8 & 15), steps);
+		}
+		printf("result %s\n", line);
+	}
 	if (nline)
 		printf("ddr_tune=%s\n", line);
 	else
