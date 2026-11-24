@@ -25,6 +25,32 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
   781 MB at ~400 MB of textures (chapter 2), 30 fps as before.
   Transparent huge pages were not the cause (`madvise` instead of
   `always`: the game's RSS unchanged).
+- Memory over a long chapter (ogu2, 2026-11-23): Ogre keeps every texture
+  of every scene visited until the chapter changes (CHAPTERDATA; no texture
+  of the session was ever loaded twice, the memory flat between new
+  scenes): after 1 h 48 min of chapter 2 the GPU buffers were 1.1 GB
+  (101 layers of 1024x1024 RGBA with their mip levels, 5.9 MB each =
+  592 MB), the game 703 MB, 67 MB of memory left. Not a leak of Wine or
+  Mesa. Halving the scenes' texture files does NOT work: the game lays its
+  2D layers out by the textures' size in pixels (the scene became small
+  tiles in stretched edges).
+  The game has one Ogre scene manager for all scenes and destroys a left
+  scene's objects (its meshes load again on a return), but the scene's
+  own object keeps its 2D layers' textures (backgrounds, layers, patches)
+  until the chapter ends. `scenemem.py` (manifest `run`, through
+  `prepare.sh`) adds two calls to the scene change of `bout.exe`: before
+  the new scene loads, if Ogre counts more than 320 MB of textures (the
+  first level of each: GPU buffers ~1.45 times that), every texture that
+  can be loaded again is unloaded (the new scene loads its own, Ogre loads
+  the others again where drawn); after it, what no object uses any more
+  in CHAPTERDATA. A change that unloads takes 4-5 s (a first visit; a
+  return to a loaded scene 0-2 s), about once in a few new scenes.
+  Measured on ogu2 (2026-11-23, the hut of chapter 2 at the same save):
+  236 MB of GPU buffers before, 143 MB with it (what the chapter's load
+  had left unused); with the limit at 16 MB (unloading at every change)
+  hut 71, swamp 112, hut again 73 (its backgrounds loaded again), street
+  127 MB; scenes, inventory, recipe, map and labels drawn right. A long
+  session with the 320 MB limit is not measured yet.
 - OpenAL: OpenAL Soft 1.23.1 (`lab/redist/openal-soft-1.23.1`, its Win32
   `soft_oal.dll` as the game's `OpenAL32.dll`). With Creative's router and
   wrap_oal (as Daemonica) the game found a device but stayed silent: the
@@ -54,6 +80,11 @@ shaders, Theora videos, OpenAL), the Russian edition of 1C-SoftClub
   name needed: an empty one is saved as "new game"; Enter does not save).
   Loading: F1, "Загрузка", a line, "Загрузка". No quick save (F keys do
   nothing). Tester's review: docs/game-controls-audit-2026-11-20.md, 6.20.
+
+## Patches of the game's files
+
+`prepare.sh` (manifest `run`) runs `textsize.py` (below) and `scenemem.py`
+(the memory over a chapter, above).
 
 ## Text size
 
@@ -95,6 +126,30 @@ Checked on the GO Ultra: the settings show 854 x 480 and OK keeps it in
 text runs into another or off its page. The lists of saved games and of
 chapters are drawn by the game's code (unchanged). The patcher checks the bytes first and leaves an
 already patched file as it is.
+
+The recipe of chapter 2 (the alchemy: the potion, its ingredients and
+their ticks) has its text in its picture (`rezept_background.dds`,
+1024x1024), drawn as a square panel `<size>` x the screen's height high
+(`kagedata/chapter2/common/MGRezept.kad`: 0.6, 288 rows, the text about
+3.6 times smaller than painted), 0.05 from the left, centred, its scroll
+ending just above the inventory bar, which is shown with it.
+`textsize.py` makes it 0.82 high (394 rows: the text 1.37 times bigger)
+and moves it up so that it still ends above the bar: the panel's top is
+`c - c * height` in the recipe's overlay set-up (cl_MGRecipe), with c the
+qword 0.5 at 0x5bd670 (shared with other code); the `fld` at 0x5186b3
+loads the qword 0.05 at 0x5bd6f0 instead: top at 0.009 (4 rows), the
+scroll from row 8 to 390. Its ticks are placed in shares of the panel
+but sized in shares of the screen: 0.0375 x 0.82/0.6 = 0.05125.
+Checked on the GO Ultra (ogu2, 2026-11-23): opened from the inventory
+(a click on it), the ticks on their boxes, the scroll inside the screen
+and above the inventory's items, closed by a click.
+
+The other pictures of the game's minigames have no small text: the city
+map of chapter 2 and the orcs' camp map (drawings with big titles), the
+stone tablet (symbols), the rain dance (arrows); the wall map of the world
+(chapter 2, the mage's tower, Russian names in `kagedata/lang/ru`) is
+shown nearly 1:1 (each 1024 tile 2.0 screen heights = 960 rows) and
+scrolled, so it is as big as it can be sharp.
 
 ## Source
 

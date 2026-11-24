@@ -510,8 +510,10 @@ exclude = clientpm.old
 exclude = cover-art.jpg
 overlay = games/bout/overlay
 ; readable on 854x480: in-game text x1.3 and the settings' 854x480 (bout.exe),
-; the menu book darker and x1.2 (its .kad): games/bout/README.md "Text size"
-run = games/bout/textsize.py
+; the menu book darker and x1.2, the recipe x1.37 (its .kad): games/bout/README.md
+; "Text size"; the textures of the scenes left behind let go of above 320 MB
+; (bout.exe: Ogre kept every scene of a chapter): README "Memory"
+run = games/bout/prepare.sh
 file = lab/redist/SysWOW64/d3dx9_42.dll
 ; OpenAL Soft (LGPL, openal-soft.org) for the game's OpenAL: Creative's
 ; router (Daemonica's) reported a device here, but the game stayed

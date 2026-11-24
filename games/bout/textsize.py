@@ -35,6 +35,11 @@ the page's free room (the menus' items 0.09 apart, were 0.08; the
 settings' rows from "quality" down 0.02-0.035 lower, above OK as before). The lists of saved games and chapters are the game's code,
 sized by the text class's default above.
 
+The recipe of chapter 2 (its text is part of its picture) is drawn 0.82
+of the screen's height high instead of 0.6 and starts at the screen's top,
+so it still ends above the inventory bar: MGRezept.kad's sizes and one
+constant's address in bout.exe (RECIPE_* below).
+
 Usage: textsize.py GAME_DIR (or GAME_DIR set, as games-image.py runs it).
 What is patched already is left as it is; anything else than expected
 stops it before writing.
@@ -55,6 +60,25 @@ FLD_NEW = bytes.fromhex("d905" "20dd5b00")	# fld dword [0x5bdd20]
 CMP_VAS = (0x4e55cb, 0x4f250b)
 CMP_OLD = bytes.fromhex("3d" "00040000")	# cmp eax, 1024
 CMP_NEW = bytes.fromhex("3d" "56030000")	# cmp eax, 854
+
+# The recipe (chapter 2, the alchemy): its text is part of its picture
+# (rezept_background.dds, 1024x1024), drawn as a square panel of
+# <size> x the screen's height (0.6: 288 rows) at 0.05 from the left,
+# centred: the top is c - c * height with c = 0.5 (the qword constant
+# 0x5bd670, shared with other code) in cl_MGRecipe's overlay set-up. It
+# ends above the inventory bar, which is shown with it. 0.82 high (394
+# rows, the text 1.37 times bigger) and c = 0.05 (an existing qword at
+# 0x5bd6f0): the top at 0.009 (4 rows), the scroll's bottom at row 393,
+# above the bar as before. Its ticks are placed in shares of the panel,
+# but sized in shares of the screen: x 0.82/0.6 too.
+RECIPE_VA = 0x5186b3
+RECIPE_OLD = bytes.fromhex("dd05" "70d65b00")	# fld qword [0x5bd670] (0.5)
+RECIPE_NEW = bytes.fromhex("dd05" "f0d65b00")	# fld qword [0x5bd6f0] (0.05)
+RECIPE_KAD = os.path.join("kagedata", "chapter2", "common", "MGRezept.kad")
+RECIPE_SIZES = [
+	(b'<size width="0.6" height="0.6"/>', b'<size width="0.82" height="0.82"/>'),
+	(b'<size  width="0.0375" height="0.0375"/>', b'<size  width="0.05125" height="0.05125"/>'),
+]
 
 BOOK = os.path.join("kagedata", "interface", "original_Bookpages.kad")
 BOOK_SCALE = 1.2
@@ -192,7 +216,8 @@ def exe(path):
 		elif abs(cur - old * SCALE) >= 1e-6:
 			sys.exit("textsize: %s: 0x%x is %g, not %g: another bout.exe" %
 				 (path, va, cur, old))
-	for va, old_b, new_b in [(FLD_VA, FLD_OLD, FLD_NEW)] + [(v, CMP_OLD, CMP_NEW) for v in CMP_VAS]:
+	for va, old_b, new_b in ([(FLD_VA, FLD_OLD, FLD_NEW), (RECIPE_VA, RECIPE_OLD, RECIPE_NEW)] +
+				 [(v, CMP_OLD, CMP_NEW) for v in CMP_VAS]):
 		cur = data[off(va):off(va) + len(old_b)]
 		if cur == old_b:
 			edits.append((off(va), new_b))
@@ -204,13 +229,33 @@ def exe(path):
 	for o, b in edits:
 		data[o:o + len(b)] = b
 	write(path, data)
-	print("textsize: %s: text x%.1f, modes from 854 wide (%d changes)" % (path, SCALE, len(edits)))
+	print("textsize: %s: text x%.1f, modes from 854 wide, the recipe higher (%d changes)" %
+	      (path, SCALE, len(edits)))
+
+
+def recipe(game):
+	path = os.path.join(game, RECIPE_KAD)
+	data = open(path, "rb").read()
+	todo = []
+	for old, new in RECIPE_SIZES:
+		if data.count(old) == 1:
+			todo.append((old, new))
+		elif data.count(new) != 1:
+			sys.exit("textsize: %s: no %s: another recipe" % (path, old.decode()))
+	if not todo:
+		print("textsize: %s: already patched" % path)
+		return
+	for old, new in todo:
+		data = data.replace(old, new)
+	write(path, data)
+	print("textsize: %s: the recipe 0.82 high (%d changes)" % (path, len(todo)))
 
 
 def main():
 	game = sys.argv[1] if len(sys.argv) > 1 else os.environ["GAME_DIR"]
 	exe(os.path.join(game, "bout.exe"))
 	book(game)
+	recipe(game)
 
 
 if __name__ == "__main__":
