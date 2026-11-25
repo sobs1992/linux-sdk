@@ -14,6 +14,7 @@ import fcntl
 import http.client
 import importlib.machinery
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -25,12 +26,15 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
+import zipfile
 
 SDK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OVERLAY = os.path.join(SDK, "board", "common", "buildroot", "rootfs-overlay")
 BARE_WEB = os.path.join(OVERLAY, "usr", "lib", "bare-web", "bare_web.py")
 STATIC = os.path.join(OVERLAY, "usr", "share", "bare-web")
 GAME_INSTALL = os.path.join(SDK, "scripts", "game-install")
+BARE_BACKUP = os.path.join(OVERLAY, "usr", "sbin", "bare-backup")
 
 TOP = tempfile.mkdtemp(prefix="bare-web-test-")
 GAMES = os.path.join(TOP, "games")
@@ -91,6 +95,11 @@ ENV = {
     "GAME_INSTALL_GAMES": GAMES, "GAME_INSTALL_DATA": DATA, "GAME_INSTALL_RECIPES": os.path.join(TOP, "recipes"),
     "GAME_INSTALL_REDIST": os.path.join(TOP, "system-redist"), "GAME_INSTALL_LOCK": os.path.join(STATE, "gi.lock"),
     "STATE": STATE,
+    # bare-backup (the real one) in the same places
+    "BARE_WEB_BARE_BACKUP": BARE_BACKUP, "BARE_BACKUP_DATA": DATA, "BARE_BACKUP_GAMES": GAMES,
+    "BARE_BACKUP_RUN": os.path.join(TOP, "run"), "BARE_BACKUP_CONF": os.path.join(TOP, "bare_app.conf"),
+    "BARE_BACKUP_CTL": os.path.join(TOP, "no-ctl"), "BARE_BACKUP_RELEASE": os.path.join(TOP, "sdk-release"),
+    "BARE_BACKUP_UNIT": os.path.join(BIN, "unit"), "BARE_BACKUP_USB_DISK": os.path.join(BIN, "usb-disk"),
 }
 
 
@@ -632,6 +641,128 @@ def tearDownModule():
     with open("/proc/mounts") as f:
         assert not any(TOP in line for line in f), "a mount in " + TOP
     shutil.rmtree(TOP)
+
+
+def tree_md5(top):
+    out = {}
+    for d, dirs, files in os.walk(top):
+        for f in files:
+            with open(os.path.join(d, f), "rb") as fh:
+                out[os.path.relpath(os.path.join(d, f), top)] = hashlib.md5(fh.read()).hexdigest()
+    return out
+
+
+class SavesTest(unittest.TestCase):
+    """the page "Сохранения": bare-backup (the real one) behind /api/saves"""
+
+    def setUp(self):
+        for f in ("usb-disk",):
+            p = os.path.join(STATE, f)
+            if os.path.exists(p):
+                os.remove(p)
+        self.saves = os.path.join(DATA, "wine", "prefix", "drive_c", "users", "root", "Documents",
+                                  "My Games", "pirates")
+        if os.path.isdir(self.saves):
+            shutil.rmtree(self.saves)
+        os.makedirs(self.saves)
+        with open(os.path.join(self.saves, "Начало.pirates_savegame"), "wb") as f:
+            f.write(os.urandom(50000))
+        with open(os.path.join(self.saves, "Config.ini"), "w") as f:
+            f.write("a=1\n")
+        with open(ENV["BARE_BACKUP_CONF"], "w") as f:
+            f.write("lang=ru\ncontrols.0000abcd=a=b\n")
+        self.state()
+        for d in (os.path.join(GAMES, "backups"), os.path.join(DATA, "backups")):
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+
+    def state(self, running=None):
+        os.makedirs(ENV["BARE_BACKUP_RUN"], exist_ok=True)
+        with open(os.path.join(ENV["BARE_BACKUP_RUN"], "games.json"), "w") as f:
+            json.dump({"version": 1, "pid": os.getpid(), "running": running, "games": [
+                {"folder": "pirates", "name": "Pirates", "kind": "wine", "key": "0000abcd",
+                 "dir": os.path.join(GAMES, "pirates"), "available": True,
+                 "storage": [os.path.join(DATA, "wine", "games", "pirates"), self.saves]}]}, f)
+
+    def test_saves(self):
+        s, r = jreq("GET", "/api/saves")
+        self.assertEqual(s, 200, r)
+        g = r["games"][0]
+        self.assertEqual((g["folder"], g["files"]), ("pirates", 2))
+        self.assertEqual(r["copies"], [])
+        before = tree_md5(self.saves)
+        # a copy made and sent
+        s, h, d = req("GET", "/api/saves/pirates/backup", timeout=60)
+        self.assertEqual(s, 200, d)
+        h = dict(h)
+        self.assertEqual(h["Content-Type"], "application/zip")
+        self.assertIn("saves-pirates-", h["Content-Disposition"])
+        with zipfile.ZipFile(io.BytesIO(d)) as z:
+            self.assertIn("manifest.json", z.namelist())
+            self.assertIn("controls.0000abcd=a=b", z.read("settings.ini").decode())
+        s, r = jreq("GET", "/api/saves")
+        self.assertEqual([c["where"] for c in r["copies"]], ["card"])
+        name = r["copies"][0]["name"]
+        s, h, d2 = req("GET", "/api/saves/copy/card/" + urllib.parse.quote(name))
+        self.assertEqual((s, d2), (200, d))
+        # its manifest, then back after a change
+        s, m = jreq("POST", "/api/saves/info", {"where": "card", "name": name})
+        self.assertEqual(m["games"][0]["folder"], "pirates")
+        with open(os.path.join(self.saves, "Config.ini"), "w") as f:
+            f.write("changed")
+        s, r = jreq("POST", "/api/saves/restore", {"where": "card", "name": name})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["restored"], ["pirates"])
+        self.assertEqual(tree_md5(self.saves), before)
+        # not while the game runs
+        self.state(running={"folder": "pirates", "key": "0000abcd", "pid": os.getpid()})
+        s, r = jreq("POST", "/api/saves/restore", {"where": "card", "name": name})
+        self.assertEqual(s, 409)
+        self.assertIn("запущена", r["error"])
+        self.state()
+        # uploaded from the computer into /data/backups, then restored from there
+        up = "saves-pirates-2026-01-01_00-00-00.zip"
+        s, h, b = req("PUT", "/api/saves/upload/" + up, d)
+        self.assertEqual(s, 200, b)
+        self.assertTrue(os.path.isfile(os.path.join(DATA, "backups", up)))
+        self.assertEqual(req("PUT", "/api/saves/upload/evil.zip", b"x")[0], 400)
+        self.assertEqual(req("PUT", "/api/saves/upload/..%2fsaves-x.zip", b"x")[0], 400)
+        with open(os.path.join(self.saves, "Config.ini"), "w") as f:
+            f.write("changed again")
+        s, r = jreq("POST", "/api/saves/restore", {"where": "data", "name": up})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(tree_md5(self.saves), before)
+        # a damaged copy: refused, the data as it was
+        bad = "saves-pirates-2026-01-02_00-00-00.zip"
+        self.assertEqual(req("PUT", "/api/saves/upload/" + bad, d[:len(d) // 2])[0], 200)
+        with open(os.path.join(self.saves, "Config.ini"), "w") as f:
+            f.write("mine")
+        mine = tree_md5(self.saves)
+        s, r = jreq("POST", "/api/saves/restore", {"where": "data", "name": bad})
+        self.assertEqual(s, 500)
+        self.assertEqual(tree_md5(self.saves), mine)
+        # a copy of all
+        s, h, d = req("GET", "/api/saves/all", timeout=60)
+        self.assertEqual(s, 200, d)
+        with zipfile.ZipFile(io.BytesIO(d)) as z:
+            self.assertIn("bare_app.conf", z.namelist())
+        # copies deleted; nothing else is
+        s, r = jreq("GET", "/api/saves")
+        self.assertEqual(len(r["copies"]), 4)
+        for c in r["copies"]:
+            self.assertEqual(req("DELETE", "/api/saves/copy/%s/%s" % (c["where"], urllib.parse.quote(c["name"])))[0], 200)
+        self.assertEqual(jreq("GET", "/api/saves")[1]["copies"], [])
+        self.assertEqual(req("DELETE", "/api/saves/copy/data/..%2fbare_app.conf")[0], 404)
+        self.assertEqual(req("GET", "/api/saves/copy/data/x.zip")[0], 404)
+
+    def test_saves_without_bare_app(self):
+        os.remove(os.path.join(ENV["BARE_BACKUP_RUN"], "games.json"))
+        s, r = jreq("GET", "/api/saves")
+        self.assertEqual(s, 200)
+        self.assertIn("bare_app не запущен", r["error"])
+        s, h, d = req("GET", "/api/saves/pirates/backup")
+        self.assertEqual(s, 500)
+        self.assertIn("bare_app не запущен", json.loads(d)["error"])
 
 
 if __name__ == "__main__":

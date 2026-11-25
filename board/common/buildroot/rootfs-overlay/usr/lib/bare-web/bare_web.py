@@ -36,6 +36,15 @@ password (Wi-Fi is later, with a PIN on the screen).
   POST /api/update/switch          the spare system from the next start
                                    (ab-state try), then the restart
   POST /api/reboot                 the restart
+  GET  /api/saves                  bare-backup list: the games' data, the copies
+                                   on the card and in /data
+  GET  /api/saves/FOLDER/backup    a copy of the game made (bare-backup backup),
+                                   sent; GET /api/saves/all the same of all
+  GET|DELETE /api/saves/copy/WHERE/NAME   one of the copies (WHERE card, data)
+  PUT  /api/saves/upload/NAME      a copy from the computer into /data/backups
+  POST /api/saves/info             {where, name}: its manifest (bare-backup info)
+  POST /api/saves/restore          {where, name, game}: bare-backup restore;
+                                   409 while the game runs
   GET  /api/job                    the job running or the last one
   GET  /api/job/ID/events          its lines (text/event-stream)
 
@@ -51,7 +60,7 @@ BARE_WEB_DATA, BARE_WEB_LOGS, BARE_WEB_STATIC, BARE_WEB_LOG (the server's
 log), BARE_WEB_POWER (/sys/class/power_supply), BARE_WEB_RELEASE, the
 programs BARE_WEB_GAME_INSTALL, BARE_WEB_BARE_REPORT, BARE_WEB_SYSTEM_UPDATE,
 BARE_WEB_AB_STATE, BARE_WEB_USB_DISK, BARE_WEB_UNIT, BARE_WEB_REBOOT,
-BARE_WEB_UPDATE_LOCK, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
+BARE_WEB_UPDATE_LOCK, BARE_WEB_BARE_BACKUP, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
 BARE_WEB_BIND.
 """
 import http.server
@@ -80,6 +89,9 @@ AB_STATE = E("BARE_WEB_AB_STATE", "/usr/sbin/ab-state")
 USB_DISK = E("BARE_WEB_USB_DISK", "/usr/sbin/usb-disk")
 UNIT = E("BARE_WEB_UNIT", "/usr/sbin/unit")
 REBOOT = E("BARE_WEB_REBOOT", "/sbin/reboot")
+BARE_BACKUP = E("BARE_WEB_BARE_BACKUP", "/usr/sbin/bare-backup")
+SAVES_NAME = re.compile(r"^saves-[^/\\]+\.zip$")
+SAVES_MAX = 4 << 30	# a copy uploaded: at most this
 UPDATE_LOCK = E("BARE_WEB_UPDATE_LOCK", "/run/system-update.lock")	# system-update's own
 PLACES = ("install", "redist", "updates")
 CHUNK = 1 << 20
@@ -626,6 +638,8 @@ def files(place):
 
 
 REPORT_DIRS = {"card": lambda: os.path.join(GAMES, "reports"), "data": lambda: os.path.join(DATA, "reports")}
+# where bare-backup keeps the copies of saved games (its CARD_BACKUPS, DATA_BACKUPS)
+SAVES_DIRS = {"card": os.path.join(GAMES, "backups"), "data": os.path.join(DATA, "backups")}
 
 
 def reports():
@@ -829,7 +843,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # an upload that will be refused is refused before its body comes
         if self.command == "PUT" and self.allowed():
             segs, _ = self.parts()
-            why = self.upload_problem(segs[2:] if segs[:2] == ["api", "upload"] else None)
+            if segs[:3] == ["api", "saves", "upload"]:
+                why = self.saves_upload_problem(segs[3:])
+            else:
+                why = self.upload_problem(segs[2:] if segs[:2] == ["api", "upload"] else None)
             if why:
                 self.close_connection = True
                 self.fail(*why)
@@ -1089,6 +1106,178 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (CardError, OSError) as e:
             return self.fail(500, "Не удалось удалить отчёт: %s" % e)
         self.json({"ok": True})
+
+    # ---- saved games (bare-backup)
+    def stream(self, path, ctype, download):
+        """a file as it is read: a copy may be large"""
+        try:
+            f = open(path, "rb")
+        except OSError:
+            return self.fail(404, "Файла нет: %s" % os.path.basename(path))
+        with f:
+            n = os.fstat(f.fileno()).st_size
+            q = urllib.parse.quote(download)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(n))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Disposition", "attachment; filename=\"%s\"; filename*=UTF-8''%s" %
+                             (download.encode("ascii", "replace").decode().replace('"', "_"), q))
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            try:
+                for b in iter(lambda: f.read(CHUNK), b""):
+                    self.wfile.write(b)
+            except (ConnectionError, TimeoutError):
+                self.close_connection = True
+
+    def backup_err(self, rc, err, what):
+        text = err.strip().splitlines()[-1] if err.strip() else "код выхода %d" % rc
+        text = text[len("bare-backup: "):] if text.startswith("bare-backup: ") else text
+        code = 409 if rc in (3, 4) else 400 if rc == 2 else 500
+        return self.fail(code, "%s: %s" % (what, text))
+
+    def copy_path(self, where, name):
+        if not isinstance(where, str) or where not in SAVES_DIRS or not isinstance(name, str) or \
+                not safe_name(name) or not SAVES_NAME.match(name):
+            return None
+        p = os.path.join(SAVES_DIRS[where], name)
+        return p if os.path.isfile(p) and not os.path.islink(p) else None
+
+    def api_get_saves(self, segs, q):
+        if len(segs) == 1:
+            rc, out, err = run([BARE_BACKUP, "list"], timeout=120)
+            if rc:
+                return self.backup_err(rc, err, "Список сохранений")
+            try:
+                return self.json(json.loads(out))
+            except ValueError:
+                return self.fail(500, "bare-backup list: не JSON")
+        if segs[1] == "copy" and len(segs) == 4:
+            p = self.copy_path(segs[2], segs[3])
+            if not p:
+                return self.fail(404, "Такой копии нет.")
+            return self.stream(p, "application/zip", segs[3])
+        if (segs[1] == "all" and len(segs) == 2) or (len(segs) == 3 and segs[2] == "backup"):
+            what = segs[1]
+            if what != "all" and not safe_name(what):
+                return self.fail(400, "Имя игры не подходит: %s" % what)
+            rc, out, err = run([BARE_BACKUP, "backup", what], timeout=900)
+            path = out.strip().splitlines()[-1] if out.strip() else ""
+            if rc or not path or not os.path.isfile(path):
+                return self.backup_err(rc, err, "Копия не получилась")
+            log.info("saves %s: %s", what, path)
+            return self.stream(path, "application/zip", os.path.basename(path))
+        return self.fail(404, "?")
+
+    def api_delete_saves(self, segs, q):
+        if len(segs) != 4 or segs[1] != "copy":
+            return self.fail(404, "?")
+        p = self.copy_path(segs[2], segs[3])
+        if not p:
+            return self.fail(404, "Такой копии нет.")
+        try:
+            if segs[2] == "card":
+                why = card_problem()
+                if why:
+                    return self.fail(503, why)
+                with CardWriting():
+                    os.remove(p)
+            else:
+                os.remove(p)
+        except (CardError, OSError) as e:
+            return self.fail(500, "Не удалось удалить копию: %s" % e)
+        log.info("saves: %s deleted", p)
+        self.json({"ok": True})
+
+    def saves_upload_problem(self, rest):
+        if not rest or len(rest) != 1 or not safe_name(rest[0]) or not SAVES_NAME.match(rest[0]):
+            return 400, "Это не копия сохранений: имя должно быть saves-….zip."
+        try:
+            n = int(self.headers.get("Content-Length"))
+        except (TypeError, ValueError):
+            return 411, "Нужен размер файла (Content-Length)."
+        if n > SAVES_MAX:
+            return 413, "Файл слишком большой для копии сохранений."
+        room = df(DATA)
+        if room and (room["free_mb"] << 20) < n + ROOM_LEFT:
+            return 507, "В памяти приставки не хватает места: свободно %d МБ." % room["free_mb"]
+        return None
+
+    def api_put_saves(self, segs, q):
+        if segs[1:2] != ["upload"]:
+            self.close_connection = True
+            return self.fail(404, "?")
+        why = self.saves_upload_problem(segs[2:])
+        if why:
+            self.close_connection = True
+            return self.fail(*why)
+        name, n = segs[2], int(self.headers["Content-Length"])
+        d = SAVES_DIRS["data"]
+        dest = os.path.join(d, name)
+        part = os.path.join(d, "." + name + ".part")
+        got = 0
+        with UPLOADS_LOCK:
+            busy = ("saves", name) in UPLOADS
+            UPLOADS.add(("saves", name))
+        if busy:
+            self.close_connection = True
+            return self.fail(409, "Файл %s уже загружается." % name)
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(part, "wb") as f:
+                while got < n:
+                    b = self.rfile.read(min(CHUNK, n - got))
+                    if not b:
+                        break
+                    f.write(b)
+                    got += len(b)
+                f.flush()
+                os.fsync(f.fileno())
+            if got != n:
+                raise OSError("%d of %d bytes" % (got, n))
+            os.replace(part, dest)
+        except (OSError, ValueError) as e:
+            self.close_connection = True
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            log.warning("saves upload %s: %s", name, e)
+            return self.fail(400, "Копия %s пришла не целиком." % name)
+        finally:
+            with UPLOADS_LOCK:
+                UPLOADS.discard(("saves", name))
+        log.info("saves upload %s: %d bytes", dest, n)
+        self.json({"ok": True, "where": "data", "name": name, "size": n})
+
+    def api_post_saves(self, segs, q):
+        b = self.body_json()
+        if b is None or len(segs) != 2 or segs[1] not in ("info", "restore"):
+            return self.fail(400, "?")
+        p = self.copy_path(b.get("where"), b.get("name") or "")
+        if not p:
+            return self.fail(404, "Такой копии нет.")
+        if segs[1] == "info":
+            rc, out, err = run([BARE_BACKUP, "info", p], timeout=60)
+            if rc:
+                return self.backup_err(rc, err, "Копия не читается")
+            return self.json(json.loads(out))
+        game = b.get("game") or ""
+        if game and not safe_name(game):
+            return self.fail(400, "Имя игры не подходит: %s" % game)
+        rc, out, err = run([BARE_BACKUP, "restore", p] + (["--game", game] if game else []), timeout=900)
+        if rc:
+            return self.backup_err(rc, err, "Не восстановлено")
+        log.info("saves restored from %s%s", p, " (%s)" % game if game else "")
+        try:
+            r = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            r = {}
+        r["ok"] = True
+        r["warnings"] = [l[len("bare-backup: "):] for l in err.splitlines() if l.startswith("bare-backup: ")]
+        self.json(r)
 
     # ---- updates
     def api_get_update(self, segs, q):

@@ -13,6 +13,7 @@
     <a href="#status">Состояние</a>
     <a href="#install">Установка игр</a>
     <a href="#games">Игры и журналы</a>
+    <a href="#saves">Сохранения</a>
     <a href="#reports">Отчёты</a>
     <a href="#update">Обновление системы</a>
   </nav>
@@ -70,6 +71,28 @@
         <button id="log-close" class="secondary">Закрыть</button></span></div>
       <pre id="log-text"></pre>
     </div>
+  </section>
+
+  <section id="page-saves" class="page" hidden>
+    <h1>Сохранения</h1>
+    <p class="hint">Копия игры — один файл .zip с её сохранениями, настройками управления и
+      правками. Скачайте её на компьютер, чтобы сохранения пережили перепрошивку, или
+      загрузите её на другой приставке («Загрузить копию», затем «Восстановить»). Копии лежат
+      на карте игр в папке <b>backups</b> (без карты — в памяти приставки); после каждой игры
+      приставка сама делает копию, если сохранения изменились, и хранит три последних.</p>
+    <div class="actions">
+      <button id="saves-all">Копия всей приставки</button>
+      <span id="saves-note" class="small"></span>
+    </div>
+    <div id="saves-list"></div>
+    <h2>Загрузить копию с компьютера</h2>
+    <div class="drop" data-place="saves">
+      <p>Перетащите файл saves-….zip сюда или</p>
+      <label class="button">выберите файл<input type="file" accept=".zip" multiple hidden></label>
+    </div>
+    <div class="uploads" data-place="saves"></div>
+    <h2>Копии</h2>
+    <div id="saves-copies"></div>
   </section>
 
   <section id="page-reports" class="page" hidden>

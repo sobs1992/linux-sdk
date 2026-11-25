@@ -166,6 +166,10 @@ function setupDrops() {
 function addFiles(place, list) {
   const box = $(".uploads[data-place=" + place + "]");
   for (const f of list) {
+    if (place === "saves" && !/^saves-.+\.zip$/i.test(f.name)) {
+      banner("Это не копия сохранений (saves-….zip): " + f.name, true);
+      continue;
+    }
     if (place === "updates" && !f.name.toLowerCase().endsWith(".upd")) {
       banner("Это не файл обновления (.upd): " + f.name, true);
       continue;
@@ -186,7 +190,8 @@ function pump() {
   const u = queue.shift();
   const x = new XMLHttpRequest();
   const t0 = Date.now();
-  x.open("PUT", "/api/upload/" + u.place + "/" + encodeURIComponent(u.file.name));
+  x.open("PUT", (u.place === "saves" ? "/api/saves/upload/" : "/api/upload/" + u.place + "/") +
+    encodeURIComponent(u.file.name));
   x.upload.onprogress = e => {
     if (!e.lengthComputable) return;
     const p = Math.floor(e.loaded * 100 / e.total);
@@ -219,6 +224,7 @@ function pump() {
 function uploaded(place) {
   if (place === "install" || place === "redist") scanInstall();
   if (place === "updates") updateFiles();
+  if (place === "saves") savesPage();
 }
 
 // ---- jobs -------------------------------------------------------------------
@@ -433,6 +439,96 @@ async function gamesPage() {
 }
 pages.games = gamesPage;
 
+// ---- saved games -----------------------------------------------------------
+
+// a file the device makes and sends (a report, a copy): saved by the browser
+async function fetchFile(url, note, busyText, doneText) {
+  note.textContent = busyText;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* not JSON */ }
+      throw new Error((j && j.error) || ("Ошибка " + r.status));
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+    const name = m ? decodeURIComponent(m[1]) : "file";
+    const a = h("a", { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    note.textContent = doneText(name);
+    return name;
+  } catch (e) {
+    note.textContent = "";
+    say(e);
+    return null;
+  }
+}
+
+const WHERE = { card: "карта игр, backups", data: "память приставки, backups" };
+
+async function restoreCopy(c) {
+  let m;
+  try { m = await api("POST", "/api/saves/info", { where: c.where, name: c.name }); } catch (e) { return say(e); }
+  const names = (m.games || []).map(g => g.name || g.folder).join(", ");
+  const from = (m.unit ? "приставка " + m.unit + ", " : "") + (m.date || "").replace("T", " ").slice(0, 16);
+  if (!confirm("Восстановить из копии " + c.name + " (" + from + "):\n" + names + "?\n\n" +
+    "Нынешние сохранения " + (m.games && m.games.length > 1 ? "этих игр" : "этой игры") +
+    " будут заменены сохранениями из копии. Игра не должна быть запущена.")) return;
+  banner("Восстанавливаю…");
+  try {
+    const r = await api("POST", "/api/saves/restore", { where: c.where, name: c.name });
+    banner("Восстановлено: " + (r.restored || []).join(", ") +
+      ((r.warnings || []).length ? ". Замечания: " + r.warnings.join("; ") : ""));
+    savesPage();
+  } catch (e) { say(e); }
+}
+
+async function savesPage() {
+  const list = $("#saves-list"), copies = $("#saves-copies");
+  let r;
+  try { r = await api("GET", "/api/saves"); } catch (e) { return say(e); }
+  if (r.error) banner(r.error, true);
+  const byGame = {};
+  for (const c of r.copies) (byGame[c.folder] = byGame[c.folder] || []).push(c);
+  const rows = r.games.filter(g => g.size || (byGame[g.folder] || []).length || g.available).map(g => {
+    const note = h("div", { class: "small" });
+    const n = (byGame[g.folder] || []).length;
+    const dl = h("button", { class: "secondary", disabled: !g.size && !g.has_layer },
+      "скачать копию");
+    dl.onclick = () => fetchFile("/api/saves/" + encodeURIComponent(g.folder) + "/backup", note,
+      "Делаю копию…", name => "Готово: " + name + " (она же лежит в папке backups)").then(savesPage);
+    return h("tr", null,
+      h("td", null, g.name, h("div", { class: "small" }, g.folder + (r.running === g.folder ? " — запущена" : ""))),
+      h("td", null, g.size ? mb(g.size) + " (" + g.files + " ф.)" : "нет данных"),
+      h("td", null, n ? n + " шт." : "—"),
+      h("td", null, dl, note));
+  });
+  list.replaceChildren(rows.length ? h("table", null, h("tr", null, h("th", null, "Игра"),
+    h("th", null, "Сохранения"), h("th", null, "Копий"), h("th", null, "")), rows)
+    : h("p", { class: "small" }, "Игр с сохранениями нет."));
+  const all = r.copies.slice().sort((a, b) => (b.date + b.name).localeCompare(a.date + a.name));
+  copies.replaceChildren(all.length ? h("table", null, h("tr", null, h("th", null, "Копия"), h("th", null, "Где"),
+    h("th", null, "Размер"), h("th", null, "")),
+  all.map(c => {
+    const url = "/api/saves/copy/" + c.where + "/" + encodeURIComponent(c.name);
+    const del = h("button", { class: "danger" }, "удалить");
+    del.onclick = async () => {
+      if (!confirm("Удалить копию " + c.name + "?")) return;
+      try { await api("DELETE", url); savesPage(); } catch (e) { say(e); }
+    };
+    const back = h("button", { class: "secondary" }, "восстановить");
+    back.onclick = () => restoreCopy(c);
+    return h("tr", null, h("td", null, c.name, h("div", { class: "small" }, c.auto ? "сделана сама после игры" : "")),
+      h("td", null, WHERE[c.where] || c.where), h("td", null, mb(c.size)),
+      h("td", null, h("a", { class: "button secondary", href: url }, "скачать"), back, del));
+  })) : h("p", { class: "small" }, "Копий пока нет."));
+}
+pages.saves = savesPage;
+
 // ---- reports ----------------------------------------------------------------
 
 async function reportsPage() {
@@ -543,6 +639,8 @@ pages.update = () => {
 
 $("#install-rescan").onclick = () => scanInstall();
 $("#log-close").onclick = () => { $("#log-view").hidden = true; };
+$("#saves-all").onclick = () => fetchFile("/api/saves/all", $("#saves-note"), "Делаю копию всей приставки…",
+  name => "Готово: " + name + " (она же лежит в папке backups)").then(savesPage);
 $("#report-make").onclick = () => makeReport("", $("#report-note")).then(reportsPage);
 setupDrops();
 setupUpdate();
