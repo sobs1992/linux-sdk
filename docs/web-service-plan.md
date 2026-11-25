@@ -138,6 +138,96 @@ writer (Sonnet).
 Приёмка этапа: Cold Fear из браузера поставлен и запущен; журнал и отчёт скачаны;
 обновление поставлено и загрузилось; RSS сервера измерен и записан.
 
+### Этап 1: сделано 2026-11-25 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты SDK: df5ddb8 (game-install: flock /run/game-install.lock, `fail busy`), fe89a9b
+(bare-web, страницы, S43web, тест), ae03f36 (`fail busy` со словами для старого
+bare_app), f6024c6 (версия обновления целиком; компиляция в отдельном Python),
+0d107c7 (одна загрузка одного имени, тело POST читается всегда), плюс коммит с этим
+разделом. bare_app: b2727b2 (`INSTALL_FAIL_BUSY`, `S_INST_ERR_BUSY`, пометки о копии
+текстов в bare-web).
+
+Файлы: `/usr/sbin/bare-web` (запуск: отключает прозрачные большие страницы
+prctl(PR_SET_THP_DISABLE) и перезапускает Python с `-S`, компилирует сервер в
+`__pycache__` отдельным процессом), `/usr/lib/bare-web/bare_web.py` (сервер),
+`/usr/share/bare-web/{index.html,app.js,app.css}`, `board/ogu/.../S43web`
+(start-stop-daemon -b, журнал `/var/log/bare-web.log` до 256 КБ + `.1`),
+`scripts/test-bare-web.py` (22 теста, каталоги BARE_WEB_* и GAME_INSTALL_* во временном
+каталоге, настоящий game-install на крошечной игре, подменные bare-report,
+system-update, ab-state, usb-disk, unit, reboot).
+
+API (все ответы JSON, кроме файлов и SSE; отвечает только `<net>.*` с `unit net` и
+127.0.0.1, остальным 403 — по решению «без пароля только с usb0»):
+
+| Запрос | Что делает |
+|---|---|
+| GET /api/status | sdk-release, ab-state, unit label, карта (mounted, usb_disk, rw, место), /data, батарея, задание |
+| PUT /api/upload/{install,redist,updates}/ИМЯ | тело в ИМЯ.part, fsync, rename (пока файл открыт); имя без `/`, `\`, `..`, не скрытое; 503 без карты или в режиме USB-диска, 507 мало места, 411 без Content-Length, 409 то же имя уже грузится; проверка до тела при `Expect: 100-continue`; обрыв → .part удаляется |
+| GET /api/files/МЕСТО, DELETE /api/files/МЕСТО/ИМЯ | файлы папки (part = недогружен); удаляются только `.part` и `.upd` из updates |
+| GET /api/install/scan | строки `game-install scan` объектами (entry + need/exe/size), список redist |
+| POST /api/install/run {path, replace, exe, title} | задание `game-install install`, события step/progress/skip/done/fail с русскими текстами |
+| POST /api/install/remove {path} | `game-install remove`, busy → 409 |
+| GET /api/games | папки /games с wine.ini/game.ini + homm3/halflife/doom, имя, размер (считается в фоне), последний запуск, журналы |
+| GET /api/logs/ИГРА/N[?download=1] | /data/logs/ИГРА/N.log, N = 1..3 |
+| GET /api/report[?game=] | bare-report, отдаёт файл (attachment) |
+| GET /api/reports, GET/DELETE /api/reports/{card,data}/ИМЯ | отчёты /games/reports и /data/reports |
+| GET /api/update/files | .upd в /games/updates, /games, /data/updates с update.ini (fits = FIRMWARE этой приставки) |
+| GET /api/update/info?file= | `system-update --info` |
+| POST /api/update/run {file} | задание `system-update` (step/progress/done/fail) |
+| GET /api/update/state | ab-state и версии слотов (другой слот не монтируется, пока идёт обновление) |
+| POST /api/update/switch | `ab-state try <другой>` и перезагрузка, как ctl_update.c rollback() |
+| POST /api/reboot | /sbin/reboot (как platform reboot bare_app) |
+| GET /api/job, GET /api/job/ID/events | последнее задание; его события text/event-stream (Last-Event-ID) |
+
+Одно задание установки/обновления за раз (409). Карта: счётчик своих писателей
+(CardWriting): remount rw при первом, ro после последнего, только если ro было до нас.
+
+Страницы (index.html, по `#`): Состояние; Установка игр (перетаскивание нескольких
+файлов, очередь по одному с процентом и МБ/с, список scan с «Установить» / «Установить
+заново» / «Удалить», выбор программы и названия для неизвестной игры, «Не хватает
+файлов», недогруженные .part с удалением, зона redist со ссылкой на Microsoft DirectX
+End-User Runtimes (June 2010)); Игры и журналы (таблица, журнал 1..3 на странице и
+скачивание, отчёт по игре); Отчёты (сделать, открыть, скачать, удалить); Обновление
+системы (установлена/запасная, зона .upd, сведения, установка с прогрессом,
+«Перезагрузить приставку», «Перейти на запасную систему»).
+
+Проверено на OGU1 (резервная копия /data:
+/media/D/OdroidLab/backups/ogu/web-stage1-2026-11-25/data.tar, без hibernate.swap):
+- загрузка установщика Cold Fear (exe 0,86 МБ + bin 1,73 ГБ) `curl -T`: 198 с,
+  8,7 МБ/с вместе с fsync; md5 на приставке = на ПК. Сама карта пишет ~10 МБ/с
+  (dd 256 МБ conv=fsync 25,8 с): упирается в карту;
+- scan → «installed», run replace=true → step 1..6, 8, done за 4 мин; во время него
+  второй run → 409, `game-install remove` из ssh → `fail busy`; после: 416 из 417
+  файлов /games/coldfear совпали по md5 с прежними, cover.png другой — его сейчас
+  делает тот же код рецепта побайтно так же (make_cover на приставке = файлу), прежний
+  был сделан более старым кодом обложек (его копии нет); install/ пуст, карта снова ro;
+- журнал 1.log (1933 Б) и отчёт coldfear (42,5 КБ) скачаны, отчёт удалён через API;
+- обновление e4ec18b-dirty: загрузка 142 МБ 22,5 с, info, run → 6 шагов, done за 19 с;
+  ab-state после: ab_try=b, ab_left=3 (так ставит system-update), запасной =
+  2026-11-24 e4ec18b-dirty. В новый слот не перезагружались; состояние возвращено
+  `ab-state try a` + `ab-state commit` (ab_try=none), чтобы случайный перезапуск не
+  увёл приставку на старую систему;
+- оборванная загрузка (curl --max-time 3): ни файла, ни .part, карта ro;
+- страницы открыты в headless Chrome: JS отрабатывает, тексты по-русски. Перетаскивание
+  и кнопки в живом браузере (Chrome/Edge/Firefox) не проверялись.
+
+Память (VmRSS процесса на OGU1): первая версия 22,8 МБ (14 МБ из них — большие страницы
+THP «always»); после отказа от logging (-2,5 МБ), импорта из .pyc вместо компиляции
+(-4,7 МБ), без THP и site: 15,7 МБ в покое (из них 9 МБ своих анонимных, остальное
+файлы libpython), 17,3 МБ во время загрузки 1,7 ГБ, 17,4 МБ (HWM) после установки и
+обновления. Решение по правилу «≤ ~15 МБ»: на границе, оставлен всегда включённым
+(S43web при загрузке); запуск по кабелю не делался — решает координатор.
+
+Отклонения: 1.8 (глава руководства) не делалась — её пишет writer; таблица текстов
+fail-кодов продублирована в bare_web.py (тексты живут в i18n.c, не в ctl_install.c;
+общий ini не делался), пометки в i18n.c, ctl_install.c и bare_web.py; папки
+целиком не загружаются (имя без `/`, страница отсылает к USB-диску); обрыв загрузки
+удаляет .part (строже плана), висящее соединение рвётся по таймауту 120 с; bare_app на
+OGU1 не пересобран: старый показывает `fail busy` словами game-install по-английски.
+Известное ограничение: если карту сделал rw game-install и в это время идёт загрузка
+сайта, его remount ro не пройдёт (busy) и карта останется rw до следующей записи
+bare-web/game-install.
+
 ## Этап 2. Сохранения: резервная копия и перенос на другую приставку (1 день)
 
 2.1 Что входит в копию игры: каталоги данных из games.json (сохранения, настройки игры,
