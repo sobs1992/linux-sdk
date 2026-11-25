@@ -82,7 +82,10 @@ def ssh(cmd, data=None):
 
 
 def shot(path):
-    ppm = ssh("kill -USR1 $(pidof bare_app) && sleep 0.7 && cat /tmp/bare_app.ppm")
+    # where bare_app writes it: its BARE_APP_SHOT (bare-app.init), else /tmp/bare_app.ppm
+    ppm = ssh("pid=$(pidof bare_app) && "
+              "p=$(tr '\\0' '\\n' < /proc/$pid/environ | sed -n 's/^BARE_APP_SHOT=//p') && "
+              "p=${p:-/tmp/bare_app.ppm} && kill -USR1 $pid && sleep 0.7 && cat \"$p\"")
     w, h = devlib.ppm_to_png(ppm, path)
     print("%s: %dx%d" % (path, w, h))
 

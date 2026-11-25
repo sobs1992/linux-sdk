@@ -4,10 +4,14 @@
 DAEMON=/usr/bin/bare_app
 PIDFILE=/var/run/bare_app.pid
 LOG=/var/log/bare_app.log
+# its screenshot on SIGUSR1 (view.c): the web service's check of a game reads
+# it there (bare-web /api/shot.png)
+export BARE_APP_SHOT=/run/bare_app/shot.ppm
 
 case "$1" in
 start)
 	printf "Starting bare_app: "
+	mkdir -p /run/bare_app
 	start-stop-daemon -S -q -b -m -p $PIDFILE -x /bin/sh -- \
 		-c "exec $DAEMON >> $LOG 2>&1" && echo "OK" || echo "FAIL"
 	;;
