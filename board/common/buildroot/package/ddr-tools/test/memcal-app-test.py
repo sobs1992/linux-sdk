@@ -5,10 +5,11 @@
 
 bare_app (the PC build, apps/bare_app/build-host/bare_app, platform pc-mem,
 854x480 as the GO Ultra) runs with BARE_APP_DDR_CALIBRATE = ddr-calibrate
-built with -DDDR_SIM (sim-test.py's board) and BARE_APP_DDR_TUNE = a stand-in
-ddr-tune that keeps its line in a file; the test drives it through its FIFO
-(open, press, release, launch) and reads its log (-v). Screenshots
-(SIGUSR1) go to --shots for a look.
+built with -DDDR_SIM (sim-test.py's board) and BARE_APP_DDR_TUNE = the SDK's
+ddr-tune itself, only its /chosen, the eMMC (an image) and devmem moved into
+the test's directory; the test drives bare_app through its FIFO (open,
+press, release, launch) and reads its log (-v). Screenshots (SIGUSR1) go to
+--shots for a look.
 """
 import argparse
 import importlib.util
@@ -311,13 +312,18 @@ def main():
     finally:
         app.quit()
     # in use at this start: the line U-Boot read is the one kept (an @ lane BL2 trained where it belongs is not moved)
+    L44 = " ".join(["%05x@+1" % (0x10000 | db << 12 | r << 8 | 0x68) for db in range(4) for r in range(8)] +
+                   ["%05x+1" % (0x10000 | db << 12 | 8 << 8 | 0x68) for db in range(4)] +
+                   ["%05x+1" % (0x10000 | db << 12 | u << 8 | 0x8c) for db in range(4) for u in range(2)])
     # (kept, what U-Boot read (None: an older U-Boot that does not say), what it moved, in use)
     for n, (kept, read, applied, used) in enumerate((
             ("11668@+4 13468@-6", "11668@+4 13468@-6", None, True),       # an @ lane needed no move
             ("11668@+4 13468@-6", "11668@+3", "11668:0002>0007", False),  # saved after this start
             ("11668@+4 13468@-6", None, None, False),                     # @ needs the new U-Boot
             ("11668+10", None, "11668:0002>0012", True),                  # an older U-Boot: by the moves
-            ("11668+10", None, "11668:0002>0010", False))):
+            ("11668+10", None, "11668:0002>0010", False),
+            # the longest line ddr-tune takes (44 CSRs): ddr-tune's output is longer than bare_app reads
+            (L44, L44, " ".join("%s:0002>0003" % t[:5] for t in L44.split()), True))):
         wu = os.path.join(work, "used%d" % n)
         os.makedirs(wu)
         app = App(a.app, wu, None, kept=kept, read_line=read, applied=applied)
