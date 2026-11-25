@@ -153,7 +153,8 @@ class Board:
                 bl2 = {l: self.trained.get(l, self.lanes[l][0]) for l in lanes}
                 L = (lift or {}).get((db, u), 0)
                 # BL2's frame: a lane's centre C = now - L + S, its offset C - BL2; its place =
-                # C - the median of its three neighbours' offsets, rounded towards BL2's value
+                # C - the median of its three neighbours' offsets, N from the median of their
+                # BL2 values rounded half a step towards 0
                 C = {l: self.lanes[l][0] - L + S[l] for l in lanes}
                 off = {l: C[l] - bl2[l] for l in lanes}
                 um = [l for l in lanes if l in unmeasured]
@@ -513,8 +514,16 @@ def cell_resume_d(binary, d):
     st = status(binary, b)
     c.check(st.startswith("unfinished ") and st.split()[1] not in ("0", "8"), "-s: " + st)
     run(binary, b, ["-R"])
+    # a spoilt log: a token in a done nibble's keep: longer than any entry is not carried on
+    log = open(b.path("ddr-calibrate.log")).read().split("\n")
+    blk = max(i for i, l in enumerate(log) if l.startswith("== "))
+    i = next(i for i in range(blk, len(log)) if log[i].startswith("dbyte "))
+    log[i] = log[i].replace(" keep:", " keep: " + "A" * 300, 1) if " keep:" in log[i] else log[i] + " keep: " + "A" * 300
+    open(b.path("ddr-calibrate.log"), "w").write("\n".join(log))
     r2 = run(binary, b, ["-p", "-r", "-d", "3"])
-    got = [t[:5] for t in [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()]
+    toks = [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()
+    c.check(all(re.fullmatch(r"[0-9a-f]{5}(@[+-]|[+-])[0-9a-f]{1,2}", t) for t in toks), "spoilt log carried: %s" % toks)
+    got = [t[:5] for t in toks]
     c.check(len(got) == len(set(got)), "twice: %s" % got)
     c.check(sorted(got) == sorted(t[:5] for t in full.split()), "line %s, the whole run's %s" % (got, full))
     c.check("10068" not in got, "the old move 10068+1 came back: %s" % got)
@@ -574,6 +583,15 @@ def cell_three_measured(binary, d):
                if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
         c.check(got == exp, "1.%d not measured: %s, expected %s" % (unm, got, exp))
         c.check(set(got) == {0x11668}, "1.%d not measured: entries %s besides 11668" % (unm, got))
+        # the same with the late edge out of reach instead
+        b = base_board(os.path.join(d, "t%d" % unm))
+        with open(b.path("spec"), "a") as f:
+            x0 = b.regs()[pbd(1, unm)] - R * b.strobe[(1, 1)]
+            f.write("eye 1 %d %g %g\n" % (unm, x0 - 80, x0 + 31 - 0.5))
+        r = run(binary, b, ["-p", "-d", "1"])
+        c.check("(edge not reached)" in r.stdout, "lane 1.%d, late edge: every edge reached" % unm)
+        got = {k: v for k, v in result_of(r).items() if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
+        c.check(got == {0x11668: 4}, "1.%d late edge not measured: %s, expected 11668@+4" % (unm, got))
     # three measured: the lane's own offset is in the median, so its own BL2 jump can move its
     # N (by <= the jump; none while the offset stays on the same side of the other two, as
     # docs/boards/ogu.md says). By hand: centres (BL2 frame, eyes fixed) 1.4 19, 1.5 14,
@@ -634,6 +652,14 @@ def cell_three_measured(binary, d):
     r3 = run(binary, b, ["-p", "-d", "1"])
     c.check("(edge not reached)" in r3.stdout, "half, retrained: every edge reached")
     c.check(nib1(r3) == {0x11468: 0, 0x11668: -2}, "half, retrained: %s, expected 11468@+0 11668@-2" % nib1(r3))
+    # 1.6 centre 15.5 (S 13.5): offsets 6, 6, 13.5; 1.6: 15.5 - 6 = 9.5, N 9.5 - med(8,5,20)=8
+    # -> 1.5 -> +1, place 9 (from the mean 11 or the max 20 it would round up: @+2)
+    over = {(1, 4): (8, 22, 10), (1, 5): (5, 22, 10), (1, 6): (2, 37, 10), (1, 7): (20, 30, 10)}
+    b = base_board(os.path.join(d, "half95"), override=over)
+    unreach7()
+    r = run(binary, b, ["-p", "-d", "1"])
+    c.check("(edge not reached)" in r.stdout, "half95: every edge reached")
+    c.check(nib1(r) == {0x11668: 1}, "half95: %s, expected 11668@+1" % nib1(r))
     return c
 
 
