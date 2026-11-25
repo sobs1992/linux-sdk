@@ -1253,7 +1253,8 @@ int main(int argc, char **argv)
 			 * BL2's value C - BL2. A lane's place = its centre minus the
 			 * median of its three neighbours' offsets (the lane itself not
 			 * counted): every lane sampling as the typical neighbour does.
-			 * Half a step from BL2's value rounds towards it.
+			 * N (the place against the median of the neighbours' BL2 values)
+			 * rounds half a step towards 0.
 			 */
 			int lift = uboot_lift(db, u);
 			double C[4], off[4];
@@ -1276,9 +1277,16 @@ int main(int argc, char **argv)
 						On[k++] = off[(i + j) % 4];
 				ok = !ce[i] && !ct[i] && n >= 3 && k > 0;
 				pr = C[i] - (k == 3 ? med3d(On[0], On[1], On[2]) : k == 2 ? (On[0] + On[1]) / 2 : k ? On[0] : 0);
-				d = pr - (int)bl2v[i];
-				di = (int)d;	/* towards 0, then more than half a step away */
+				/*
+				 * N, from the median of the neighbours' BL2 values, rounded on
+				 * its own (half a step towards 0): the lane's own BL2 value,
+				 * which jumps now and then, only decides whether it is kept
+				 */
+				int mb = med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
+				d = pr - mb;
+				di = (int)d;
 				di += d - di > 0.5 ? 1 : d - di < -0.5 ? -1 : 0;
+				di = mb + di - (int)bl2v[i];	/* the place from BL2's value */
 				rel = pr - ((int)cur - lift);	/* how far it is from its place now */
 				reli = (int)rel;
 				reli += rel - reli > 0.5 ? 1 : rel - reli < -0.5 ? -1 : 0;
@@ -1342,14 +1350,20 @@ int main(int argc, char **argv)
 	}
 
 	{
-		/* -d: the entries of the DBYTEs not calibrated stay as U-Boot read them */
+		/*
+		 * What this run did not decide stays as U-Boot read it: entries of
+		 * DBYTEs not calibrated (-d), strobes, lane 8 (old "CSR+N" moves
+		 * too); lanes 0-7 of the DBYTEs calibrated are this run's
+		 */
 		char tmp[600];
 
 		snprintf(tmp, sizeof tmp, "%s", line_read());
 		for (char *save = NULL, *t = strtok_r(tmp, " \n", &save); t; t = strtok_r(NULL, " \n", &save)) {
-			char d = t[1];
+			unsigned csr = strtoul(t, 0, 16);
+			int db = csr >> 12 & 15, r = csr >> 8 & 15, ours = (csr & 0xff) == 0x68 && r <= 7 &&
+			    strchr(dbytes, '0' + db);
 
-			if (strlen(t) > 6 && t[5] == '@' && !strchr(dbytes, d))
+			if (strlen(t) > 6 && csr_ours(csr) && !ours)
 				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
 		}
 	}

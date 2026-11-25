@@ -155,10 +155,10 @@ class Board:
                 off = {l: C[l] - bl2[l] for l in lanes}
                 for i, l in enumerate(lanes):
                     med = sorted(off[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
-                    free = bl2[l] + rnd0(C[l] - med - bl2[l])
-                    if abs(free - bl2[l]) >= thresh or pbd(*l) in (read or {}):
-                        others = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))
-                        line[pbd(*l)] = free - others[1]
+                    mb = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
+                    n = rnd0(C[l] - med - mb)       # N rounded on its own
+                    if abs(mb + n - bl2[l]) >= thresh or pbd(*l) in (read or {}):
+                        line[pbd(*l)] = n
         return line
 
 
@@ -419,8 +419,8 @@ def cell_e2e_half_step(binary, d):
 
 
 def cell_e2e_neighbour_jump(binary, d):
-    c = Cell("e2e_neighbour_jump: calibrated where BL2 trained a neighbour of bit 42 3 steps off: N within a step "
-             "(the neighbours' centres 4-9 steps apart: the model's limit)")
+    c = Cell("e2e_neighbour_jump: calibrated where BL2 trained a neighbour of bit 42 3 steps off: N off by no more "
+             "than the jump (the model's limit, said in the docs)")
     b = base_board(d, override=HALF)
     r = run(binary, b, ["-p", "-d", "1"])
     n0 = result_of(r).get(0x11668)
@@ -430,8 +430,24 @@ def cell_e2e_neighbour_jump(binary, d):
         bj = base_board(os.path.join(d, "j%d%d" % lane), override=HALF)
         bj.retrain({lane: HALF[lane][0] + step})
         got[lane] = result_of(run(binary, bj, ["-p", "-d", "1"])).get(0x11668)
-    c.check(all(v is not None and abs(v - n0) <= 1 for v in got.values()),
+    c.check(all(v is not None and abs(v - n0) <= 3 for v in got.values()),
             "11668@%s at the usual start, with a neighbour off: %s" % (n0, got))
+    return c
+
+
+def cell_e2e_half_own(binary, d):
+    c = Cell("e2e_half_own: a lane's place half a step from BL2's value, starts with its BL2 value 2 and 7 by turns: "
+             "the same line")
+    b = base_board(d, override={(0, 2): (7, 22, 11)})
+    r = run(binary, b, ["-p", "-d", "0"])
+    lines = [[l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]]
+    c.check(0x10268 in parse_line(lines[0]), "the cell tests nothing: 0.2 not in %s" % lines[0])
+    for v in (2, 7, 2, 7):
+        b.retrain({(0, 2): v})
+        b.uboot(lines[-1])
+        r = run(binary, b, ["-p", "-d", "0"])
+        lines.append([l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:])
+    c.check(len(set(lines)) == 1, "lines %s" % lines)
     return c
 
 
@@ -456,10 +472,10 @@ def cell_e2e_pair(binary, d):
 
 
 def cell_d_keeps_others(binary, d):
-    c = Cell("d_keeps_others: -d 3 keeps the line's entries of the other DBYTEs as U-Boot read them")
+    c = Cell("d_keeps_others: -d 3 keeps the other DBYTEs' entries, strobes, lane 8 and old moves as U-Boot read them")
     b = base_board(d)
     r = run(binary, b, ["-p"])
-    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:] + " 10868+2 1018c+1 10168+2"
     b.retrain({})
     b.uboot(line1)
     r2 = run(binary, b, ["-p", "-d", "3"])
@@ -488,9 +504,20 @@ def cell_unmeasured(binary, d):
         x0 = b.regs()[pbd(0, 1)] - R * b.strobe[(0, 0)]
         f.write("eye 0 1 %g %g\n" % (x0 - 11 + 0.5, x0 + 80))
     r3 = run(binary, b, ["-p", "-d", "0"])
-    bl2 = {r: b.lanes[(0, r)][0] for r in range(4)}
+    bl2 = {rr: b.lanes[(0, rr)][0] for rr in range(4)}
     want = bl2[1] + 5 - sorted([bl2[0], bl2[2], bl2[3]])[1]
     c.check(result_of(r3).get(0x10168) == want, "old move 10168+5: %s, expected @%+d" % (result_of(r3), want))
+    # in a nibble U-Boot lifted (DBYTE3 nibble 1: r4 below 0), a lane not measured keeps its N
+    b2 = base_board(os.path.join(d, "lifted"))
+    r4 = run(binary, b2, ["-p", "-d", "3"])
+    line4 = [l for l in r4.stdout.splitlines() if l.startswith("result ")][0][7:] + " 13768@+3"
+    props = b2.uboot(line4)
+    with open(b2.path("spec"), "a") as f:
+        x0 = b2.regs()[pbd(3, 7)] - R * b2.strobe[(3, 1)]
+        f.write("eye 3 7 %g %g\n" % (x0 - 11 + 0.5, x0 + 80))
+    r5 = run(binary, b2, ["-p", "-d", "3"])
+    c.check("1318c+" in props.get("ddr-tune-lift", ""), "the nibble was not lifted: %s" % props)
+    c.check(result_of(r5).get(0x13768) == 3, "13768 in a lifted nibble: %s" % result_of(r5))
     return c
 
 
@@ -695,7 +722,8 @@ def cell_no_sim_dir(binary, d):
 
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
-         cell_e2e_half_step, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others, cell_unmeasured,
+         cell_e2e_half_step, cell_e2e_half_own, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others,
+         cell_unmeasured,
          cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
