@@ -261,6 +261,59 @@ bare-web/game-install.
     после, прерванная распаковка оставляет старые данные. На OGU1: Pirates! и Герои III
     туда и обратно, перенос копии на OGU2 только после резервной копии OGU2.
 
+### Этап 2: сделано 2026-11-26 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты SDK: bf278a7 (bare-backup + scripts/test-bare-backup.py), 18abeba (страница
+«Сохранения», API /api/saves, 2 теста в test-bare-web.py), 02e7c68 (файлы с датой до 1980
+в zip: найдено на OGU1), 24d3304 (`reload` только для восстановленных слоёв), a96f5d1
+(auto делает копию заново, если прошлую удалили). bare_app: effec22 (вызов `bare-backup
+auto` после игры, FIFO `import-settings`).
+
+`/usr/sbin/bare-backup` (Python, board/common overlay): `backup FOLDER|all [DIR]`, `auto
+FOLDER`, `restore ZIP [--game FOLDER]`, `list [DIR]` (JSON), `info ZIP`. Источник —
+`/run/bare_app/games.json` (нет файла или bare_app не жив → ошибка по-русски). Zip
+`saves-<папка>-<дата>.zip`: manifest.json (unit, дата, SDK, игры, каталоги с files/size/md5
+дерева), каталоги под `data/` относительно /data, settings.ini (`game=<key>` +
+`controls.<key>`/`options.<key>`), recipe/. `all`: `games/<папка>/settings.ini`, `recipes/`,
+bare_app.conf без ключей wifi*/bluetooth*/bt* и *pass/psk/secret/pin*. Карта (remount rw на
+время записи) или /data/backups. Восстановление: проверка всех имён до изменений (только
+внутри каталогов manifest, они в /data и, если bare_app знает игру, из её storage; без `..`,
+без ссылок), testzip, распаковка рядом (`<dir>.new-restore`), сверка md5, `<dir>` →
+`<dir>.bak`, новое на место, удаление .bak; сбой → старое обратно; игра идёт (games.json
+`running` или процесс с её папкой) → код 3. settings.ini → `/run/bare_app/import-<папка>.ini`
++ FIFO `import-settings`; слой → /games/recipes/<папка> + `reload`. Замок /run/bare-backup.lock.
+Тестовые каталоги BARE_BACKUP_*: задана одна, а не все обязательные → отказ (код 2).
+
+bare_app: после конца игры ACT_GAME_ENDED → ctl_backup запускает `bare-backup auto FOLDER`
+отдельным процессом (двойной fork, nice 10, не ждёт), если в bare_app.conf нет
+`autobackup=0`. bare-web: GET /api/saves, GET /api/saves/<папка>/backup, GET /api/saves/all
+(копия делается и отдаётся потоком), GET|DELETE /api/saves/copy/<card|data>/<имя>, PUT
+/api/saves/upload/<имя> (в /data/backups), POST /api/saves/info, POST /api/saves/restore
+(409, пока игра идёт); страница «Сохранения» (игры с размером данных, «скачать копию»,
+«Копия всей приставки», загрузка zip, список копий: скачать / восстановить с подтверждением /
+удалить).
+
+Проверено: test-bare-backup.py 16 тестов (md5 до/после, подпорченный zip и неверный md5 не
+трогают данные, сбой посреди замены возвращает старое, `..`/абсолютные/чужие каталоги/ссылки
+отвергнуты, auto без изменений не копирует и копирует после, ротация до трёх, копия «всех»),
+мутации отката, сверки md5, проверки «игра идёт», unchanged, ротации, проверки чужого
+каталога ловятся тестами; test-bare-web.py 24 теста. OGU1 (резервные копии в
+/media/D/OdroidLab/backups/ogu/web-stage1-2026-11-25/stage23-before/: bare_app,
+bare_app_wine, bare_app.conf, файлы bare-web, данные pirates и homm3 tar): копии pirates и
+homm3 через сайт, восстановление тех же копий → md5 12 файлов совпали с исходными;
+копия всей приставки 76 МБ за 30 с, 33 игры, 2127 записей, testzip чистый, в conf нет
+wifi/bluetooth; автокопия после выхода из Pirates! сделана (275 КБ), повторный auto →
+`unchanged`. Все тестовые zip удалены, /games/backups удалена, осталась отметка
+/data/backups/.stamp-pirates.
+
+Отклонения: автокопии называются `…-auto.zip` и ротация трёх касается только их (копии,
+сделанные вручную, не удаляются); пункт «Автокопия» в Настройках не делался (ключ
+`autobackup=0` читается); восстановление с экрана опций игры (2.5) не делалось; общие
+настройки из bare_app.conf копии «всех» не восстанавливаются (лежат в zip для справки,
+восстанавливаются только controls/options игр); перенос на OGU2 не проверялся (по заданию);
+каталоги данных вне /data (их нет на OGU) в копию не берутся и пишутся в manifest `skipped`;
+файлы с датой 1970 восстанавливаются с датой 1980 (ограничение zip).
+
 ## Этап 3. Рецепты на карте: слой правок (0,5–1 день)
 
 2.1 Формат: `/games/recipes/<папка игры>/wine.ini` (и game.ini для своих движков).
@@ -276,6 +329,51 @@ bare-web/game-install.
 2.4 game-install при переустановке слой не трогает (он вне папки игры); экран опций
     получает пункт «Сбросить правки» = удалить слой.
 2.5 Тест на ПК слияния (host-ut): скаляры, списки, секции, пустой слой, слой без игры.
+
+### Этап 3: сделано 2026-11-26 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты bare_app: bbced63 (слияние слоя, src/games/ini_layer.c, wine.c/native.c,
+games.json, BARE_APP_WINE_INI в bare_app_wine, тесты test_core), effec22 (games.json при
+сканировании и старте/конце игры, FIFO `reload [FOLDER]` и `import-settings FILE`,
+tests/game_layer.cmake через настоящий bare_app).
+
+Слияние (ini_layer.h): ключ слоя заменяет ключ базы (первая строка, остальные такие же
+удаляются); повторяемые ключи верхнего уровня `reg`, `modes`, `saves`, `needs` (только они
+читаются парсерами как повторяемые; `writable`, `dlls`, `env` — скаляры) при первом
+появлении в слое стирают все строки базы; пустое значение (`b =`) удаляет ключ базы в любой
+секции, пустой повторяемый ключ — очищает список; секции и ключи без учёта регистра, как в
+обоих парсерах; неизвестные секции и ключи переносятся по ключу. Слой, который не текст из
+строк ini (управляющие байты, строка без `=`, `[` без `]`, > 64 КБ), → LOGW, база как есть,
+в games.json `layer: broken` + `layer_error`. Действующий файл `/run/bare_app/ini/<папка>.ini`
+(для game.ini-игр `<id>.game.ini`) пишется атомарно с первой строкой `; merged by bare_app
+from <base> + <layer>`, и bare_app читает именно его. Без слоя файла нет (старый удаляется),
+переменная не задаётся, база читается прежним ini_read — поведение прежнее. При старте игры
+слияние повторяется; bare_app_wine берёт BARE_APP_WINE_INI, если задана, пути exe/writable/
+profile остаются относительно папки игры (argv[1]); в журнал пишет `settings from <file>:
+mode WxH`. Каталоги: BARE_APP_RUN / BARE_APP_RECIPES или platform.run_dir/recipes (ogu:
+/run/bare_app, /games/recipes; на OGA и ПК не заданы — слоёв и games.json нет).
+
+games.json — объект `{version, pid, running: {folder,key,pid}|null, games: [...]}` (не голый
+массив: нужны pid bare_app и идущая игра); у игры folder (= имя журналов), name, kind, key,
+dir, files, storage, available, has_layer, layer. FIFO `reload` заново сливает слои всех игр
+(или одной) без пересканирования, переписывает games.json и, если на экране home/библиотека,
+перестраивает их (полный скан); номера записей под другими экранами не меняются.
+`import-settings FILE`: строки `game=`, `controls.<key>=`, `options.<key>=`; записи этих
+игр в ctx и bare_app.conf заменяются, остальное (и чужие ключи файла) не трогается.
+
+Проверено: test_core (матрица: без слоя, скаляр, reg 3→2, saves, пустой список, [keys]
+по ключу и регистру, `b =`, слой без игры, битый слой, изменение + reload, переустановка
+игры, без run-каталога), мутации пяти правил ловятся; ctest 7/7 (game_layer: games.json,
+reload, import-settings, автокопия после игры через FIFO и настоящий bare_app). OGU1:
+слой pirates (mode 1024x768, select = esc) → `reload pirates` → действующий файл, games.json
+applied; launch:pirates → у bare_app_wine BARE_APP_WINE_INI=/run/bare_app/ini/pirates.ini,
+в 1.log `settings from /run/bare_app/ini/pirates.ini: mode 1024x768`, `display mode
+1024x768`; quit-game; слой удалён, `reload` → файл исчез, has_layer false.
+
+Отклонения и отложено: пункт «Сбросить правки» на экране опций (2.4) не делался; смена
+`name` слоем меняет game_key (controls/options игрока привязаны к ключу); слой game.ini
+влияет на запуск после следующего скана home (bare_app запускает такие игры из прочитанного
+в память), действующий файл game.ini только для показа.
 
 ## Этап 4. Мастерская: редактор (1,5–2 дня)
 
