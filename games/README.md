@@ -196,7 +196,9 @@ GOG первой стоит основная программа из `goggame-*.
 
 Проверка на ПК: `GAME_INSTALL_GAMES`, `GAME_INSTALL_DATA`, `GAME_INSTALL_RECIPES`
 (копия рецептов, как в rootfs, без `lab/`) и `GAME_INSTALL_REDIST` подменяют каталоги
-приставки, `innoextract` и `cabextract` нужны в `PATH`. Игры кладите копией, а не
+приставки, `GAME_INSTALL_LOCK` — файл-замок (на приставке `/run/game-install.lock`:
+установку и удаление `game-install` делает по одной, вторая сразу `fail busy`; так
+экран «+» и страница bare-web не мешают друг другу), `innoextract` и `cabextract` нужны в `PATH`. Игры кладите копией, а не
 ссылкой на `lab/games` (2026-11-23 перенос через ссылку удалил файлы в `lab`). Теперь
 `game-install` ставит только записи самой папки `install` и через символьную ссылку не
 переносит (тогда копирует), `gamerecipe` отказывается переносить ссылку и ставить игру

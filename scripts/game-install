@@ -50,12 +50,16 @@ game-install: games copied onto the games card installed on the board
                         folder or program is not there), unknown (no recipe,
                         no --exe), exists (ARG the card's folder taken), room
                         (ARG the MiB needed), card (not writable), setup (the
-                        installer could not be unpacked), error (ARG the
+                        installer could not be unpacked), busy (another
+                        install or removal runs: bare_app's install screen
+                        and bare-web's both run this one), error (ARG the
                         message)
       errors also on stderr "game-install: ...", exit status 1.
   game-install remove PATH
       deletes an entry of the install folder (a folder, or an installer
       with its .bin parts); "done removed NAME".
+  An install and a removal hold the lock /run/game-install.lock (flock)
+  while they run: a second one meanwhile fails at once ("fail busy").
   game-install prepare-card
       the card's install and redist folders, each with a text saying what
       goes into it, and the user guide (the system's
@@ -64,9 +68,10 @@ game-install: games copied onto the games card installed on the board
       this before the PC sees the card).
 GAME_INSTALL_GAMES, GAME_INSTALL_DATA, GAME_INSTALL_RECIPES and
 GAME_INSTALL_REDIST name other directories than /games, /data, the recipes
-and /usr/share/game-redist (tests).
+and /usr/share/game-redist, GAME_INSTALL_LOCK another lock file (tests).
 """
 import atexit
+import fcntl
 import fnmatch
 import json
 import os
@@ -93,6 +98,7 @@ REDIST = os.path.join(GAMES, "redist")	# what recipes take from a PC, put there 
 # what the system brings for recipes (OpenAL Soft's soft_oal.dll: package openal-soft-win32)
 SYSTEM_REDIST = os.environ.get("GAME_INSTALL_REDIST", "/usr/share/game-redist")
 UNPACK = ".unpack-"	# an installer unpacked in the install folder: .unpack-<name>
+LOCK = os.environ.get("GAME_INSTALL_LOCK", "/run/game-install.lock")
 STEPS = ("find", "unpack", "files", "extras", "cover", "prepare", "data", "finish")
 # programs of a game that are not the game
 NOT_GAME = re.compile(r"(unins|setup|install|config|dxsetup|directx|vcredist|vc_redist|dotnet|"
@@ -977,6 +983,23 @@ def prepare_card():
             card_rw(False)
 
 
+_lock = None
+
+
+def lock():
+    """one install or removal at a time (bare_app's install screen, bare-web):
+    held until this process ends; not inherited by the programs it runs
+    (innoextract), a file of Python's being close-on-exec"""
+    global _lock
+    try:
+        _lock = open(LOCK, "a")
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        die("another game is being installed or removed", "busy", "")
+    except OSError as e:
+        die("%s: %s" % (LOCK, e))
+
+
 def main():
     a = sys.argv[1:]
     if a[:1] == ["scan"] and len(a) <= 2:
@@ -999,9 +1022,11 @@ def main():
                 die("%s?" % o)
         if entry is None:
             die("install: which entry?")
+        lock()
         install(entry, replace, exe, title)
         return
     if a[:1] == ["remove"] and len(a) == 2:
+        lock()
         remove(a[1])
         return
     if a == ["prepare-card"]:
