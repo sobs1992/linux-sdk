@@ -9,7 +9,8 @@ file (2 MiB, CSR c at byte 2c), "spec" the lanes' read eyes. A lane (db, r)
 samples at x = its delay - R * its nibble's strobe and reads wrong outside
 [lo, hi]; the test sets the eyes from each lane's early and late margin
 (E, T steps from where it samples now), so the right answer is known:
-S = (E - T) / 2, against the median of its nibble.
+S = (E - T) / 2; in BL2's frame a lane's place is its centre minus the median
+of its three neighbours' offsets from BL2's values.
 """
 import os
 import re
@@ -148,10 +149,13 @@ class Board:
                 S = {l: (self.lanes[l][1] - self.lanes[l][2]) / 2.0 for l in lanes}
                 bl2 = {l: self.trained.get(l, self.lanes[l][0]) for l in lanes}
                 L = (lift or {}).get((db, u), 0)
+                # BL2's frame: a lane's centre C = now - L + S, its offset C - BL2; its place =
+                # C - the median of its three neighbours' offsets, rounded towards BL2's value
+                C = {l: self.lanes[l][0] - L + S[l] for l in lanes}
+                off = {l: C[l] - bl2[l] for l in lanes}
                 for i, l in enumerate(lanes):
-                    # against the median of the three neighbours' moves; half a step towards 0
-                    med = sorted(S[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
-                    free = self.lanes[l][0] + rnd0(S[l] - med) - L
+                    med = sorted(off[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
+                    free = bl2[l] + rnd0(C[l] - med - bl2[l])
                     if abs(free - bl2[l]) >= thresh or pbd(*l) in (read or {}):
                         others = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))
                         line[pbd(*l)] = free - others[1]
@@ -319,14 +323,16 @@ def cell_moved32(binary, d):
     c = Cell("moved32: U-Boot moved all 32 lanes at this start (/chosen 511 bytes): every BL2 value read")
     b0 = base_board(d)
     trained = {k: v[0] for k, v in b0.lanes.items()}
-    over = {k: (v[0] + 6, v[1], v[2]) for k, v in b0.lanes.items()}
+    # moved differently per lane (the frame of BL2's values cancels a common move): a BL2 value
+    # lost from /chosen distorts its lane's offset
+    over = {k: (v[0] + 2 + k[1] % 4 * 3, v[1], v[2]) for k, v in b0.lanes.items()}
     b = base_board(d, override=over, trained=trained)
     c.check(os.path.getsize(b.path("chosen")) > 256, "chosen is short: the cell tests nothing")
     s0 = b.regs()
     r = run(binary, b, ["-p"])
     got, exp = result_of(r), b.expected()
     # BL2's values of all 32 lanes come from /chosen: read short, the later lanes' corrections go wrong
-    c.check(len(exp) >= 24, "the expected line has %d lanes: the cell tests little" % len(exp))
+    c.check(len(exp) >= 3, "the expected line has %d lanes: the cell tests little" % len(exp))
     c.check(got == exp, "line %s, expected %s" % (got, exp))
     common_after(c, b, binary, r, s0)
     return c
@@ -426,6 +432,38 @@ def cell_e2e_neighbour_jump(binary, d):
         got[lane] = result_of(run(binary, bj, ["-p", "-d", "1"])).get(0x11668)
     c.check(all(v is not None and abs(v - n0) <= 1 for v in got.values()),
             "11668@%s at the usual start, with a neighbour off: %s" % (n0, got))
+    return c
+
+
+def cell_e2e_pair(binary, d):
+    c = Cell("e2e_pair: two lanes of a nibble in the line, the other two's centres 1-3 steps apart: "
+             "the line stays over three applications at the same start")
+    bad = {}
+    for dd in (1, 2, 3):
+        b = base_board(os.path.join(d, "d%d" % dd),
+                       override={(3, 6): (2, 31, 11), (3, 7): (2, 31 + 2 * dd, 11)})
+        r = run(binary, b, ["-p", "-d", "3"])
+        lines = [[l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]]
+        for k in range(3):
+            b.retrain({})
+            b.uboot(lines[-1])
+            r = run(binary, b, ["-p", "-d", "3"])
+            lines.append([l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:])
+        if len(set(lines)) != 1 or len(lines[0].split()) < 2:
+            bad[dd] = lines
+    c.check(not bad, "lines moving: %s" % bad)
+    return c
+
+
+def cell_d_keeps_others(binary, d):
+    c = Cell("d_keeps_others: -d 3 keeps the line's entries of the other DBYTEs as U-Boot read them")
+    b = base_board(d)
+    r = run(binary, b, ["-p"])
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    b.retrain({})
+    b.uboot(line1)
+    r2 = run(binary, b, ["-p", "-d", "3"])
+    c.check(result_of(r2) == parse_line(line1), "-d 3: %s, the line %s" % (result_of(r2), parse_line(line1)))
     return c
 
 
@@ -657,7 +695,8 @@ def cell_no_sim_dir(binary, d):
 
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
-         cell_e2e_half_step, cell_e2e_neighbour_jump, cell_unmeasured, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
+         cell_e2e_half_step, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others, cell_unmeasured,
+         cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 

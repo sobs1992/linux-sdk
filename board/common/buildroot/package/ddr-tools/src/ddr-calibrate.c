@@ -27,11 +27,14 @@
  * and per nibble the strobe step in RxPBDly steps, R (for the lift): the
  * early edge of one lane again with the strobe a few steps earlier. At the
  * first wrong word every register goes back at once (also on a fatal
- * signal). The lane's centre is S = (E - T) / 2 steps later; what counts
- * is the lane against its nibble, S - median(S of the nibble): the
- * nibble's own position (its strobe) is trained anew at every start, a
- * lane's skew against its neighbours is the same every time. A lane whose
- * place so found is -t steps (4) or more from what BL2 trained for it makes
+ * signal). The lane's centre is S = (E - T) / 2 steps later. In the frame
+ * of BL2's values (the line U-Boot applied does not change it) each lane's
+ * offset is its centre minus BL2's value; a lane's place is its centre
+ * minus the median of its three neighbours' offsets: it samples as the
+ * typical neighbour does (the nibble's own position, its strobe, is
+ * trained anew at every start, a lane's skew against its neighbours is
+ * the same every time). A lane whose place is -t steps (4) or more from
+ * what BL2 trained for it makes
  * an entry of the ddr-tune line, "CSR@+N" (and stays there once it is in
  * the line U-Boot read: the line must not depend on the start it was found
  * at): N from the median of what BL2
@@ -624,12 +627,11 @@ static int med3(int a, int b, int c)
 	return c < a ? a : c > b ? b : c;
 }
 
-/* csr has a "CSR@+N" in the line U-Boot read at this start (/chosen/ddr-tune-line) */
-static int read_at(unsigned csr)
+/* the line U-Boot read at this start (/chosen/ddr-tune-line), "" none */
+static const char *line_read(void)
 {
 	static char buf[600];
 	static int read_once;
-	char key[8], *p;
 
 	if (!read_once) {
 		FILE *f = fopen(path_line, "r");
@@ -642,6 +644,15 @@ static int read_at(unsigned csr)
 		}
 		read_once = 1;
 	}
+	return buf;
+}
+
+/* csr has a "CSR@+N" in the line U-Boot read at this start */
+static int read_at(unsigned csr)
+{
+	const char *buf = line_read(), *p;
+	char key[8];
+
 	snprintf(key, sizeof key, "%05x@", csr);
 	for (p = buf; (p = strstr(p, key)); p++)
 		if (p == buf || p[-1] == ' ')
@@ -1235,55 +1246,65 @@ int main(int argc, char **argv)
 			int nl = snprintf(nib, sizeof nib, "dbyte %d nibble %d: strobe %02x, R %.2f%s;", db, u,
 					  phy[CSR_CLK(db, u)], R, rnote);
 
+			/*
+			 * In the frame of BL2's values (without U-Boot's lift of this
+			 * start: /chosen/ddr-tune-lift), which the line applied does not
+			 * change: a lane's centre C = now - lift + S, its offset from
+			 * BL2's value C - BL2. A lane's place = its centre minus the
+			 * median of its three neighbours' offsets (the lane itself not
+			 * counted): every lane sampling as the typical neighbour does.
+			 * Half a step from BL2's value rounds towards it.
+			 */
+			int lift = uboot_lift(db, u);
+			double C[4], off[4];
+
+			for (int i = 0; i < 4; i++) {
+				unsigned c = CSR_PBD(db, 4 * u + i);
+
+				bl2v[i] = trained(c);
+				C[i] = (int)phy[c] - lift + S[i];
+				off[i] = C[i] - (int)bl2v[i];
+			}
 			for (int i = 0; i < 4; i++) {
 				int r = 4 * u + i;
 				unsigned c = CSR_PBD(db, r), cur = phy[c];
-				/*
-				 * The lane against the median of its three neighbours' moves
-				 * to their centres (as U-Boot sets it from the median of their
-				 * BL2 values; the lane itself not counted: corrected, it would
-				 * move the reference it is measured against). Half a step
-				 * rounds towards 0: a lane in place stays.
-				 */
-				double Sn[3], rel;
-				int k = 0, reli, ok;
+				double On[3], pr, rel, d;
+				int k = 0, di, reli, ok;
 
 				for (int j = 1; j < 4; j++)
 					if (!ce[(i + j) % 4] && !ct[(i + j) % 4])
-						Sn[k++] = S[(i + j) % 4];
-				rel = S[i] - (k == 3 ? med3d(Sn[0], Sn[1], Sn[2]) : k == 2 ? (Sn[0] + Sn[1]) / 2 : k ? Sn[0] : S[i]);
-				reli = (int)rel;	/* towards 0, then more than half a step away */
+						On[k++] = off[(i + j) % 4];
+				ok = !ce[i] && !ct[i] && n >= 3 && k > 0;
+				pr = C[i] - (k == 3 ? med3d(On[0], On[1], On[2]) : k == 2 ? (On[0] + On[1]) / 2 : k ? On[0] : 0);
+				d = pr - (int)bl2v[i];
+				di = (int)d;	/* towards 0, then more than half a step away */
+				di += d - di > 0.5 ? 1 : d - di < -0.5 ? -1 : 0;
+				rel = pr - ((int)cur - lift);	/* how far it is from its place now */
+				reli = (int)rel;
 				reli += rel - reli > 0.5 ? 1 : rel - reli < -0.5 ? -1 : 0;
-				ok = !ce[i] && !ct[i] && n >= 3;
 
 				printf("%d.%d   %2d   %02x   %2d%s   %2d%s  %5.1f  %+5.1f%s\n", db, r, cpu_bit(db, r), cur,
-				       E[i], ce[i] ? "+" : " ", T[i], ct[i] ? "+" : " ", S[i], rel,
-				       ok ? (abs(reli) >= thresh ? "  <-" : "") : "  (edge not reached)");
+				       E[i], ce[i] ? "+" : " ", T[i], ct[i] ? "+" : " ", S[i], ok ? rel : 0.0,
+				       ok ? (abs(di) >= thresh ? "  <-" : "") : "  (edge not reached)");
 				nl += snprintf(nib + nl, sizeof nib - nl, " r%d E%d%s T%d%s %+d", r, E[i], ce[i] ? "+" : "",
-					       T[i], ct[i] ? "+" : "", reli);
-				bl2v[i] = trained(c);
-				want[i] = ok ? (int)cur + reli : (int)cur;
+					       T[i], ct[i] ? "+" : "", ok ? reli : 0);
+				/* not measured: where it stands */
+				want[i] = ok ? (int)bl2v[i] + di : (int)cur - lift;
 				okv[i] = ok;
 			}
 			/*
-			 * The line: a lane where the centre is (relative to its nibble,
-			 * want) differs from BL2's value by thresh or more is kept as
-			 * "CSR@+N": N from the median of what BL2 trained for the other
-			 * three lanes of the nibble (U-Boot 0020 puts it there at every
-			 * start; one lane trained differently does not move the median).
-			 * In the frame without U-Boot's lift of this start (/chosen/
-			 * ddr-tune-lift: the nibble later as a whole, for a lane below
-			 * 0), where BL2's values are. A lane not measured that U-Boot set
-			 * at this start is kept where it is.
+			 * The line: a lane whose place is thresh or more from BL2's value
+			 * is kept as "CSR@+N", N from the median of what BL2 trained for
+			 * the other three lanes of the nibble (U-Boot 0020 sets it there
+			 * at every start); so is one already in the line U-Boot read, and
+			 * one not measured that does not stand at BL2's value.
 			 */
-			int lift = uboot_lift(db, u);
-
 			int nk = 0;
 			char kept_note[96] = "";
 
 			for (int i = 0; i < 4; i++) {
 				unsigned c = CSR_PBD(db, 4 * u + i);
-				int place = want[i] - lift, o, keepit;
+				int place = want[i], o, keepit;
 				/*
 				 * Once in the line, a lane stays: the line found must not
 				 * depend on the start it was found at (calibrated where BL2
@@ -1320,6 +1341,18 @@ int main(int argc, char **argv)
 		}
 	}
 
+	{
+		/* -d: the entries of the DBYTEs not calibrated stay as U-Boot read them */
+		char tmp[600];
+
+		snprintf(tmp, sizeof tmp, "%s", line_read());
+		for (char *save = NULL, *t = strtok_r(tmp, " \n", &save); t; t = strtok_r(NULL, " \n", &save)) {
+			char d = t[1];
+
+			if (strlen(t) > 6 && t[5] == '@' && !strchr(dbytes, d))
+				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
+		}
+	}
 	if (progress) {
 		/* the line's lanes: CSR, the bit of the 64-bit word (odd beat), steps */
 		char tmp[512];
