@@ -604,6 +604,36 @@ def cell_three_measured(binary, d):
         n2 = nib1(r2)
         c.check("(edge not reached)" in r2.stdout, "own %s: every edge reached" % bl2)
         c.check(n2 == want, "own %s: %s, expected %s" % (bl2, n2, want))
+    # a place half a step off, three measured: N rounds from the median of the NEIGHBOURS' BL2
+    # values (not of the three measured). By hand: centres 1.4 14, 1.5 11, 1.6 12.5, offsets
+    # 6, 6, 10.5; 1.6: 12.5 - 6 = 6.5, N 6.5 - med(8,5,20)=8 -> -1.5 -> -1 (place 7, 5 from
+    # BL2's 2: kept); from med(8,5,2)=5 it would be +1 -> place 6, @-2. 1.4, 1.5 at BL2's.
+    # Applied by U-Boot and calibrated again: the same.
+    over = {(1, 4): (8, 22, 10), (1, 5): (5, 22, 10), (1, 6): (2, 31, 10), (1, 7): (20, 30, 10)}
+    b = base_board(os.path.join(d, "half"), override=over)
+
+    def unreach7():
+        with open(b.path("spec"), "a") as f:
+            x0 = b.regs_start()[pbd(1, 7)] - R * b.strobe[(1, 1)]
+            f.write("eye 1 7 %g %g\n" % (x0 - 10 + 0.5, x0 + 80))
+    unreach7()
+    r = run(binary, b, ["-p", "-d", "1"])
+    c.check("(edge not reached)" in r.stdout, "half: every edge reached")
+    c.check(nib1(r) == {0x11668: -1}, "half, three measured: %s, expected 11668@-1" % nib1(r))
+    l1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    b.retrain({})
+    b.uboot(l1)
+    r2 = run(binary, b, ["-p", "-d", "1"])
+    c.check(nib1(r2) == {0x11668: -1}, "half, again after U-Boot: %s" % nib1(r2))
+    # BL2 1.4 2, 1.5 7, 1.6 5, 1.7 20: offsets 12, 4, 7.5 (median 7.5). 1.4: 14 - 7.5 = 6.5,
+    # N 6.5 - med(7,5,20)=7 -> -0.5 -> 0, place 7, 5 from BL2's 2: @+0 (from med(2,7,5)=5 it
+    # would be -1); 1.5: 3.5 against med(5,20,2)=5 -> place 4, 3 from 7: not kept; 1.6
+    # (in the line read): 5 - med(20,2,7)=7 = @-2
+    b.retrain({(1, 4): 2, (1, 5): 7, (1, 6): 5})
+    b.uboot(l1)
+    r3 = run(binary, b, ["-p", "-d", "1"])
+    c.check("(edge not reached)" in r3.stdout, "half, retrained: every edge reached")
+    c.check(nib1(r3) == {0x11468: 0, 0x11668: -2}, "half, retrained: %s, expected 11468@+0 11668@-2" % nib1(r3))
     return c
 
 
