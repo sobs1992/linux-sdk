@@ -537,32 +537,62 @@ def cell_resume_spoilt(binary, d):
     r2 = run(binary, b, ["-p", "-r"])
     c.check("dbyte 1 nibble 1: done before" in r2.stdout, "1.1 not done before the kill")
     c.check(result_of(r2) == full, "two-digit N: -r %s, the whole run %s" % (result_of(r2), full))
-    # each refused by one check of entry_ok: cut short, N above 3f, three digits, no N, @ on a
-    # strobe, @ on lane 8, not a hex CSR, not our CSR, no sign, N not hex, too long
-    for n, tok in enumerate(("1006", "11668@+40", "11668@+004", "11668+", "1318c@+1", "11868@+1", "1166g@+1",
-                             "12345+1", "11668@*4", "11668@+g", "A" * 300)):
-        b = base_board(os.path.join(d, "s%d" % n))
+    def killed(name):
+        """a board, its whole run's line, then a run killed in nibble 3, -R; the log's lines"""
+        b = base_board(os.path.join(d, name))
         full = result_of(run(binary, b, ["-p"]))
         run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "1100"})
         run(binary, b, ["-R"])
         log = open(b.path("ddr-calibrate.log")).read().split("\n")
         blk = max(i for i, l in enumerate(log) if l.startswith("== "))
-        i = next(i for i in range(blk, len(log)) if log[i].startswith("dbyte "))
-        log[i] = log[i].rstrip() + " " + tok
-        open(b.path("ddr-calibrate.log"), "w").write("\n".join(log))
+        nibs = [i for i in range(blk, len(log)) if log[i].startswith("dbyte ")]
+        c.check(log[nibs[0]].startswith("dbyte 0 nibble 0:") and " keep:" in log[nibs[0]],
+                "%s: the log's first nibble: %s" % (name, log[nibs[0]]))
+        return b, full, log, nibs
+
+    def resume(name, b, full, log, text=None):
+        open(b.path("ddr-calibrate.log"), "w").write("\n".join(log) if text is None else text)
         r2 = run(binary, b, ["-p", "-r"])
-        c.check("spoilt, measured again" in r2.stdout, "%s: the nibble not measured again" % tok[:20])
+        c.check("spoilt, measured again" in r2.stdout, "%s: the nibble not measured again" % name)
         res = [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:]
-        c.check(result_of(r2) == full, "%s: -r %s, the whole run %s" % (tok[:20], res, full))
+        c.check(result_of(r2) == full, "%s: -r %s, the whole run %s" % (name, res, full))
         b.retrain({})
         props = b.uboot(res)
-        c.check(props.get("ddr-tune"), "%s: U-Boot applied nothing of %s" % (tok[:20], res))
+        c.check(props.get("ddr-tune"), "%s: U-Boot applied nothing of %s" % (name, res))
+
+    # added to nibble 0.0's entries, each refused by one check: cut short, N above 3f, three
+    # digits (with @ and without), no N (both forms), @ on a strobe, @ on lane 8, not a hex CSR,
+    # not our CSR, no sign, N not hex (both forms), too long, not @ (an old move), a lane of
+    # the nibble twice, a lane of another nibble (of another DBYTE; of this DBYTE; the same
+    # lane number of another DBYTE)
+    for n, tok in enumerate(("1006", "11668@+40", "11668@+004", "11668+004", "11668+", "11668@+", "1318c@+1",
+                             "11868@+1", "1166g@+1", "12345+1", "11668@*4", "11668@+g", "11668+g", "A" * 300,
+                             "10168+1", "10168@+1 10168@+1", "13468@-4", "10468@+1", "11168@+1")):
+        b, full, log, nibs = killed("s%d" % n)
+        log[nibs[0]] = log[nibs[0]].rstrip() + " " + tok
+        resume(tok[:20], b, full, log)
+    # a line cut short before " keep:"; the log's last line cut short (no end of line)
+    b, full, log, nibs = killed("cut")
+    log[nibs[0]] = log[nibs[0]].split(" keep:")[0]
+    resume("cut before keep", b, full, log)
+    b, full, log, nibs = killed("eol")
+    c.check(all(l == "" for l in log[nibs[-1] + 1:]), "eol: lines after the last nibble: %s" % log[nibs[-1]:])
+    resume("no end of line", b, full, log, "\n".join(log[:nibs[-1] + 1]))
+    # what a run writes is taken: N of 3f both ways, done before and carried
+    b, full, log, nibs = killed("3f")
+    log[nibs[0]] = log[nibs[0]].split(" keep:")[0] + " keep: 10068@+3f 10168@-3f"
+    open(b.path("ddr-calibrate.log"), "w").write("\n".join(log))
+    r2 = run(binary, b, ["-p", "-r"])
+    res = [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:]
+    c.check("dbyte 0 nibble 0: done before (keep: 10068@+3f 10168@-3f)" in r2.stdout and
+            "10068@+3f" in res and "10168@-3f" in res, "3f: %s" % res)
     # carried on from the line U-Boot read (DBYTEs outside -d): what is not an entry is not
     b = base_board(os.path.join(d, "carry"))
     b.uboot("13468@-7 11668@+4 1366zzz 13568@+7")
     r = run(binary, b, ["-p", "-d", "0"])
     res = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
-    c.check("zzz" not in res and "13568@+7" in res, "carried from U-Boot's line: %s" % res)
+    c.check("zzz" not in res and res.split() == ["13468@-7", "11668@+4", "13568@+7"] + res.split()[3:],
+            "carried from U-Boot's line: %s" % res)
     return c
 
 

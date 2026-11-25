@@ -729,15 +729,25 @@ static int unfinished(int done[4][2], char *line, size_t size, int *nline, int s
 		    done[db][u])
 			continue;
 		/*
-		 * its entries as ddr-tune and U-Boot take them; one that is not
-		 * (a log spoilt, a line cut short): the nibble is measured again
+		 * what a run writes for a nibble: the line ends, has " keep:", and
+		 * its entries are "CSR@+N" of the nibble's own lanes, each once, as
+		 * ddr-tune and U-Boot take them. Anything else (a log spoilt, a
+		 * line cut short): the nibble is measured again.
 		 */
 		char toks[512], *save = NULL;
-		int bad = 0;
+		int bad = !k || !strchr(blk[i], '\n'), seen = 0;
 
 		snprintf(toks, sizeof toks, "%s", k ? k + 6 : "");
-		for (char *t = strtok_r(toks, " \n", &save); t; t = strtok_r(NULL, " \n", &save))
-			bad |= !entry_ok(t);
+		for (char *t = strtok_r(toks, " \n", &save); t; t = strtok_r(NULL, " \n", &save)) {
+			unsigned c = entry_ok(t) && t[5] == '@' ?
+				     (unsigned)strtoul((char[6]){t[0], t[1], t[2], t[3], t[4], 0}, 0, 16) : 0,
+				 r = c >> 8 & 15;
+
+			if (!c || (int)(c >> 12 & 15) != db || r / 4 != (unsigned)u || seen & 1 << r)
+				bad = 1;
+			else
+				seen |= 1 << r;
+		}
 		if (bad) {
 			if (say)
 				printf("dbyte %d nibble %d: its log entries are spoilt, measured again\n", db, u);
