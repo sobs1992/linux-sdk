@@ -72,7 +72,7 @@ for s in verify format unpack; do echo "step $s"; done | sed 's/step \(.*\)/step
 echo "progress 50"
 echo "progress 100"
 echo "step 6/6 boot"
-echo "done 2026-11-25-test"
+echo "done 2026-11-25 test123-dirty"
 """,
     "usb-disk": "#!/bin/sh\n[ -e \"$STATE/usb-disk\" ] && exit 0\nexit 1\n",
     "unit": "#!/bin/sh\ncase $1 in label) echo ogu-test ;; net) echo 192.168.7 ;; esac\n",
@@ -516,7 +516,8 @@ class Test(unittest.TestCase):
         ev = events(r["job"])
         self.assertEqual([e["n"] for e in ev if e["type"] == "step"], [1, 2, 2, 2, 6])
         self.assertEqual(ev[-1]["type"], "done")
-        self.assertEqual(ev[-1]["version"], "2026-11-25-test")
+        self.assertEqual(ev[-1]["version"], "2026-11-25 test123-dirty")
+        self.assertIn("2026-11-25 test123-dirty установлено", ev[-1]["text"])
         self.assertIn("run " + upd, calls())
         # a failure: system-update's own words
         touch(os.path.join(STATE, "fail-update"))

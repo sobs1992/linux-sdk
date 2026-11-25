@@ -439,7 +439,7 @@ def update_line(job, w):
     elif w[0] == "progress" and len(w) >= 2:
         job.emit("progress", percent=int(w[1]))
     elif w[0] == "done":
-        v = w[1] if len(w) > 1 else ""
+        v = " ".join(w[1:])	# "<built> <SDK commit>": a space in it
         job.emit("done", version=v, text="Обновление %s установлено. Оно заработает после "
                  "перезагрузки." % v)
 

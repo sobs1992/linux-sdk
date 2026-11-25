@@ -2,8 +2,9 @@
 """
 bare-web: the device in a browser of the computer on its USB cable, port 80
 (/etc/init.d/S43web). The server is /usr/lib/bare-web/bare_web.py (its
-pages /usr/share/bare-web), imported: Python keeps its compiled form in
-__pycache__ there; compiled at every start it would keep 5 MB more.
+pages /usr/share/bare-web), imported from its compiled form in __pycache__
+there: compiled in the server's own process it would keep 5 MB more, so a
+new one (the first start of a system) is compiled by another Python first.
 
 The GO Ultra's transparent huge pages are "always": Python's heap in 2 MiB
 pages takes 5 MB more of the memory the games need. They are turned off
@@ -29,7 +30,29 @@ def no_huge_pages():
     os.execv(sys.executable, [sys.executable, "-S", os.path.abspath(__file__)] + sys.argv[1:])
 
 
+def compiled():
+    """bare_web.py's __pycache__ file made by another process if it is not
+    the one of the source now (the header Python checks: magic, flags 0,
+    the source's time and size)"""
+    import importlib.util
+    src = os.path.join(LIB, "bare_web.py")
+    pyc = importlib.util.cache_from_source(src)
+    try:
+        st = os.stat(src)
+        with open(pyc, "rb") as f:
+            h = f.read(16)
+        if (h[:4] == importlib.util.MAGIC_NUMBER and h[4:8] == bytes(4) and
+                int.from_bytes(h[8:12], "little") == int(st.st_mtime) & 0xffffffff and
+                int.from_bytes(h[12:16], "little") == st.st_size & 0xffffffff):
+            return
+    except OSError:
+        pass
+    import subprocess
+    subprocess.run([sys.executable, "-S", "-m", "py_compile", src])	# a read-only one: compiled here then
+
+
 no_huge_pages()
+compiled()
 sys.path.insert(0, LIB)
 import bare_web  # noqa: E402
 
