@@ -27,14 +27,19 @@
  * and per nibble the strobe step in RxPBDly steps, R (for the lift): the
  * early edge of one lane again with the strobe a few steps earlier. At the
  * first wrong word every register goes back at once (also on a fatal
- * signal). The lane's centre is S = (E - T) / 2 steps later; what is kept is the lane against
- * its nibble, S - median(S of the nibble): the nibble's own position (its
- * strobe) is trained anew at every start, a lane's skew against its
- * neighbours is the same every time. Lanes off by -t steps or more (4) make
- * the ddr-tune line, from BL2's training (/chosen/ddr-tune says what U-Boot
- * moved at this start); a lane that would go below 0 lifts its whole nibble
- * instead. -w keeps the line (ddr-tune set), from the next start on; -r goes
- * on with an interrupted run (the board went down) from its next nibble.
+ * signal). The lane's centre is S = (E - T) / 2 steps later; what counts
+ * is the lane against its nibble, S - median(S of the nibble): the
+ * nibble's own position (its strobe) is trained anew at every start, a
+ * lane's skew against its neighbours is the same every time. A lane whose
+ * place so found is -t steps (4) or more from what BL2 trained for it makes
+ * an entry of the ddr-tune line, "CSR@+N": N from the median of what BL2
+ * trained for the other three lanes of its nibble (U-Boot 0020 sets it
+ * there at every start; BL2 trains a single lane differently now and then,
+ * the median of the others stays). BL2's values and U-Boot's lift of this
+ * start come from /chosen/ddr-tune and /chosen/ddr-tune-lift; a lane that
+ * would go below 0 is U-Boot's to handle (it lifts the nibble). -w keeps
+ * the line (ddr-tune set), from the next start on; -r goes on with an
+ * interrupted run (the board went down) from its next nibble.
  *
  * A step at an edge reads wrong words; they can hit the kernel. /data is
  * frozen while measuring (a wrong line written back stays in RAM only), the
@@ -88,6 +93,7 @@
 
 static const char *path_log = "/data/ddr-calibrate.log",
 	*path_chosen = "/proc/device-tree/chosen/ddr-tune",
+	*path_lift = "/proc/device-tree/chosen/ddr-tune-lift",
 	*path_saved = "/run/ddr-calibrate.saved",
 	*path_boot = "/proc/sys/kernel/random/boot_id",
 	*path_data = "/data",
@@ -593,6 +599,41 @@ static unsigned trained(unsigned csr)
 	return p ? strtoul(p + 6, 0, 16) : phy[csr];
 }
 
+static int med3(int a, int b, int c)
+{
+	if (a > b) {
+		int t = a;
+
+		a = b;
+		b = t;
+	}
+	return c < a ? a : c > b ? b : c;
+}
+
+/* U-Boot's lift of nibble (db, u) at this start: /chosen/ddr-tune-lift "1<db><u>8c+L ..." */
+static int uboot_lift(int db, int u)
+{
+	static char buf[128];
+	static int read_once;
+	char key[8];
+
+	if (!read_once) {
+		FILE *f = fopen(path_lift, "r");
+
+		if (f) {
+			size_t n = fread(buf, 1, sizeof buf - 1, f);
+
+			buf[n] = 0;
+			fclose(f);
+		}
+		read_once = 1;
+	}
+	snprintf(key, sizeof key, "%05x+", CSR_CLK(db, u));
+	char *p = strstr(buf, key);
+
+	return p ? (int)strtoul(p + 6, 0, 16) : 0;
+}
+
 /*
  * The last run in the log, if it did not end (the board went down, or it
  * was killed): its nibbles done[][], their "keep:" parts of the line
@@ -803,8 +844,8 @@ static int restore_saved(void)
 }
 
 #ifdef DDR_SIM
-/* DDR_SIM_DIR: phy (the registers), spec, boot_id, ddr-calibrate.log, chosen, run/, data/ */
-static char sim_paths[5][512];
+/* DDR_SIM_DIR: phy (the registers), spec, boot_id, ddr-calibrate.log, chosen, chosen-lift, run/, data/ */
+static char sim_paths[6][512];
 
 static int sim_setup(void)
 {
@@ -822,12 +863,14 @@ static int sim_setup(void)
 	snprintf(sim_paths[2], 512, "%s/run/ddr-calibrate.saved", d);
 	snprintf(sim_paths[3], 512, "%s/boot_id", d);
 	snprintf(sim_paths[4], 512, "%s/data", d);
+	snprintf(sim_paths[5], 512, "%s/chosen-lift", d);
 	snprintf(sim_frozen, sizeof sim_frozen, "%s/frozen", d);
 	path_log = sim_paths[0];
 	path_chosen = sim_paths[1];
 	path_saved = sim_paths[2];
 	path_boot = sim_paths[3];
 	path_data = sim_paths[4];
+	path_lift = sim_paths[5];
 	path_wdt = "";
 	sim_kill_probe = k ? atoi(k) : 0;
 	sim_sig_in_restore = getenv("DDR_SIM_SIG_IN_RESTORE") != NULL;
@@ -1069,7 +1112,7 @@ int main(int argc, char **argv)
 		for (int u = 0; u < 2; u++) {
 			if (done[db][u])
 				continue;
-			int E[4], T[4], ce[4], ct[4], nline0 = nline, tot[4], keep[4];
+			int E[4], T[4], ce[4], ct[4], nline0 = nline, want[4], okv[4];
 			unsigned bl2v[4];
 			double S[4], R = 2.5;
 			char rnote[64] = "";
@@ -1171,51 +1214,35 @@ int main(int argc, char **argv)
 				       ok ? (abs(reli) >= thresh ? "  <-" : "") : "  (edge not reached)");
 				nl += snprintf(nib + nl, sizeof nib - nl, " r%d E%d%s T%d%s %+d", r, E[i], ce[i] ? "+" : "",
 					       T[i], ct[i] ? "+" : "", reli);
-				/*
-				 * Off-centre: the move from BL2's value to the centre. A lane
-				 * moved at this start (ddr-tune) stays in the line: measured, its
-				 * move is corrected; not measured, it is kept as it is.
-				 */
-				int moved = (int)cur - (int)trained(c);
-
 				bl2v[i] = trained(c);
-				keep[i] = 0;
-				tot[i] = 0;
-				if (ok && (abs(reli) >= thresh || moved)) {
-					tot[i] = moved + reli;
-					keep[i] = 1;
-				} else if (!ok && moved) {
-					tot[i] = moved;
-					keep[i] = 1;
-				}
+				want[i] = ok ? (int)cur + reli : (int)cur;
+				okv[i] = ok;
 			}
 			/*
-			 * A delay cannot go below 0: a lane that needs to (BL2 left it at 0
-			 * or near) gets there by its three neighbours going up as much -
-			 * the same skew within the nibble; the nibble as a whole later,
-			 * which is where the eyes' middles are (BL2 samples near the late
-			 * edges, see docs).
+			 * The line: a lane where the centre is (relative to its nibble,
+			 * want) differs from BL2's value by thresh or more is kept as
+			 * "CSR@+N": N from the median of what BL2 trained for the other
+			 * three lanes of the nibble (U-Boot 0020 puts it there at every
+			 * start; one lane trained differently does not move the median).
+			 * In the frame without U-Boot's lift of this start (/chosen/
+			 * ddr-tune-lift: the nibble later as a whole, for a lane below
+			 * 0), where BL2's values are. A lane not measured that U-Boot set
+			 * at this start is kept where it is.
 			 */
-			int lift_all = 0;
+			int lift = uboot_lift(db, u);
 
-			for (int i = 0; i < 4; i++)
-				if (keep[i] && (int)bl2v[i] + tot[i] < -lift_all)
-					lift_all = -((int)bl2v[i] + tot[i]);
 			for (int i = 0; i < 4; i++) {
 				unsigned c = CSR_PBD(db, 4 * u + i);
+				int free = want[i] - lift, o, keepit;
 
-				if (lift_all) {
-					tot[i] += lift_all;
-					keep[i] = 1;
-				}
-				if ((int)bl2v[i] + tot[i] > VMAX)
-					tot[i] = VMAX - (int)bl2v[i];
-				if (keep[i] && tot[i])
-					nline += snprintf(line + nline, sizeof line - nline, "%s%05x%c%x",
-							  nline ? " " : "", c, tot[i] < 0 ? '-' : '+', abs(tot[i]));
+				keepit = okv[i] ? abs(free - (int)bl2v[i]) >= thresh : free != (int)bl2v[i];
+				if (!keepit)
+					continue;
+				o = free - med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
+				o = o < -VMAX ? -VMAX : o > VMAX ? VMAX : o;
+				nline += snprintf(line + nline, sizeof line - nline, "%s%05x@%c%x",
+						  nline ? " " : "", c, o < 0 ? '-' : '+', abs(o));
 			}
-			if (lift_all)
-				printf("dbyte %d nibble %d: a lane below 0, the nibble %d steps later\n", db, u, lift_all);
 			/* the nibble's result on disk before the next one */
 			thaw();
 			DATA_WRITE();
@@ -1239,7 +1266,7 @@ int main(int argc, char **argv)
 		snprintf(tmp, sizeof tmp, "%s", line);
 		for (char *t = strtok(tmp, " "); t; t = strtok(NULL, " ")) {
 			unsigned c = strtoul(t, 0, 16);
-			int steps = (int)strtol(t + 5, 0, 16);	/* "+b", "-4" */
+			int steps = (int)strtol(t + 5 + (t[5] == '@'), 0, 16);	/* "@+b", "@-4", "+b" */
 
 			printf("lane %05x %d %+d\n", c, cpu_bit(c >> 12 & 3, c >> 8 & 15), steps);
 		}

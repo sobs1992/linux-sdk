@@ -12,6 +12,7 @@ samples at x = its delay - R * its nibble's strobe and reads wrong outside
 S = (E - T) / 2, against the median of its nibble.
 """
 import os
+import re
 import shutil
 import signal
 import struct
@@ -24,6 +25,8 @@ import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "src", "ddr-calibrate.c")
+PATCH = os.path.abspath(os.path.join(HERE, "../../../../../ogu/u-boot/patches/"
+                                     "0020-board-odroid-go-ultra-ddr-phy-read-delays-tuned-per-device.patch"))
 PHY_SIZE = 0x200000
 VMAX = 0x3f
 R = 2.5
@@ -94,6 +97,33 @@ class Board:
                 f.write(" ".join("%05x:%04x>%04x" % (pbd(db, r), v, self.lanes[(db, r)][0])
                                  for (db, r), v in sorted(self.trained.items())) + "\0")
 
+    def retrain(self, bl2):
+        """a new start: BL2 trained the lanes to bl2 {(db, r): value} (the rest as at the
+        board's start), the eyes stay where they are; then U-Boot applies kept (a line)"""
+        regs = self.regs_start()
+        regs.update({pbd(*k): v for k, v in bl2.items()})
+        buf = bytearray(open(self.path("phy"), "rb").read())
+        for c, v in regs.items():
+            struct.pack_into("<H", buf, c * 2, v)
+        with open(self.path("phy"), "wb") as f:
+            f.write(buf)
+        with open(self.path("boot_id"), "w") as f:
+            f.write(str(uuid.uuid4()) + "\n")
+        for p in ("run/ddr-calibrate.saved", "frozen", "chosen", "chosen-lift"):
+            if os.path.exists(self.path(p)):
+                os.unlink(self.path(p))
+
+    def uboot(self, line):
+        """U-Boot 0020's own code (from the patch) applies line to the registers and
+        writes what the kernel would find in /chosen"""
+        r = subprocess.run([uboot_tool(), line, self.path("phy")], capture_output=True, text=True, check=True)
+        props = dict(l[len("prop 7 "):].split("=", 1) for l in r.stdout.splitlines() if l.startswith("prop 7 "))
+        for name, f in (("ddr-tune", "chosen"), ("ddr-tune-lift", "chosen-lift")):
+            if name in props:
+                with open(self.path(f), "w") as out:
+                    out.write(props[name] + "\0")
+        return props
+
     def path(self, p):
         return os.path.join(self.d, p)
 
@@ -102,8 +132,10 @@ class Board:
             buf = f.read()
         return {c: struct.unpack_from("<H", buf, c * 2)[0] for c in self.regs_start()}
 
-    def expected(self, thresh=4):
-        """the line ddr-calibrate should give, as {CSR: steps}"""
+    def expected(self, thresh=4, lift=None):
+        """the line ddr-calibrate should give, as {CSR: N} of "CSR@+N": a lane whose place
+        (centred against its nibble) is thresh or more from BL2's value, N from the median
+        of BL2's values of the other three lanes; lift[(db, u)]: U-Boot's lift at this start"""
         line = {}
         for db in range(4):
             for u in range(2):
@@ -111,30 +143,67 @@ class Board:
                 S = {l: (self.lanes[l][1] - self.lanes[l][2]) / 2.0 for l in lanes}
                 Sm = sorted(rnd(S[l]) for l in lanes)
                 med = (Sm[1] + Sm[2]) / 2.0
-                tot, bl2 = {}, {}
-                for l in lanes:
-                    now = self.lanes[l][0]
-                    bl2[l] = self.trained.get(l, now)
-                    moved = now - bl2[l]
-                    reli = rnd(S[l] - med)
-                    if abs(reli) >= thresh or moved:
-                        tot[l] = moved + reli
-                lift = 0
-                for l, t in tot.items():
-                    lift = max(lift, -(bl2[l] + t))
-                for l in lanes:
-                    t = tot.get(l, 0) + lift
-                    if l in tot or lift:
-                        t = min(t, VMAX - bl2[l])
-                        if t:
-                            line[pbd(*l)] = t
+                bl2 = {l: self.trained.get(l, self.lanes[l][0]) for l in lanes}
+                L = (lift or {}).get((db, u), 0)
+                for i, l in enumerate(lanes):
+                    free = self.lanes[l][0] + rnd(S[l] - med) - L
+                    if abs(free - bl2[l]) >= thresh:
+                        others = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))
+                        line[pbd(*l)] = free - others[1]
         return line
 
 
+_UBOOT_TOOL = []
+
+
+def uboot_tool():
+    """U-Boot 0020's ogu_ddr_tune and meson_ft_board_setup, from the patch's own
+    lines (scripts/test-ddr-tune.py's stubs), on a register file: TOOL LINE PHYFILE"""
+    if _UBOOT_TOOL:
+        return _UBOOT_TOOL[0]
+    import importlib.util
+    sdk = os.path.abspath(os.path.join(HERE, "../../../../../.."))
+    spec = importlib.util.spec_from_file_location("tdt", os.path.join(sdk, "scripts/test-ddr-tune.py"))
+    tdt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tdt)
+    main = r"""
+int main(int argc, char **argv)
+{
+	FILE *f = fopen(argv[2], "r+b");
+	size_t n;
+
+	(void)argc;
+	if (!f || fread(regs, 2, 0x20000, f) != 0x20000)
+		return 1;
+	n = strlen(argv[1]);
+	memset(sector, 0, sizeof sector);
+	snprintf(sector, sizeof sector, "ddr_tune=%s\n", argv[1]);
+	(void)n;
+	ogu_ddr_tune();
+	meson_ft_board_setup(NULL, NULL);
+	fseek(f, 0, SEEK_SET);
+	fwrite(regs, 2, 0x20000, f);
+	fclose(f);
+	return 0;
+}
+"""
+    work = tempfile.mkdtemp(prefix="uboot-tool-")
+    c, exe = os.path.join(work, "tool.c"), os.path.join(work, "tool")
+    with open(c, "w") as f:
+        f.write(tdt.STUBS + tdt.uboot_code(PATCH) + main)
+    subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wno-unused-function", "-o", exe, c], check=True)
+    _UBOOT_TOOL.append(exe)
+    return exe
+
+
 def parse_line(text):
+    """ "CSR@+N" entries -> {CSR: N} (a "CSR+N" one -> {CSR: ("move", N)})"""
     out = {}
     for t in text.split():
-        out[int(t[:5], 16)] = int(t[6:], 16) * (-1 if t[5] == "-" else 1)
+        if t[5] == "@":
+            out[int(t[:5], 16)] = int(t[7:], 16) * (-1 if t[6] == "-" else 1)
+        else:
+            out[int(t[:5], 16)] = ("move", int(t[6:], 16) * (-1 if t[5] == "-" else 1))
     return out
 
 
@@ -229,7 +298,9 @@ def cell_base(binary, d):
     c.check(r.returncode == 0, "exit %d: %s" % (r.returncode, r.stderr[-300:]))
     got, exp = result_of(r), b.expected()
     c.check(got == exp, "line %s, expected %s" % (got, exp))
-    c.check(exp.get(0x11668, 0) >= 9, "the cell tests nothing: bit 42 not off in the expected line")
+    c.check(0x11668 in exp and 0x13468 in exp, "the cell tests nothing: bit 42 or DBYTE3 r4 not in the expected line")
+    c.check(all(t[5] == "@" for t in [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:].split()),
+            "not all entries CSR@+N")
     lanes = [l.split() for l in r.stdout.splitlines() if l.startswith("lane 1")]
     want = [["lane", "%05x" % k, str(cpu_bit(k >> 12 & 3, k >> 8 & 15)), "%+d" % v] for k, v in sorted(exp.items())]
     c.check(sorted(lanes) == sorted(want), "lane lines %s, expected %s" % (lanes, want))
@@ -240,7 +311,7 @@ def cell_base(binary, d):
 
 
 def cell_moved32(binary, d):
-    c = Cell("moved32: U-Boot moved all 32 lanes at this start (/chosen 511 bytes): all kept")
+    c = Cell("moved32: U-Boot moved all 32 lanes at this start (/chosen 511 bytes): every BL2 value read")
     b0 = base_board(d)
     trained = {k: v[0] for k, v in b0.lanes.items()}
     over = {k: (v[0] + 6, v[1], v[2]) for k, v in b0.lanes.items()}
@@ -249,9 +320,57 @@ def cell_moved32(binary, d):
     s0 = b.regs()
     r = run(binary, b, ["-p"])
     got, exp = result_of(r), b.expected()
-    c.check(len(exp) == 32, "the expected line has %d lanes" % len(exp))
+    # BL2's values of all 32 lanes come from /chosen: read short, the later lanes' corrections go wrong
+    c.check(len(exp) >= 24, "the expected line has %d lanes: the cell tests little" % len(exp))
     c.check(got == exp, "line %s, expected %s" % (got, exp))
     common_after(c, b, binary, r, s0)
+    return c
+
+
+def table(r):
+    """ddr-calibrate's table: {(db, r): its offset against its nibble}"""
+    return {(int(a), int(b)): float(rel) for a, b, rel in
+            re.findall(r"^(\d)\.(\d)\s+\d+\s+[0-9a-f]{2}\s+\d+\+?\s+\d+\+?\s+[-\d.]+\s+([-+\d.]+)", r.stdout, re.M)}
+
+
+def e2e(binary, d, name, bl2):
+    """calibrate, then a new start where BL2 trained bl2 (the eyes where they were) and
+    U-Boot applied the line: calibrating again gives the same line, its lanes centred"""
+    c = Cell(name)
+    b = base_board(d)
+    r = run(binary, b, ["-p"])
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    c.check(result_of(r) == b.expected() and line1, "first line %s" % line1)
+    b.retrain(bl2)
+    props = b.uboot(line1)
+    r2 = run(binary, b, ["-p"])
+    got = result_of(r2)
+    c.check(got == parse_line(line1), "line after %s, before %s (U-Boot did %s)" % (got, parse_line(line1), props))
+    rel = table(r2)
+    off = {k: v for k, v in rel.items() if pbd(*k) in parse_line(line1) and abs(v) > 1}
+    c.check(not off, "corrected lanes not centred: %s" % off)
+    common_after(c, b, binary, r2, b.regs())
+    return c, props
+
+
+def cell_e2e_lane_jump(binary, d):
+    c, props = e2e(binary, d, "e2e_lane_jump: BL2 trains bit 42's lane 6 instead of 2: same place, same line",
+                   {(1, 6): 6})
+    return c
+
+
+def cell_e2e_nibble_moves(binary, d):
+    b0 = base_board(d)
+    bl2 = {(1, 4 + i): b0.lanes[(1, 4 + i)][0] + 2 for i in range(4)}
+    c, props = e2e(binary, d, "e2e_nibble_moves: BL2 trains DBYTE1 nibble 1 two steps later: the lane follows",
+                   bl2)
+    return c
+
+
+def cell_e2e_lift(binary, d):
+    c, props = e2e(binary, d, "e2e_lift: DBYTE3 r4 below 0: U-Boot lifts the nibble, the next run sees the lift",
+                   {})
+    c.check("1318c+" in props.get("ddr-tune-lift", ""), "no lift recorded: %s" % props)
     return c
 
 
@@ -455,7 +574,7 @@ def cell_no_sim_dir(binary, d):
     return c
 
 
-CELLS = [cell_base, cell_moved32, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
+CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 
