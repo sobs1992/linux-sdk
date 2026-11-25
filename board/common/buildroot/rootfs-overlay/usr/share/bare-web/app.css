@@ -5,6 +5,7 @@
   --accent: #1f6feb; --warn: #b54708; --bad: #c02626; --good: #16803c;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; font: 15px/1.45 system-ui, "Segoe UI", Roboto, "Noto Sans", sans-serif;
   background: var(--bg); color: var(--fg); }
 header { background: #1d2330; color: #fff; padding: 0 24px; display: flex; flex-wrap: wrap;
@@ -71,3 +72,28 @@ td .button, td button { padding: 2px 10px; font-size: 13px; margin: 0 4px 4px 0;
 .logview { margin-top: 16px; }
 .logview pre { background: #10141c; color: #d6dbe4; padding: 12px; border-radius: 8px; overflow: auto;
   max-height: 70vh; font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }
+/* the workshop and the check of a game */
+.tabs { display: flex; gap: 4px; margin: 12px 0; border-bottom: 1px solid var(--line); }
+.tabs .tab { background: none; color: var(--fg); border: none; border-bottom: 3px solid transparent;
+  border-radius: 0; padding: 8px 14px; }
+.tabs .tab.on { border-bottom-color: var(--accent); color: var(--accent); }
+td.key { width: 30%; }
+td.key code { font-weight: 600; }
+.field .vals { margin-bottom: 2px; }
+.field .vals b { font-weight: 500; color: #384152; }
+.field .edit { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; width: 100%; max-width: 420px; }
+.field textarea.edit { font: 13px/1.4 ui-monospace, Consolas, monospace; }
+.field .err { color: var(--bad); font-size: 13px; }
+.drop-key { display: block; }
+table.ctl td { padding: 6px 8px; }
+.bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; border-top: 1px solid var(--line); }
+.preset { margin: 8px 0; }
+.check { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+img.shot { width: 480px; max-width: 100%; background: #000; border-radius: 6px; display: block; min-height: 270px; }
+.gamepad .row { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+.gamepad .cross { display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; }
+button.pad { min-width: 44px; height: 40px; padding: 0 8px; user-select: none; touch-action: none; }
+button.pad:active { background: var(--accent); color: #fff; }
+.stick .cross { grid-template-columns: repeat(3, 40px); }
+pre.live { background: #10141c; color: #d6dbe4; padding: 12px; border-radius: 8px; overflow: auto; max-height: 40vh;
+  font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }

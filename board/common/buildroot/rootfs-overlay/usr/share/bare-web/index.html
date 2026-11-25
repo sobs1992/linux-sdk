@@ -73,6 +73,21 @@
     </div>
   </section>
 
+  <section id="page-game" class="page" hidden>
+    <p class="small"><a href="#games">← Игры и журналы</a></p>
+    <h1 id="game-title"></h1>
+    <div id="game-meta" class="small"></div>
+    <div id="game-tabs" class="tabs"></div>
+    <div id="game-body"></div>
+    <div id="game-bar" class="actions bar">
+      <button id="game-save">Сохранить</button>
+      <button id="game-reset" class="secondary">Сбросить правки</button>
+      <button id="game-adopt" class="secondary" hidden>Перенести управление игрока в рецепт</button>
+      <span id="game-note" class="small"></span>
+    </div>
+    <datalist id="actions-list"></datalist>
+  </section>
+
   <section id="page-saves" class="page" hidden>
     <h1>Сохранения</h1>
     <p class="hint">Копия игры — один файл .zip с её сохранениями, настройками управления и

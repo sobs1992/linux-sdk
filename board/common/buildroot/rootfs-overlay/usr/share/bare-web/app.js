@@ -73,14 +73,16 @@ const pages = {};
 let timer = null;
 
 function show() {
-  const name = (location.hash || "#status").slice(1);
+  // #part, or #game/FOLDER: a game's page
+  const [name, ...rest] = (location.hash || "#status").slice(1).split("/");
   const p = pages[name] ? name : "status";
   $$(".page").forEach(s => { s.hidden = s.id !== "page-" + p; });
-  $$("nav a").forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + p));
+  $$("nav a").forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + (p === "game" ? "games" : p)));
   banner("");
   clearInterval(timer);
   timer = null;
-  pages[p]();
+  stopCheck();
+  pages[p](decodeURIComponent(rest.join("/")));
 }
 
 // ---- status -----------------------------------------------------------------
@@ -423,9 +425,11 @@ async function gamesPage() {
       const logs = g.logs.map(l => h("button", { class: "secondary", onclick: () => openLog(g, l.n) }, "журнал " + l.n));
       const note = h("div", { class: "small" });
       const rep = h("button", { class: "secondary", onclick: () => makeReport(g.id, note) }, "отчёт");
+      const shop = h("a", { class: "button secondary", href: "#game/" + encodeURIComponent(g.id) },
+        g.kind === "built-in" ? "проверка" : "мастерская");
       return h("tr", null, h("td", null, g.name, h("div", { class: "small" }, g.folder ? "/games/" + g.folder : "")),
         h("td", null, g.folder ? mb(g.size) : "—"), h("td", null, when(g.last)),
-        h("td", null, logs.length ? logs : h("span", { class: "small" }, "не запускалась"), rep, note));
+        h("td", null, logs.length ? logs : h("span", { class: "small" }, "не запускалась"), rep, shop, note));
     });
     list.replaceChildren(h("table", null, h("tr", null, h("th", null, "Игра"), h("th", null, "Размер"),
       h("th", null, "Последний запуск"), h("th", null, "Журналы")), rows));
@@ -438,6 +442,481 @@ async function gamesPage() {
   load();
 }
 pages.games = gamesPage;
+
+// ---- the workshop: a game's recipe and the check of it (#game/FOLDER) ----------
+
+const W = { folder: null, r: null, schema: null, edits: {}, tab: "controls", hintTouched: false, stop: [] };
+const LISTS = ["reg", "modes", "saves", "needs"];
+const TABS = { controls: "Управление", screen: "Экран", fine: "Тонкое", check: "Проверка" };
+const GROUPS = { key: "клавиша", mouse: "мышь", pad: "геймпад", special: "особое" };
+
+function isList(sec, key) { return sec === "" && LISTS.includes(key); }
+function clone(o) { return JSON.parse(JSON.stringify(o || {})); }
+
+// a value of the ini as it is in the game's recipe, in its layer (the edits), after both
+function baseVal(sec, key) { const s = (W.r.base || {})[sec]; return s ? s[key] : undefined; }
+function editVal(sec, key) { const s = W.edits[sec]; return s ? s[key] : undefined; }
+function defVal(sec, key) { const s = (W.r.defaults || {})[sec]; return s ? s[key] : undefined; }
+function curVal(sec, key) {
+  const e = editVal(sec, key);
+  if (e === undefined) return baseVal(sec, key);
+  if (e === "" || (Array.isArray(e) && !e.length)) return undefined;
+  return e;
+}
+function setEdit(sec, key, v) {
+  if (v === undefined) {
+    if (W.edits[sec]) { delete W.edits[sec][key]; if (!Object.keys(W.edits[sec]).length) delete W.edits[sec]; }
+  } else (W.edits[sec] = W.edits[sec] || {})[key] = v;
+  dirty(true);
+}
+function shown(v) {
+  if (v === undefined || v === null) return "—";
+  return Array.isArray(v) ? (v.length ? v.join("; ") : "(пусто)") : (v === "" ? "(пусто)" : v);
+}
+
+function schemaOf(sec, key) {
+  const list = W.r.kind === "native" ? W.schema.game : W.schema.wine;
+  return list.find(e => e.section === sec && e.key === key);
+}
+
+// why a value would be refused (bare_web.py value_problem() says the same), "" if not
+function problem(sec, key, v) {
+  if (v === "") return "";
+  if (/[\x00-\x1f]/.test(v)) return "управляющие символы";
+  if (/^[;#]|\s[;#]/.test(v)) return "«;» или «#» после пробела — это комментарий";
+  const e = schemaOf(sec, key);
+  if (!e) return "";
+  if (e.type === "enum" && !e.values.includes(v)) return "одно из: " + e.values.join(", ");
+  if (e.type === "int" || e.type === "float") {
+    if ((e.also || []).includes(v)) return "";
+    const n = Number(v);
+    if (v.trim() === "" || isNaN(n) || (e.type === "int" && !Number.isInteger(n))) return e.type === "int" ? "целое число" : "число";
+    if ((e.min !== undefined && n < e.min) || (e.max !== undefined && n > e.max)) return "от " + e.min + " до " + e.max;
+  }
+  if (e.type === "bool" && !/^(yes|no|true|false|1|0)$/i.test(v)) return "yes или no";
+  if (e.type === "text" && e.pattern && !new RegExp(e.pattern).test(v)) return "не в том виде (пример: " + (e.example || "") + ")";
+  if (e.type === "list" && e.item_pattern && !new RegExp(e.item_pattern).test(v)) return "не в том виде";
+  if (e.type === "list" && e.item === "reg" && !/^[^=]*[^\\=]\\[^\\=]+=/.test(v)) return "нужно KEY\\NAME=DATA";
+  const acts = W.schema.actions || [];
+  if (e.type === "stick" && acts.length) {
+    const ok = acts.filter(a => a.group === "stick" && (a.takes || []).includes(key)).map(a => a.name);
+    if (!ok.includes(v)) return "одно из: " + ok.join(", ");
+  }
+  if (e.type === "keys" && acts.length) {
+    if (acts.some(a => a.name === v && a.group !== "key" && a.group !== "stick")) return "";
+    const keys = new Set(acts.filter(a => a.group === "key").map(a => a.name));
+    const parts = actionKeys(v);
+    if (!parts || !parts.length || parts.length > 4 || !parts.every(p => keys.has(p.toLowerCase())))
+      return "не клавиша и не действие";
+  }
+  return "";
+}
+
+// keys joined by "+" as bare_app_wine splits them (kp+ is a key)
+function actionKeys(v) {
+  const out = [];
+  let i = 0;
+  while (i < v.length) {
+    let j = v.indexOf("+", i);
+    if (j < 0) j = v.length;
+    if (j - i === 2 && v.slice(i, j) === "kp" && j < v.length) j++;
+    if (j < v.length && v[j] !== "+") return null;
+    if (j > i) out.push(v.slice(i, j));
+    i = j + 1;
+  }
+  return out;
+}
+
+// the edit of one value: an input (select, text, lines), the recipe's and the default value beside it
+function editor(sec, key, opts) {
+  opts = opts || {};
+  const e = schemaOf(sec, key) || { type: "text", hint: "Ключа нет в схеме: записывается как текст." };
+  const list = isList(sec, key);
+  const ev = editVal(sec, key), bv = baseVal(sec, key);
+  const note = h("div", { class: "err" });
+  const check = v => {
+    if (v === undefined) { note.textContent = ""; return true; }
+    const bad =(Array.isArray(v) ? v : [v]).map(x => problem(sec, key, x)).find(x => x);
+    note.textContent = bad || "";
+    return !bad;
+  };
+  let input;
+  const changed = v => { check(v); setEdit(sec, key, v); if (opts.onchange) opts.onchange(v); };
+  if (list) {
+    input = h("textarea", { rows: 2, placeholder: "как в рецепте" });
+    input.value = Array.isArray(ev) ? ev.join("\n") : "";
+    input.oninput = () => {
+      const lines = input.value.split("\n").map(x => x.trim()).filter(x => x);
+      changed(lines.length ? lines : (drop.checked ? [] : undefined));
+    };
+  } else if (e.type === "enum" || e.type === "stick" || e.type === "bool") {
+    let vals = e.values || [];
+    if (e.type === "stick") vals = (W.schema.actions || []).filter(a => a.group === "stick" && (a.takes || []).includes(key)).map(a => a.name);
+    if (e.type === "bool") vals = ["yes", "no"];
+    input = h("select", null, h("option", { value: "\u0001" }, "как в рецепте"),
+      vals.map(v => h("option", { value: v }, v)));
+    input.value = ev === undefined || ev === "" ? "\u0001" : ev;
+    if (ev !== undefined && ev !== "" && !vals.includes(ev)) input.append(h("option", { value: ev }, ev));
+    input.value = ev === undefined || ev === "" ? "\u0001" : ev;
+    input.onchange = () => changed(input.value === "\u0001" ? (drop.checked ? "" : undefined) : input.value);
+  } else {
+    input = h("input", { type: "text", placeholder: "как в рецепте", list: e.type === "keys" ? "actions-list" : null });
+    input.value = ev === undefined ? "" : ev;
+    input.oninput = () => changed(input.value.trim() === "" ? (drop.checked ? "" : undefined) : input.value.trim());
+  }
+  // a key of the recipe taken away: "key =" in the layer
+  const drop = h("input", { type: "checkbox" });
+  drop.checked = ev === "" || (Array.isArray(ev) && !ev.length);
+  drop.onchange = () => {
+    if (drop.checked) { if (input.tagName === "SELECT") input.value = "\u0001"; else input.value = ""; changed(list ? [] : ""); }
+    else changed(undefined);
+  };
+  const dropBox = bv !== undefined ? h("label", { class: "small drop-key" }, drop, " убрать из рецепта") : null;
+  if (ev !== undefined && ev !== "") check(ev);
+  const dv = defVal(sec, key);
+  input.classList.add("edit");
+  input.dataset.key = sec + "/" + key;
+  return h("div", { class: "field" },
+    h("div", { class: "vals small" }, "умолч.: ", h("b", null, shown(dv)), "  ·  рецепт: ", h("b", null, shown(bv))),
+    input, dropBox, note);
+}
+
+function fieldRow(sec, key) {
+  const e = schemaOf(sec, key);
+  return h("tr", null, h("td", { class: "key" }, h("code", null, (sec ? "[" + sec + "] " : "") + key),
+    e && e.hint ? h("div", { class: "small" }, e.hint) : null), h("td", null, editor(sec, key)));
+}
+
+// what the player changed on the device (controls.<key>): button A is B for the game
+function playerOf(key) {
+  const p = (W.r.player_controls || {}).pairs || [];
+  const x = p.find(q => q.from === key);
+  if (!x) return "";
+  return x.to === "-" ? "ничего" : "как " + x.to.toUpperCase();
+}
+
+// the controls hint out of the labels: "L stick  cursor    A  click…", F5/F6 last
+function buildHint(ru) {
+  const sec = ru ? "labels.ru" : "labels";
+  const first = [], second = [];
+  for (const c of W.schema.controls) {
+    if (c.nolabel || (c.device === "start_select" && !W.schema.start_select)) continue;
+    const l = curVal(sec, c.key);
+    if (!l) continue;
+    (/^f\d$/.test(c.key) ? second : first).push((ru ? c.ru : c.en) + "  " + l);
+  }
+  second.push(ru ? "F5  свернуть    F6 (держать)  выход" : "F5  minimise    F6 (hold)  quit");
+  return first.join("    ") + "\\n" + second.join("    ");
+}
+
+function hintBox() {
+  const box = h("div");
+  const fill = () => {
+    box.replaceChildren(h("h3", null, "Подсказка при старте"),
+      h("p", { class: "small" }, "Собирается из подписей сама, пока вы её не правили. «\\n» — новая строка."),
+      h("table", null, ["hint.ru", "hint"].map(k => {
+        const ed = editor("", k, { onchange: () => { W.hintTouched = true; } });
+        return h("tr", null, h("td", { class: "key" }, h("code", null, k)), h("td", null, ed));
+      })),
+      h("div", { class: "actions" }, h("button", { class: "secondary", onclick: () => { regen(true); } },
+        "Собрать из подписей")));
+  };
+  // force: both (the button); else the one of the labels' language changed
+  const regen = (force, ru) => {
+    if (W.hintTouched && !force) return;
+    if (force || !ru) setEdit("", "hint", buildHint(false));
+    if (force || ru) setEdit("", "hint.ru", buildHint(true));
+    fill();
+  };
+  W.regenHint = regen;
+  fill();
+  return box;
+}
+
+function controlsTab() {
+  const rows = W.schema.controls.filter(c => {
+    if (c.device === "start_select" && !W.schema.start_select && baseVal("keys", c.key) === undefined) return false;
+    for (const [k, v] of Object.entries(c.needs || {})) if ((curVal("keys", k) || defVal("keys", k)) !== v) return false;
+    return true;
+  }).map(c => {
+    const label = sec => c.nolabel ? h("span", { class: "small" }, "—") :
+      editor(sec, c.key, { onchange: () => W.regenHint && W.regenHint(false, sec === "labels.ru") });
+    return h("tr", null,
+      h("td", { class: "key" }, h("b", null, c.ru), c.note ? h("div", { class: "small" }, c.note) : null),
+      h("td", null, editor("keys", c.key, { onchange: () => { if (c.kind === "stick") renderTab(); } })),
+      h("td", null, label("labels.ru")), h("td", null, label("labels")),
+      h("td", { class: "small" }, playerOf(c.key)));
+  });
+  const pc = W.r.player_controls || {};
+  return [
+    h("p", { class: "hint" }, "Действие: клавиша (esc, enter, ctrl+s — вместе через +), мышь (lbutton, rbutton, " +
+      "wheelup…), кнопка геймпада (pad_a…), magnify (лупа) или none. Подписи показываются на экране «Управление» " +
+      "приставки (X на плитке игры). Пустое поле — как в рецепте."),
+    h("table", { class: "ctl" }, h("tr", null, h("th", null, "Кнопка"), h("th", null, "Действие"),
+      h("th", null, "Подпись (рус.)"), h("th", null, "Подпись (англ.)"), h("th", null, "У игрока")), rows),
+    pc.value ? h("p", { class: "small" }, "Своя перестановка кнопок игрока на приставке: ", h("code", null, pc.value),
+      ". Её можно перенести в рецепт кнопкой внизу.") : null,
+    hintBox()];
+}
+
+const SCREEN_KEYS = [["", "mode"], ["", "modes"], ["", "rows"], ["", "scale"], ["", "cursor"],
+  ["keys", "cursor_speed"], ["", "fps_limit"], ["", "gamma"]];
+
+function screenTab() {
+  return [h("table", null, SCREEN_KEYS.map(([s, k]) => fieldRow(s, k)))];
+}
+
+function envPresets() {
+  return h("div", { class: "presets" }, h("h3", null, "Заготовки env"),
+    (W.schema.env_presets || []).map(p => h("div", { class: "preset" },
+      h("button", { class: "secondary", onclick: () => {
+        const cur = (editVal("", "env") !== undefined ? editVal("", "env") : baseVal("", "env") || "").split(/\s+/).filter(x => x);
+        const names = p.value.split(/\s+/).map(t => t.split("=")[0]);
+        const out = cur.filter(t => !names.includes(t.split("=")[0])).concat(p.value.split(/\s+/));
+        setEdit("", "env", out.join(" "));
+        renderTab();
+      } }, "добавить"), " ", h("b", null, p.name), h("div", { class: "small" }, h("code", null, p.value), " — ", p.hint))));
+}
+
+function fineTab() {
+  const list = W.r.kind === "native" ? W.schema.game : W.schema.wine;
+  const shownKeys = new Set(W.r.kind === "native" ? [] : SCREEN_KEYS.map(x => x.join("/")));
+  const rows = [];
+  for (const e of list) {
+    if (e.hidden || shownKeys.has(e.section + "/" + e.key)) continue;
+    if (W.r.kind !== "native" && (e.tab === "controls")) continue;
+    rows.push(fieldRow(e.section, e.key));
+  }
+  // what the recipe or the layer has that the schema does not know
+  const known = new Set(list.map(e => e.section + "/" + e.key));
+  for (const src of [W.r.base || {}, W.edits])
+    for (const [s, keys] of Object.entries(src))
+      for (const k of Object.keys(keys))
+        if (!known.has(s + "/" + k)) { known.add(s + "/" + k); rows.push(fieldRow(s, k)); }
+  return [h("table", null, rows), W.r.kind === "native" ? null : envPresets()];
+}
+
+let checkTimer = null, checkStream = null;
+
+function stopCheck() {
+  clearTimeout(checkTimer);
+  checkTimer = null;
+  if (checkStream) { checkStream.close(); checkStream = null; }
+  for (const f of W.stop.splice(0)) f();
+}
+
+function padButton(name, label) {
+  let down = false;
+  const send = d => {
+    if (d === down) return;
+    down = d;
+    api("POST", "/api/pad", { button: name, down: d }).catch(say);
+  };
+  const b = h("button", { class: "pad secondary" }, label || name.toUpperCase());
+  b.addEventListener("pointerdown", e => { e.preventDefault(); b.setPointerCapture(e.pointerId); send(true); });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(ev, () => send(false));
+  W.stop.push(() => send(false));
+  return b;
+}
+
+function stickButton(stick, x, y, label) {
+  let held = null;
+  const push = () => api("POST", "/api/stick", { stick, x, y, ms: 300 }).catch(e => { say(e); release(); });
+  const release = () => { clearInterval(held); held = null; };
+  const b = h("button", { class: "pad secondary" }, label);
+  b.addEventListener("pointerdown", e => {
+    e.preventDefault(); b.setPointerCapture(e.pointerId);
+    if (held) return;
+    push(); held = setInterval(push, 300);
+  });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(ev, release);
+  W.stop.push(release);
+  return b;
+}
+
+function checkTab() {
+  const img = h("img", { class: "shot", alt: "экран приставки" });
+  const shotNote = h("div", { class: "small" }, "Снимок экрана обновляется раз в секунду, пока открыта эта вкладка.");
+  const st = h("div", { class: "cards" });
+  const logPre = h("pre", { class: "live" });
+  const f = encodeURIComponent(W.folder);
+  const loop = async () => {
+    try {
+      const s = await api("GET", "/api/state");
+      const run = s.running;
+      st.replaceChildren(
+        card("Игра", run ? (run === W.folder ? "идёт" : "идёт другая: " + run) + (s.minimized ? " (свёрнута)" : "") : "не запущена"),
+        card("Кадров в секунду", run && s.fps !== null ? String(s.fps).replace(".", ",") : "—"),
+        card("CPU игры", run && s.cpu_pct !== null ? s.cpu_pct + " % одного ядра" : "—"),
+        card("GPU", run && s.gpu_pct !== null ? s.gpu_pct + " %" + (s.gpu_mhz ? ", " + s.gpu_mhz + " МГц" : "") : "—"),
+        card("Память игры", run && s.mem_mb !== null ? s.mem_mb + " МБ" : "—"));
+    } catch (e) { /* the next second */ }
+    await new Promise(res => {
+      const next = h("img");
+      next.onload = () => { img.src = next.src; shotNote.textContent = "Снимок: " + new Date().toLocaleTimeString("ru-RU"); res(); };
+      next.onerror = () => { shotNote.textContent = "Снимок не получился (bare_app не отвечает?)."; res(); };
+      next.src = "/api/shot.png?w=480&t=" + Date.now();
+    });
+    if (W.tab === "check" && location.hash.startsWith("#game/")) checkTimer = setTimeout(loop, 1000);
+  };
+  const act = what => async () => {
+    try { const r = await api("POST", "/api/game/" + f + "/" + what); if (r.already) banner("Игра уже идёт."); }
+    catch (e) { say(e); }
+  };
+  checkStream = new EventSource("/api/logs/" + f + "/live");
+  checkStream.onmessage = m => {
+    const e = JSON.parse(m.data);
+    if (e.reset) logPre.textContent = "— новый запуск —\n";
+    else logPre.textContent = (logPre.textContent + e.line + "\n").split("\n").slice(-500).join("\n");
+    logPre.scrollTop = logPre.scrollHeight;
+  };
+  loop();
+  const ss = W.schema.start_select;
+  const dirs = (stick) => h("div", { class: "stick" }, h("div", { class: "small" }, stick === "stick" ? "Левый стик" : "Правый стик"),
+    h("div", { class: "cross" }, h("span"), stickButton(stick, 0, -1, "▲"), h("span"),
+      stickButton(stick, -1, 0, "◀"), h("span"), stickButton(stick, 1, 0, "▶"),
+      h("span"), stickButton(stick, 0, 1, "▼"), h("span")));
+  return [
+    h("div", { class: "actions" },
+      h("button", { onclick: act("launch") }, "Запустить"),
+      h("button", { class: "secondary", onclick: act("quit") }, "Выйти из игры"),
+      h("button", { class: "secondary", onclick: act("options") }, "Опции игры на приставке")),
+    st,
+    h("div", { class: "check" },
+      h("div", null, img, shotNote),
+      h("div", { class: "gamepad" },
+        h("div", { class: "row" }, padButton("l2", "L2"), padButton("l1", "L1"), padButton("r1", "R1"), padButton("r2", "R2")),
+        h("div", { class: "row" },
+          h("div", { class: "cross" }, h("span"), padButton("up", "▲"), h("span"), padButton("left", "◀"), h("span"),
+            padButton("right", "▶"), h("span"), padButton("down", "▼"), h("span")),
+          h("div", { class: "cross" }, h("span"), padButton("x", "X"), h("span"), padButton("y", "Y"), h("span"),
+            padButton("a", "A"), h("span"), padButton("b", "B"), h("span"))),
+        h("div", { class: "row" }, ["f1", "f2", "f3", "f4", "f5", "f6"].map(n => padButton(n, n.toUpperCase())),
+          ss ? padButton("select", "Select") : null, ss ? padButton("start", "Start") : null),
+        h("div", { class: "row" }, dirs("stick"), dirs("rstick")),
+        h("p", { class: "small" }, "Кнопка нажата, пока её держит мышь. F6 надо держать 2 с, чтобы выйти из игры; " +
+          "стик держится в стороне, пока нажата стрелка."))),
+    h("h3", null, "Журнал запуска (живьём)"), logPre];
+}
+
+function renderTab() {
+  stopCheck();
+  const t = W.tab;
+  $$("#game-tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  const body = t === "controls" ? controlsTab() : t === "screen" ? screenTab() : t === "fine" ? fineTab() : checkTab();
+  $("#game-body").replaceChildren(...body.filter(x => x));
+  $("#game-bar").hidden = t === "check" || !W.r.editable;
+}
+
+let isDirty = false;
+function dirty(v) {
+  isDirty = v;
+  const n = $("#game-note");
+  if (n) n.textContent = v ? "Есть несохранённые правки." : "";
+}
+
+function gameHead() {
+  const r = W.r;
+  const kinds = { wine: "игра Windows (wine.ini)", native: "своя программа (game.ini)", "built-in": "встроенная игра" };
+  $("#game-title").textContent = r.name;
+  $("#game-meta").textContent = kinds[r.kind] + (r.base_path ? " · рецепт " + r.base_path : "") +
+    (r.layer ? " · правки " + r.layer_path : " · правок нет") + (r.running ? " · идёт сейчас" : "");
+  if (r.layer_problem) banner("Файл правок не читается (" + r.layer_problem + "): сохраните заново или сбросьте.", true);
+  else if (r.layer_state === "broken") banner("bare_app не принял правки: " + (r.layer_error || "?"), true);
+  const tabs = r.kind === "wine" ? ["controls", "screen", "fine", "check"] : r.kind === "native" ? ["fine", "check"] : ["check"];
+  if (!tabs.includes(W.tab)) W.tab = tabs[0];
+  $("#game-tabs").replaceChildren(...tabs.map(t => {
+    const b = h("button", { class: "tab" }, TABS[t]);
+    b.dataset.tab = t;
+    b.onclick = () => { W.tab = t; renderTab(); };
+    return b;
+  }));
+  // only buttons move into [keys] (not an axis, a stick's sensitivity, the gyro)
+  const buttons = W.schema.controls.filter(c => c.kind === "button" && !c.nolabel).map(c => c.key);
+  $("#game-adopt").hidden = !(r.kind === "wine" && ((r.player_controls || {}).pairs || []).some(p =>
+    buttons.includes(p.from) && (p.to === "-" || buttons.includes(p.to))));
+}
+
+async function loadGame(folder) {
+  stopCheck();
+  W.folder = folder;
+  $("#game-body").replaceChildren(h("p", { class: "small" }, "Загружаю…"));
+  try {
+    if (!W.schema) {
+      W.schema = await api("GET", "/api/schema");
+      $("#actions-list").replaceChildren(...(W.schema.actions || []).filter(a => a.group !== "stick")
+        .map(a => h("option", { value: a.name, label: (GROUPS[a.group] || a.group) + ": " + a.name })));
+    }
+    W.r = await api("GET", "/api/recipe/" + encodeURIComponent(folder));
+  } catch (e) { return say(e); }
+  W.edits = clone(W.r.layer);
+  W.hintTouched = editVal("", "hint") !== undefined;
+  dirty(false);
+  gameHead();
+  renderTab();
+}
+
+async function saveGame() {
+  // every edit, also those of the tabs not shown
+  const bad = [];
+  for (const [sec, keys] of Object.entries(W.edits))
+    for (const [key, v] of Object.entries(keys))
+      for (const x of Array.isArray(v) ? v : [v]) {
+        const p = problem(sec, key, String(x));
+        if (p) bad.push((sec ? "[" + sec + "] " : "") + key + ": " + p);
+      }
+  if (bad.length) return say(new Error("Исправьте поля с ошибками: " + bad.join("; ")));
+  try {
+    const r = await api("PUT", "/api/recipe/" + encodeURIComponent(W.folder) + "/layer", { sections: W.edits });
+    banner("Сохранено: " + (r.lines ? r.lines + " строк правок" : "правок нет, рецепт как есть") +
+      (r.reloaded ? "" : " (bare_app не запущен: применится при его запуске)") +
+      ((r.warnings || []).length ? ". Замечания: " + r.warnings.join("; ") : "") + ". Действует со следующего запуска игры.");
+    W.r = r;
+    W.edits = clone(r.layer);
+    dirty(false);
+    gameHead();
+    renderTab();
+  } catch (e) { say(e); }
+}
+
+async function resetGame() {
+  if (!confirm("Сбросить все правки рецепта " + W.r.name + "? Останется рецепт прошивки.")) return;
+  try {
+    W.r = await api("DELETE", "/api/recipe/" + encodeURIComponent(W.folder) + "/layer");
+    W.edits = {};
+    dirty(false);
+    banner("Правки сброшены.");
+    gameHead();
+    renderTab();
+  } catch (e) { say(e); }
+}
+
+async function adoptGame() {
+  const pc = W.r.player_controls || {};
+  if (!confirm("Перенести перестановку кнопок игрока (" + pc.value + ") в правки рецепта? Кнопки и подписи " +
+    "перепишутся в [keys] и [labels], а своя перестановка игрока на приставке будет очищена " +
+    "(инверсия осей и чувствительность стиков останутся у игрока). Несохранённые правки на странице пропадут.")) return;
+  try {
+    const r = await api("POST", "/api/recipe/" + encodeURIComponent(W.folder) + "/adopt-controls");
+    banner("Перенесено: " + r.moved.map(p => p.from + "→" + p.to).join(", ") +
+      (r.kept.length ? "; осталось у игрока: " + r.kept.map(p => p.from + "=" + p.to).join(", ") : "") +
+      (r.settings_done ? "" : " (bare_app ещё не записал свои настройки — проверьте позже)"));
+    W.r = r;
+    W.edits = clone(r.layer);
+    dirty(false);
+    gameHead();
+    renderTab();
+  } catch (e) { say(e); }
+}
+
+// #game/FOLDER[/TAB]
+function gamePage(arg) {
+  const [folder, tab] = arg.split("/");
+  if (!folder) { location.hash = "#games"; return; }
+  if (TABS[tab]) W.tab = tab;
+  loadGame(folder);
+}
+pages.game = gamePage;
 
 // ---- saved games -----------------------------------------------------------
 
@@ -639,6 +1118,9 @@ pages.update = () => {
 
 $("#install-rescan").onclick = () => scanInstall();
 $("#log-close").onclick = () => { $("#log-view").hidden = true; };
+$("#game-save").onclick = saveGame;
+$("#game-reset").onclick = resetGame;
+$("#game-adopt").onclick = adoptGame;
 $("#saves-all").onclick = () => fetchFile("/api/saves/all", $("#saves-note"), "Делаю копию всей приставки…",
   name => "Готово: " + name + " (она же лежит в папке backups)").then(savesPage);
 $("#report-make").onclick = () => makeReport("", $("#report-note")).then(reportsPage);
@@ -646,6 +1128,6 @@ setupDrops();
 setupUpdate();
 window.addEventListener("hashchange", show);
 window.addEventListener("beforeunload", e => {
-  if (uploading) { e.preventDefault(); e.returnValue = ""; }
+  if (uploading || isDirty) { e.preventDefault(); e.returnValue = ""; }
 });
 show();
