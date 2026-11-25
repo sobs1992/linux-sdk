@@ -85,9 +85,10 @@ case $1 in
 	done=
 	[ -e /proc/device-tree/chosen/ddr-tune ] && done=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune)
 	echo "applied by U-Boot at this start: ${done:-nothing}"
-	read_line=
-	[ -e /proc/device-tree/chosen/ddr-tune-line ] && read_line=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-line)
-	echo "line U-Boot read at this start: ${read_line:-none}"
+	# only a U-Boot that says it (0020 of 2026-11-25); none: an older one
+	if [ -e /proc/device-tree/chosen/ddr-tune-line ]; then
+		echo "line U-Boot read at this start: $(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-line)"
+	fi
 	lift=
 	[ -e /proc/device-tree/chosen/ddr-tune-lift ] && lift=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-lift)
 	[ -z "$lift" ] || echo "nibbles lifted: $lift"

@@ -27,28 +27,48 @@ sim = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sim)
 
 TUNE = r'''#!/bin/sh
-# ddr-tune's stand-in: the line in $D/kept, every call in $D/tune.calls
-D=__DIR__
-echo "$*" >> $D/tune.calls
-case $1 in
-"") echo "kept: $(cat $D/kept 2>/dev/null || echo none)"; echo "applied by U-Boot at this start: nothing"
-   if [ -e $D/read_line ]; then echo "line U-Boot read at this start: $(cat $D/read_line)"; fi ;;
-set) echo "$2" > $D/kept; echo "kept: $2" ;;
-clear) rm -f $D/kept; echo "kept: none" ;;
-esac
+# ddr-tune itself (a copy: its /chosen, the eMMC and devmem pointed into $D), every call in $D/tune.calls
+echo "$*" >> __DIR__/tune.calls
+exec sh __DIR__/ddr-tune.real "$@"
 '''
+DDR_TUNE = os.path.join(SDK, "board/ogu/buildroot/rootfs-overlay/usr/sbin/ddr-tune")
+SECTOR = 32510
+
+
+def real_tune(work):
+    """the SDK's ddr-tune with only its paths moved into work: /proc/device-tree/chosen ->
+    work/dt, the eMMC -> work/emmc.img (sector 32510 holds the line), devmem -> 0x0002"""
+    s = open(DDR_TUNE).read()
+    for old, new in (("/proc/device-tree/chosen/", work + "/dt/"),
+                     ('disk() { DISK=$(emmc) || die "no eMMC"; }', 'disk() { DISK=%s/emmc.img; }' % work)):
+        assert s.count(old) >= 1, old
+        s = s.replace(old, new)
+    s = s.replace("devmem ", work + "/devmem ")
+    with open(os.path.join(work, "ddr-tune.real"), "w") as f:
+        f.write(s)
+    with open(os.path.join(work, "devmem"), "w") as f:
+        f.write("#!/bin/sh\necho 0x0002\n")
+    os.chmod(os.path.join(work, "devmem"), 0o755)
+    os.makedirs(os.path.join(work, "dt"), exist_ok=True)
+    with open(os.path.join(work, "emmc.img"), "wb") as f:
+        f.truncate((SECTOR + 1) * 512)
 
 
 class App:
-    def __init__(self, app, work, shots, board=None, kept=None, prefix="", read_line=None):
+    def __init__(self, app, work, shots, board=None, kept=None, prefix="", read_line=None, applied=None):
         self.work, self.shots, self.n, self.prefix = work, shots, 0, prefix
         self.board = board or sim.base_board(os.path.join(work, "board"))
+        real_tune(work)
         if kept:
-            with open(os.path.join(work, "kept"), "w") as f:
-                f.write(kept + "\n")
-        if read_line is not None:
-            with open(os.path.join(work, "read_line"), "w") as f:
-                f.write(read_line + "\n")
+            with open(os.path.join(work, "emmc.img"), "r+b") as f:
+                f.seek(SECTOR * 512)
+                f.write(("ddr_tune=%s\n" % kept).encode())
+        if read_line is not None:   # U-Boot 0020 of 2026-11-25: the line it read
+            with open(os.path.join(work, "dt", "ddr-tune-line"), "w") as f:
+                f.write(read_line + "\0")
+        if applied:                 # what U-Boot moved
+            with open(os.path.join(work, "dt", "ddr-tune"), "w") as f:
+                f.write(applied + "\0")
         self.binary = os.path.join(work, "ddr-calibrate-sim")
         subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread", "-DDDR_SIM",
                         "-o", self.binary, sim.SRC], check=True)
@@ -114,8 +134,10 @@ class App:
         return open(p).read().splitlines() if os.path.exists(p) else []
 
     def kept(self):
-        p = os.path.join(self.work, "kept")
-        return open(p).read().strip() if os.path.exists(p) else None
+        with open(os.path.join(self.work, "emmc.img"), "rb") as f:
+            f.seek(SECTOR * 512)
+            t = f.read(512).replace(b"\0", b"").decode()
+        return t[len("ddr_tune="):].strip() if t.startswith("ddr_tune=") else None
 
     def quit(self):
         self.p.send_signal(signal.SIGTERM)
@@ -129,7 +151,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", default=os.path.join(SDK, "apps/bare_app/build-host/bare_app"))
     ap.add_argument("--shots")
+    ap.add_argument("--ddr-tune", help="another ddr-tune script (tests of the tests)")
     a = ap.parse_args()
+    global DDR_TUNE
+    DDR_TUNE = a.ddr_tune or DDR_TUNE
     if a.shots:
         os.makedirs(a.shots, exist_ok=True)
     bad = []
@@ -286,16 +311,23 @@ def main():
     finally:
         app.quit()
     # in use at this start: the line U-Boot read is the one kept (an @ lane BL2 trained where it belongs is not moved)
-    for read, used in (("11668@+4 13468@-6", True), ("11668@+3", False), ("none", False)):
-        wu = os.path.join(work, "used-" + read.split()[0].replace("@", "_"))
+    # (kept, what U-Boot read (None: an older U-Boot that does not say), what it moved, in use)
+    for n, (kept, read, applied, used) in enumerate((
+            ("11668@+4 13468@-6", "11668@+4 13468@-6", None, True),       # an @ lane needed no move
+            ("11668@+4 13468@-6", "11668@+3", "11668:0002>0007", False),  # saved after this start
+            ("11668@+4 13468@-6", None, None, False),                     # @ needs the new U-Boot
+            ("11668+10", None, "11668:0002>0012", True),                  # an older U-Boot: by the moves
+            ("11668+10", None, "11668:0002>0010", False))):
+        wu = os.path.join(work, "used%d" % n)
         os.makedirs(wu)
-        app = App(a.app, wu, None, kept="11668@+4 13468@-6", read_line=read)
+        app = App(a.app, wu, None, kept=kept, read_line=read, applied=applied)
+        nl = len(kept.split())
         try:
             app.ctl("open memcal")
-            ok = app.wait_log("memcal: kept: 2 lane(s)", 10)
-            line = [l for l in app.log().splitlines() if "memcal: kept: 2 lane(s)" in l]
-            cell("used: U-Boot read '%s': %s" % (read, "in use" if used else "not yet"),
-                 ok and line and (("not used yet" in line[-1]) != used), str(line[-1:]))
+            ok = app.wait_log("memcal: kept: %d lane(s)" % nl, 10)
+            line = [l for l in app.log().splitlines() if "memcal: kept: %d lane(s)" % nl in l]
+            cell("used: kept '%s', U-Boot read %s, moved %s: %s" % (kept, read, applied, "in use" if used else "not yet"),
+                 ok and line and (("not used yet" in line[-1]) != used), str(line[-1:]) + app.log()[-300:])
         finally:
             app.quit()
 
