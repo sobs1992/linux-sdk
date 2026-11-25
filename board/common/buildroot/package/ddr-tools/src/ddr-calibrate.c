@@ -586,7 +586,7 @@ static unsigned trained(unsigned csr)
 {
 	static char buf[1024];	/* 44 CSRs (36 delays, 8 strobes) of "CSR:was>now " */
 	static int read_once;
-	char key[8];
+	char key[12];
 
 	if (!read_once) {
 		FILE *f = fopen(path_chosen, "r");
@@ -651,7 +651,7 @@ static const char *line_read(void)
 static int read_at(unsigned csr)
 {
 	const char *buf = line_read(), *p;
-	char key[8];
+	char key[12];
 
 	snprintf(key, sizeof key, "%05x@", csr);
 	for (p = buf; (p = strstr(p, key)); p++)
@@ -665,7 +665,7 @@ static int uboot_lift(int db, int u)
 {
 	static char buf[128];
 	static int read_once;
-	char key[8];
+	char key[12];
 
 	if (!read_once) {
 		FILE *f = fopen(path_lift, "r");
@@ -985,7 +985,7 @@ static void log_end(const char *line, long secs)
 
 int main(int argc, char **argv)
 {
-	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, status = 0, restore = 0, done[4][2] = { { 0 } };
+	int writeit = 0, thresh = 4, o, mb = 24, resume = 0, status = 0, restore = 0, failed = 0, done[4][2] = { { 0 } };
 	char dbytes[8] = "0123";
 
 	while ((o = getopt(argc, argv, "wvrpsRd:c:f:t:m:")) != -1)
@@ -1143,6 +1143,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ddr-calibrate: wrong words at the trained values: stopping\n");
 		if (progress)
 			printf("fail trained\n");
+		failed = 1;
 		goto out;
 	}
 	for (const char *dp = dbytes; *dp; dp++)
@@ -1231,6 +1232,7 @@ int main(int argc, char **argv)
 				fprintf(stderr, "ddr-calibrate: lowering dbyte %d nibble %d read wrong: stopping\n", db, u);
 				if (progress)
 					printf("fail lowering\n");
+				failed = 1;
 				goto out;
 			}
 			snprintf(rnote + strlen(rnote), sizeof rnote - strlen(rnote), ", lifted %d", lifted);
@@ -1327,7 +1329,8 @@ int main(int argc, char **argv)
 					continue;
 				o = place - med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
 				o = o < -VMAX ? -VMAX : o > VMAX ? VMAX : o;	/* a guard: values are 0..3f */
-				nline += snprintf(line + nline, sizeof line - nline, "%s%05x@%c%x",
+				if (nline < (int)sizeof line - 16)
+					nline += snprintf(line + nline, sizeof line - nline, "%s%05x@%c%x",
 						  nline ? " " : "", c, o < 0 ? '-' : '+', abs(o));
 				nk += snprintf(kept_note + nk, sizeof kept_note - nk, " r%d@%+d", 4 * u + i, o);
 			}
@@ -1363,7 +1366,7 @@ int main(int argc, char **argv)
 			int db = csr >> 12 & 15, r = csr >> 8 & 15, ours = (csr & 0xff) == 0x68 && r <= 7 &&
 			    strchr(dbytes, '0' + db);
 
-			if (strlen(t) > 6 && csr_ours(csr) && !ours)
+			if (strlen(t) > 6 && strlen(t) < 12 && csr_ours(csr) && !ours && nline < (int)sizeof line - 16)
 				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
 		}
 	}
@@ -1374,9 +1377,10 @@ int main(int argc, char **argv)
 		snprintf(tmp, sizeof tmp, "%s", line);
 		for (char *t = strtok(tmp, " "); t; t = strtok(NULL, " ")) {
 			unsigned c = strtoul(t, 0, 16);
-			int steps = (int)strtol(t + 5 + (t[5] == '@'), 0, 16);	/* "@+b", "@-4", "+b" */
 
-			printf("lane %05x %d %+d\n", c, cpu_bit(c >> 12 & 3, c >> 8 & 15), steps);
+			/* the lanes this run places ("CSR@+N"); strobes, lane 8, old moves only carried on */
+			if (strlen(t) > 6 && t[5] == '@')
+				printf("lane %05x %d %+d\n", c, cpu_bit(c >> 12 & 3, c >> 8 & 15), (int)strtol(t + 6, 0, 16));
 		}
 		printf("result %s\n", line);
 	}
@@ -1400,7 +1404,9 @@ out:
 	fprintf(stderr, "sim: clamped %d, out of field %d, frozen writes %d\n", atomic_load(&clamped),
 		atomic_load(&sim_bad), atomic_load(&sim_frozen_writes));
 #endif
-	if (writeit) {
+	if (writeit && failed) {
+		printf("the run did not end: ddr-tune left as it is\n");
+	} else if (writeit) {
 		if (!nline) {
 			printf("nothing to keep: ddr-tune left as it is\n");
 		} else {

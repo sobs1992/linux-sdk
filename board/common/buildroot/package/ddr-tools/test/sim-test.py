@@ -480,6 +480,10 @@ def cell_d_keeps_others(binary, d):
     b.uboot(line1)
     r2 = run(binary, b, ["-p", "-d", "3"])
     c.check(result_of(r2) == parse_line(line1), "-d 3: %s, the line %s" % (result_of(r2), parse_line(line1)))
+    # -p's lane lines (bare_app shows their bits): the @ lanes only, not what was carried on
+    lanes = sorted(l.split()[1] for l in r2.stdout.splitlines() if l.startswith("lane 1"))
+    want = sorted("%05x" % k for k, v in parse_line(line1).items() if not isinstance(v, tuple))
+    c.check(lanes == want, "lane lines %s, the @ entries %s" % (lanes, want))
     return c
 
 
