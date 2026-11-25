@@ -10,7 +10,8 @@ samples at x = its delay - R * its nibble's strobe and reads wrong outside
 [lo, hi]; the test sets the eyes from each lane's early and late margin
 (E, T steps from where it samples now), so the right answer is known:
 S = (E - T) / 2; in BL2's frame a lane's place is its centre minus the median
-of its three neighbours' offsets from BL2's values.
+of its three neighbours' offsets from BL2's values (with one lane of the
+nibble out of reach: of the three measured offsets, its own counted).
 """
 import os
 import re
@@ -514,19 +515,54 @@ def cell_resume_d(binary, d):
     st = status(binary, b)
     c.check(st.startswith("unfinished ") and st.split()[1] not in ("0", "8"), "-s: " + st)
     run(binary, b, ["-R"])
-    # a spoilt log: a token in a done nibble's keep: longer than any entry is not carried on
-    log = open(b.path("ddr-calibrate.log")).read().split("\n")
-    blk = max(i for i, l in enumerate(log) if l.startswith("== "))
-    i = next(i for i in range(blk, len(log)) if log[i].startswith("dbyte "))
-    log[i] = log[i].replace(" keep:", " keep: " + "A" * 300, 1) if " keep:" in log[i] else log[i] + " keep: " + "A" * 300
-    open(b.path("ddr-calibrate.log"), "w").write("\n".join(log))
     r2 = run(binary, b, ["-p", "-r", "-d", "3"])
-    toks = [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()
-    c.check(all(re.fullmatch(r"[0-9a-f]{5}(@[+-]|[+-])[0-9a-f]{1,2}", t) for t in toks), "spoilt log carried: %s" % toks)
-    got = [t[:5] for t in toks]
+    got = [t[:5] for t in [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()]
     c.check(len(got) == len(set(got)), "twice: %s" % got)
     c.check(sorted(got) == sorted(t[:5] for t in full.split()), "line %s, the whole run's %s" % (got, full))
     c.check("10068" not in got, "the old move 10068+1 came back: %s" % got)
+    return c
+
+
+def cell_resume_spoilt(binary, d):
+    c = Cell("resume_spoilt: -r carries a done nibble's entries with two-digit N; a nibble whose logged "
+             "entries are not entries (cut short, spoilt) is measured again, the line U-Boot's to apply")
+    # 1.6 far from its neighbours: N >= 0x10
+    over = {(1, 4): (0, 31, 11), (1, 5): (0, 31, 11), (1, 7): (0, 31, 11), (1, 6): (2, 52, 4)}
+    b = base_board(os.path.join(d, "two"), override=over)
+    full = result_of(run(binary, b, ["-p"]))
+    c.check(abs(full.get(0x11668, 0)) >= 0x10, "the cell tests nothing: %s" % full)
+    r1 = run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "1100"})
+    c.check(r1.returncode == -9, "not killed: %d" % r1.returncode)
+    run(binary, b, ["-R"])
+    r2 = run(binary, b, ["-p", "-r"])
+    c.check("dbyte 1 nibble 1: done before" in r2.stdout, "1.1 not done before the kill")
+    c.check(result_of(r2) == full, "two-digit N: -r %s, the whole run %s" % (result_of(r2), full))
+    # each refused by one check of entry_ok: cut short, N above 3f, three digits, no N, @ on a
+    # strobe, @ on lane 8, not a hex CSR, not our CSR, no sign, N not hex, too long
+    for n, tok in enumerate(("1006", "11668@+40", "11668@+004", "11668+", "1318c@+1", "11868@+1", "1166g@+1",
+                             "12345+1", "11668@*4", "11668@+g", "A" * 300)):
+        b = base_board(os.path.join(d, "s%d" % n))
+        full = result_of(run(binary, b, ["-p"]))
+        run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "1100"})
+        run(binary, b, ["-R"])
+        log = open(b.path("ddr-calibrate.log")).read().split("\n")
+        blk = max(i for i, l in enumerate(log) if l.startswith("== "))
+        i = next(i for i in range(blk, len(log)) if log[i].startswith("dbyte "))
+        log[i] = log[i].rstrip() + " " + tok
+        open(b.path("ddr-calibrate.log"), "w").write("\n".join(log))
+        r2 = run(binary, b, ["-p", "-r"])
+        c.check("spoilt, measured again" in r2.stdout, "%s: the nibble not measured again" % tok[:20])
+        res = [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:]
+        c.check(result_of(r2) == full, "%s: -r %s, the whole run %s" % (tok[:20], res, full))
+        b.retrain({})
+        props = b.uboot(res)
+        c.check(props.get("ddr-tune"), "%s: U-Boot applied nothing of %s" % (tok[:20], res))
+    # carried on from the line U-Boot read (DBYTEs outside -d): what is not an entry is not
+    b = base_board(os.path.join(d, "carry"))
+    b.uboot("13468@-7 11668@+4 1366zzz 13568@+7")
+    r = run(binary, b, ["-p", "-d", "0"])
+    res = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    c.check("zzz" not in res and "13568@+7" in res, "carried from U-Boot's line: %s" % res)
     return c
 
 
@@ -599,7 +635,7 @@ def cell_three_measured(binary, d):
     # 1.5: 14 - med(9,11,21)=3, N 3 - med(8,2,8) = -5; 1.6: 23 - 11 = 12, N 12 - 8 = +4.
     # 1.5 at 8: offset 6, still below both: the same. 1.5 at 2: offset 12, now the median:
     # 1.5: 14 - 12 = 2, N -6; 1.6: 23 - 12 = 11, N +3. 1.5 at 3, 1.7 at 0: offsets 11, 11,
-    # 21: 1.5: 14 - 11 = 3, N 3 - med(8,2,0) = +1 (half a step more of its own offset: 0);
+    # 21: 1.5: 14 - 11 = 3, N 3 - med(8,2,0) = +1 (were 1.5's offset half a step more, N would be 0);
     # 1.6: 23 - 11 = 12, N 12 - med(8,3,0) = +9.
     over = {(1, 4): (8, 32, 10), (1, 5): (5, 28, 10), (1, 6): (2, 46, 4), (1, 7): (8, 30, 10)}
     b = base_board(os.path.join(d, "own"), override=over)
@@ -865,7 +901,7 @@ def cell_no_sim_dir(binary, d):
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
          cell_e2e_half_step, cell_e2e_half_own, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others,
-         cell_resume_d, cell_unmeasured, cell_three_measured,
+         cell_resume_d, cell_resume_spoilt, cell_unmeasured, cell_three_measured,
          cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]

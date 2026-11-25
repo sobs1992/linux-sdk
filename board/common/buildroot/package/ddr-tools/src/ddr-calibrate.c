@@ -63,6 +63,7 @@
  * ../test/sim-test.py): no /dev/mem, no /data, no watchdog.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -692,6 +693,8 @@ static int uboot_lift(int db, int u)
  * a lane against its nibble does not depend on the start, so nibbles of
  * runs from different starts add up.
  */
+static int entry_ok(const char *t);
+
 static int unfinished(int done[4][2], char *line, size_t size, int *nline, int say, char *boot, size_t bsize)
 {
 	FILE *f = fopen(path_log, "r");
@@ -725,14 +728,31 @@ static int unfinished(int done[4][2], char *line, size_t size, int *nline, int s
 		if (sscanf(blk[i], "dbyte %d nibble %d:", &db, &u) != 2 || db < 0 || db > 3 || u < 0 || u > 1 ||
 		    done[db][u])
 			continue;
+		/*
+		 * its entries as ddr-tune and U-Boot take them; one that is not
+		 * (a log spoilt, a line cut short): the nibble is measured again
+		 */
+		char toks[512], *save = NULL;
+		int bad = 0;
+
+		snprintf(toks, sizeof toks, "%s", k ? k + 6 : "");
+		for (char *t = strtok_r(toks, " \n", &save); t; t = strtok_r(NULL, " \n", &save))
+			bad |= !entry_ok(t);
+		if (bad) {
+			if (say)
+				printf("dbyte %d nibble %d: its log entries are spoilt, measured again\n", db, u);
+			continue;
+		}
 		done[db][u] = 1;
 		n++;
-		/* an entry is CSR, sign or @, N: a longer token is not one (a log spoilt) */
-		for (char *t = k ? strtok(k + 6, " \n") : NULL; t && line && *nline < (int)size - 16; t = strtok(NULL, " \n"))
-			if (strlen(t) < 12)
-				*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
+		snprintf(toks, sizeof toks, "%s", k ? k + 6 : "");
+		save = NULL;
+		for (char *t = strtok_r(toks, " \n", &save); t && line && *nline < (int)size - 16;
+		     t = strtok_r(NULL, " \n", &save))
+			*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
 		if (say)
-			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
+			printf("dbyte %d nibble %d: done before (%.*s)\n", db, u, k ? (int)strcspn(k + 1, "\n") : 13,
+			       k ? k + 1 : "keep: nothing");
 	}
 	return n;
 }
@@ -785,6 +805,29 @@ static int csr_ours(unsigned c)
 	unsigned db = c >> 12 & 15, r = c >> 8 & 15, reg = c & 0xff;
 
 	return c >> 16 == 1 && db <= 3 && ((reg == 0x68 && r <= 8) || (reg == 0x8c && r <= 1));
+}
+
+/*
+ * An entry of the line as ddr-tune and U-Boot take it: CSR (one of ours),
+ * then [@]+ or [@]-, then 1-2 hex digits up to 3f; @ for lanes 0-7 only
+ */
+static int entry_ok(const char *t)
+{
+	size_t n = strlen(t), i;
+	size_t at = n > 5 && t[5] == '@';
+	unsigned c;
+
+	if (n < 7 + at || n > 8 + at)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (i != 5 && i != 5 + at && !isxdigit((unsigned char)t[i]))
+			return 0;
+	if (t[5 + at] != '+' && t[5 + at] != '-')
+		return 0;
+	c = (unsigned)strtoul((char[6]){t[0], t[1], t[2], t[3], t[4], 0}, 0, 16);
+	if (!csr_ours(c) || (at && ((c & 0xff) != 0x68 || (c >> 8 & 15) > 7)))
+		return 0;
+	return strtoul(t + 6 + at, 0, 16) <= VMAX;
 }
 
 /* The lock of the one run: 0 taken, -1 another run holds it, -2 no file */
@@ -1385,7 +1428,7 @@ int main(int argc, char **argv)
 
 			/* not twice: -r brought the interrupted run's nibbles from the log already */
 			snprintf(key, sizeof key, "%.5s", t);
-			if (strlen(t) > 6 && strlen(t) < 12 && csr_ours(csr) && !ours && !strstr(line, key) &&
+			if (entry_ok(t) && !ours && !strstr(line, key) &&
 			    nline < (int)sizeof line - 16)
 				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
 		}
