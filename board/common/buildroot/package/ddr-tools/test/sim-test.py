@@ -574,6 +574,30 @@ def cell_three_measured(binary, d):
                if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
         c.check(got == exp, "1.%d not measured: %s, expected %s" % (unm, got, exp))
         c.check(set(got) == {0x11668}, "1.%d not measured: entries %s besides 11668" % (unm, got))
+    # three measured: the lane's own offset is in the median; its own BL2 jump moves its N
+    # only when the offset crosses a measured neighbour's (docs/boards/ogu.md), by <= the jump
+    over = {(1, 4): (8, 32, 10), (1, 5): (5, 28, 10), (1, 6): (2, 46, 4), (1, 7): (8, 30, 10)}
+    b = base_board(os.path.join(d, "own"), override=over)
+
+    def unreach():
+        with open(b.path("spec"), "a") as f:
+            x0 = b.regs_start()[pbd(1, 7)] - R * b.strobe[(1, 1)]
+            f.write("eye 1 7 %g %g\n" % (x0 - 10 + 0.5, x0 + 80))
+    unreach()
+    nib1 = lambda r: {k: v for k, v in result_of(r).items() if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
+    r = run(binary, b, ["-p", "-d", "1", "-t", "2"])
+    l1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    n1 = nib1(r)
+    c.check(0x11568 in n1, "own: 11568 not in %s" % n1)
+    for bl2, same in (({(1, 5): 8}, True), ({(1, 5): 2}, False)):
+        b.retrain(bl2)
+        b.uboot(l1)
+        n2 = nib1(run(binary, b, ["-p", "-d", "1", "-t", "2"]))
+        if same:
+            c.check(n2 == n1, "own 1.5 5->8 (offset on the same side): %s, was %s" % (n2, n1))
+        else:
+            c.check(set(n2) == set(n1) and all(abs(n2[k] - n1[k]) <= 3 for k in n1),
+                    "own 1.5 5->2: %s, was %s (by more than the jump)" % (n2, n1))
     return c
 
 
