@@ -54,8 +54,13 @@ def cpu_bit(db, r):
     return 32 + db * 8 + LNSEL[db].index(r)
 
 
-def rnd(x):  # the C code's rounding: half away from zero
+def rnd(x):  # half away from zero
     return int(x + 0.5) if x >= 0 else -int(-x + 0.5)
+
+
+def rnd0(x):  # ddr-calibrate's offsets: half a step towards zero
+    r = int(x)
+    return r + (1 if x - r > 0.5 else -1 if x - r < -0.5 else 0)
 
 
 class Board:
@@ -141,12 +146,12 @@ class Board:
             for u in range(2):
                 lanes = [(db, 4 * u + i) for i in range(4)]
                 S = {l: (self.lanes[l][1] - self.lanes[l][2]) / 2.0 for l in lanes}
-                Sm = sorted(rnd(S[l]) for l in lanes)
-                med = (Sm[1] + Sm[2]) / 2.0
                 bl2 = {l: self.trained.get(l, self.lanes[l][0]) for l in lanes}
                 L = (lift or {}).get((db, u), 0)
                 for i, l in enumerate(lanes):
-                    free = self.lanes[l][0] + rnd(S[l] - med) - L
+                    # against the median of the three neighbours' moves; half a step towards 0
+                    med = sorted(S[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
+                    free = self.lanes[l][0] + rnd0(S[l] - med) - L
                     if abs(free - bl2[l]) >= thresh or pbd(*l) in (read or {}):
                         others = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))
                         line[pbd(*l)] = free - others[1]
@@ -390,6 +395,40 @@ def cell_e2e_odd_start(binary, d):
     return c
 
 
+HALF = {(1, 4): (2, 30, 12), (1, 5): (5, 31, 11), (1, 7): (8, 33, 9), (1, 6): (2, 46, 4)}
+
+
+def cell_e2e_half_step(binary, d):
+    c = Cell("e2e_half_step: neighbours half a step apart: the line stays over two applications at the same start")
+    b = base_board(d, override=HALF)
+    r = run(binary, b, ["-p", "-d", "1"])
+    lines = [[l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]]
+    for k in range(2):
+        b.retrain({})
+        b.uboot(lines[-1])
+        r = run(binary, b, ["-p", "-d", "1"])
+        lines.append([l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:])
+    c.check(len(set(lines)) == 1 and lines[0], "lines %s" % lines)
+    return c
+
+
+def cell_e2e_neighbour_jump(binary, d):
+    c = Cell("e2e_neighbour_jump: calibrated where BL2 trained a neighbour of bit 42 3 steps off: N within a step "
+             "(the neighbours' centres 4-9 steps apart: the model's limit)")
+    b = base_board(d, override=HALF)
+    r = run(binary, b, ["-p", "-d", "1"])
+    n0 = result_of(r).get(0x11668)
+    c.check(n0 is not None, "the cell tests nothing: 11668 not in the line")
+    got = {}
+    for lane, step in (((1, 7), 3), ((1, 5), -3), ((1, 4), 3)):
+        bj = base_board(os.path.join(d, "j%d%d" % lane), override=HALF)
+        bj.retrain({lane: HALF[lane][0] + step})
+        got[lane] = result_of(run(binary, bj, ["-p", "-d", "1"])).get(0x11668)
+    c.check(all(v is not None and abs(v - n0) <= 1 for v in got.values()),
+            "11668@%s at the usual start, with a neighbour off: %s" % (n0, got))
+    return c
+
+
 def cell_unmeasured(binary, d):
     c = Cell("unmeasured: a lane of the line whose early edge is out of reach stays where U-Boot put it")
     b = base_board(d)
@@ -618,7 +657,7 @@ def cell_no_sim_dir(binary, d):
 
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
-         cell_unmeasured, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
+         cell_e2e_half_step, cell_e2e_neighbour_jump, cell_unmeasured, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 

@@ -602,6 +602,17 @@ static unsigned trained(unsigned csr)
 	return p ? strtoul(p + 6, 0, 16) : phy[csr];
 }
 
+static double med3d(double a, double b, double c)
+{
+	if (a > b) {
+		double t = a;
+
+		a = b;
+		b = t;
+	}
+	return c < a ? a : c > b ? b : c;
+}
+
 static int med3(int a, int b, int c)
 {
 	if (a > b) {
@@ -720,11 +731,6 @@ static void say_progress(int part)
 {
 	if (progress && nib_total)
 		printf("progress %d\n", (nib_done * 100 + part) / nib_total);
-}
-
-static int cmp_int(const void *a, const void *b)
-{
-	return *(const int *)a - *(const int *)b;
 }
 
 static void read_boot_id(void)
@@ -1218,15 +1224,12 @@ int main(int argc, char **argv)
 			}
 			snprintf(rnote + strlen(rnote), sizeof rnote - strlen(rnote), ", lifted %d", lifted);
 
-			int Sm[4], n = 0;
+			int n = 0;
 
 			for (int i = 0; i < 4; i++) {
 				S[i] = (E[i] - T[i]) / 2.0;
-				if (!ce[i] && !ct[i])
-					Sm[n++] = (int)(S[i] >= 0 ? S[i] + 0.5 : S[i] - 0.5);
+				n += !ce[i] && !ct[i];
 			}
-			qsort(Sm, n, sizeof Sm[0], cmp_int);
-			double med = n == 0 ? 0 : n % 2 ? Sm[n / 2] : (Sm[n / 2 - 1] + Sm[n / 2]) / 2.0;
 
 			char nib[256];
 			int nl = snprintf(nib, sizeof nib, "dbyte %d nibble %d: strobe %02x, R %.2f%s;", db, u,
@@ -1235,9 +1238,23 @@ int main(int argc, char **argv)
 			for (int i = 0; i < 4; i++) {
 				int r = 4 * u + i;
 				unsigned c = CSR_PBD(db, r), cur = phy[c];
-				double rel = S[i] - med;
-				int reli = (int)(rel >= 0 ? rel + 0.5 : rel - 0.5);
-				int ok = !ce[i] && !ct[i] && n >= 3;
+				/*
+				 * The lane against the median of its three neighbours' moves
+				 * to their centres (as U-Boot sets it from the median of their
+				 * BL2 values; the lane itself not counted: corrected, it would
+				 * move the reference it is measured against). Half a step
+				 * rounds towards 0: a lane in place stays.
+				 */
+				double Sn[3], rel;
+				int k = 0, reli, ok;
+
+				for (int j = 1; j < 4; j++)
+					if (!ce[(i + j) % 4] && !ct[(i + j) % 4])
+						Sn[k++] = S[(i + j) % 4];
+				rel = S[i] - (k == 3 ? med3d(Sn[0], Sn[1], Sn[2]) : k == 2 ? (Sn[0] + Sn[1]) / 2 : k ? Sn[0] : S[i]);
+				reli = (int)rel;	/* towards 0, then more than half a step away */
+				reli += rel - reli > 0.5 ? 1 : rel - reli < -0.5 ? -1 : 0;
+				ok = !ce[i] && !ct[i] && n >= 3;
 
 				printf("%d.%d   %2d   %02x   %2d%s   %2d%s  %5.1f  %+5.1f%s\n", db, r, cpu_bit(db, r), cur,
 				       E[i], ce[i] ? "+" : " ", T[i], ct[i] ? "+" : " ", S[i], rel,
