@@ -17,11 +17,16 @@ wrong word came after 28 s and a panic after 90, the second one's 7
 wrong words in an 82-minute run.
 
 BL2 is Amlogic's binary and trains at every start, so U-Boot moves the
-trained delays before the kernel: steps per CSR from a sector of the
-eMMC that belongs to the unit (0x7efe, next to the A/B sector between the
-FIP and p1; Linux's ddr-tune writes it). Only the DBYTEs' RxPBDly and
-RxClkDly registers are taken, within 0..0x3f. /chosen/ddr-tune of the
-kernel's device tree records the trained and the new values.
+trained delays before the kernel, from a sector of the eMMC that belongs
+to the unit (0x7efe, next to the A/B sector between the FIP and p1;
+Linux's ddr-tune writes it). A lane's delay is set at the median of what
+BL2 trained for the other three lanes of its nibble, plus its own skew
+(CSR@+N): BL2 trains a single lane's delay a few steps differently from
+start to start now and then, its neighbours stay; a nibble whose lane
+would go below 0 is lifted as a whole. Moves from BL2's own value
+(CSR+N) are taken too. Only the DBYTEs' RxPBDly and RxClkDly registers,
+within 0..0x3f. /chosen/ddr-tune and /chosen/ddr-tune-lift of the
+kernel's device tree record what was done.
 ---
 --- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
 +++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
@@ -39,7 +44,7 @@ kernel's device tree records the trained and the new values.
  #include <linux/bitops.h>
  #include <linux/delay.h>
  #include <power/pmic.h>
-@@ -308,6 +312,111 @@
+@@ -308,6 +312,200 @@
  }
  
  /*
@@ -49,24 +54,37 @@ kernel's device tree records the trained and the new values.
 + * word: DBYTE1 lane 6) at the edge of its eye, and under GPU load its
 + * odd beats are read wrong now and then (the cache line wrong, DRAM
 + * right). A line of the eMMC's sector OGU_TUNE_SECTOR, between the FIP
-+ * and p1 next to the A/B sector, moves such delays from what BL2 trained:
++ * and p1 next to the A/B sector, moves such delays:
 + *
-+ *   ddr_tune=11668+10 1118c-2
++ *   ddr_tune=11668@+9 13468@-4 1118c-2
 + *
 + * CSR (hex, the PHY's address: block << 16 | instance << 12 | r << 8 |
-+ * register), + or -, steps (hex). Only the DBYTEs' RxPBDly (register 0x68,
-+ * lanes r 0-8: a bit's own delay) and RxClkDly (0x8c, nibbles u 0-1: the
-+ * read strobe) are taken, each kept within 0..0x3f. The sector is the
-+ * unit's own (/usr/sbin/ddr-tune writes it; scripts/flash.sh puts it back
-+ * over an image): the eMMC's, also when Linux starts from the SD card. U-Boot moves
++ * register) and steps (hex):
++ *   CSR@+N, CSR@-N  a lane's own delay (RxPBDly, register 0x68, lanes r
++ *                   0-7) at the median of what BL2 trained for the other
++ *                   three lanes of its nibble, plus or minus N. BL2 trains
++ *                   a lane's delay a few steps differently from start to
++ *                   start now and then (its nibble's strobe more so); the
++ *                   lane's skew against its neighbours stays.
++ *   CSR+N, CSR-N    a delay (RxPBDly lanes 0-8, RxClkDly 0x8c nibbles u
++ *                   0-1: the read strobe) moved from what BL2 trained.
++ * A nibble whose @ lane would go below 0 is lifted as a whole: its four
++ * delays later by as much (the lanes' skew stays). Every value is kept
++ * within 0..0x3f; each CSR once. The sector is the unit's own
++ * (/usr/sbin/ddr-tune writes it; scripts/flash.sh puts it back over an
++ * image): the eMMC's, also when Linux starts from the SD card. U-Boot moves
 + * them before the kernel, also before one that resumes from hibernation
-+ * (its Linux runs no init scripts). /chosen/ddr-tune of the device tree
-+ * says what was done: "CSR:trained>now ...".
++ * (its Linux runs no init scripts). The kernel's device tree says what was
++ * done: /chosen/ddr-tune "CSR:trained>now ..." for every delay moved,
++ * /chosen/ddr-tune-lift "1<db><u>8c+L ..." for every nibble lifted.
 + */
 +#define OGU_TUNE_SECTOR		0x7efe
 +#define OGU_PHY_CSR(csr)	((void __iomem *)(0xfe000000UL + ((csr) << 1)))
++#define OGU_PBD(db, r)		(0x10068UL | (ulong)(db) << 12 | (ulong)(r) << 8)
++#define OGU_CLK(db, u)		(0x1008cUL | (ulong)(db) << 12 | (ulong)(u) << 8)
 +
 +static char ogu_tune_done[704];	/* "CSR:was>now " (16 bytes) for all 44 CSRs taken */
++static char ogu_tune_lift[64];	/* "1<db><u>8c+L " (8 bytes) for the 8 nibbles */
 +
 +static bool ogu_tune_csr_ok(ulong csr)
 +{
@@ -77,13 +95,47 @@ kernel's device tree records the trained and the new values.
 +	return (reg == 0x68 && r <= 8) || (reg == 0x8c && r <= 1);
 +}
 +
++static int ogu_med3(int a, int b, int c)
++{
++	if (a > b) {
++		int t = a;
++
++		a = b;
++		b = t;
++	}
++	return c < a ? a : c > b ? b : c;
++}
++
++/* "CSR:was>now" of a delay moved, for /chosen */
++static void ogu_tune_note(ulong csr, int was, int now)
++{
++	int len = strlen(ogu_tune_done);
++
++	if (len + 17 <= sizeof(ogu_tune_done))	/* " CSR:was>now" and the NUL */
++		snprintf(ogu_tune_done + len, sizeof(ogu_tune_done) - len,
++			 "%s%05lx:%04x>%04x", len ? " " : "", csr, was, now);
++}
++
++static void ogu_tune_write(ulong csr, int was, int now)
++{
++	now = clamp(now, 0, 0x3f);
++	if (now == was)
++		return;
++	writew(now, OGU_PHY_CSR(csr));
++	printf("DDR tune: %05lx %04x -> %04x\n", csr, was, now);
++	ogu_tune_note(csr, was, now);
++}
++
 +static void ogu_ddr_tune(void)
 +{
 +	ALLOC_CACHE_ALIGN_BUFFER(char, buf, 512);
++	/* per lane (db, r) and strobe (db, u): 0 none, 1 a move from BL2's value, 2 from the median */
++	char kind[4][11] = { { 0 } };
++	int steps[4][11], trained[4][11];
 +	struct blk_desc *bd;
 +	struct mmc *mmc;
 +	char *p, *q;
-+	int dev, len = 0;
++	int dev;
 +
 +	dev = ogu_emmc_devnum();
 +	mmc = dev < 0 ? NULL : find_mmc_device(dev);
@@ -101,36 +153,75 @@ kernel's device tree records the trained and the new values.
 +	if (q)
 +		*q = '\0';
 +
++	/* the line: a malformed entry ends it, a refused one is left out */
 +	while (*p) {
-+		ulong csr, steps;
-+		long now;
-+		int sign;
-+		u16 was;
++		ulong csr, n;
++		int median = 0, sign, db, i;
 +
 +		while (*p == ' ')
 +			p++;
 +		if (!*p)
 +			break;
 +		csr = hextoul(p, &q);
-+		if (q == p || (*q != '+' && *q != '-'))
++		if (q == p)
++			break;
++		if (*q == '@') {
++			median = 1;
++			q++;
++		}
++		if (*q != '+' && *q != '-')
 +			break;
 +		sign = *q == '-' ? -1 : 1;
 +		p = q + 1;
-+		steps = hextoul(p, &q);
++		n = hextoul(p, &q);
 +		if (q == p)
 +			break;
 +		p = q;
-+		if (!ogu_tune_csr_ok(csr) || steps > 0x3f) {
++		db = csr >> 12 & 0xf;
++		/* lanes 0-8 at 0-8, the strobes of nibbles 0-1 at 9-10 */
++		i = (csr & 0xff) == 0x8c ? 9 + (csr >> 8 & 0xf) : csr >> 8 & 0xf;
++		if (!ogu_tune_csr_ok(csr) || n > 0x3f || kind[db][i] ||
++		    (median && ((csr & 0xff) != 0x68 || i > 7))) {
 +			printf("DDR tune: %lx refused\n", csr);
 +			continue;
 +		}
-+		was = readw(OGU_PHY_CSR(csr));
-+		now = clamp((long)was + sign * (long)steps, 0L, 0x3fL);
-+		writew(now, OGU_PHY_CSR(csr));
-+		printf("DDR tune: %05lx %04x -> %04lx\n", csr, was, now);
-+		if (len + 17 <= sizeof(ogu_tune_done))	/* " CSR:was>now" and the NUL */
-+			len += snprintf(ogu_tune_done + len, sizeof(ogu_tune_done) - len,
-+					"%s%05lx:%04x>%04lx", len ? " " : "", csr, was, now);
++		kind[db][i] = 1 + median;
++		steps[db][i] = sign * (int)n;
++	}
++
++	for (int db = 0; db < 4; db++) {
++		for (int i = 0; i < 11; i++)
++			trained[db][i] = readw(OGU_PHY_CSR(i < 9 ? OGU_PBD(db, i) : OGU_CLK(db, i - 9)));
++		for (int u = 0; u < 2; u++) {
++			int want[4], lift = 0, *b = &trained[db][4 * u];
++
++			if (kind[db][9 + u])
++				ogu_tune_write(OGU_CLK(db, u), trained[db][9 + u], trained[db][9 + u] + steps[db][9 + u]);
++			for (int i = 0; i < 4; i++) {
++				int r = 4 * u + i;
++
++				if (kind[db][r] == 2) {
++					want[i] = ogu_med3(b[(i + 1) % 4], b[(i + 2) % 4], b[(i + 3) % 4]) + steps[db][r];
++					if (want[i] < -lift)
++						lift = -want[i];
++				} else if (kind[db][r] == 1) {
++					want[i] = b[i] + steps[db][r];
++				} else {
++					want[i] = b[i];
++				}
++			}
++			for (int i = 0; i < 4; i++)
++				ogu_tune_write(OGU_PBD(db, 4 * u + i), b[i], want[i] + lift);
++			if (lift) {
++				int len = strlen(ogu_tune_lift);
++
++				snprintf(ogu_tune_lift + len, sizeof(ogu_tune_lift) - len, "%s%05lx+%x",
++					 len ? " " : "", OGU_CLK(db, u), lift);
++				printf("DDR tune: dbyte %d nibble %d lifted %d\n", db, u, lift);
++			}
++		}
++		if (kind[db][8])
++			ogu_tune_write(OGU_PBD(db, 8), trained[db][8], trained[db][8] + steps[db][8]);
 +	}
 +	dsb();
 +}
@@ -142,8 +233,11 @@ kernel's device tree records the trained and the new values.
 +	if (!ogu_tune_done[0])
 +		return 0;
 +	node = fdt_find_or_add_subnode(blob, 0, "chosen");
-+	if (node >= 0)
-+		fdt_setprop_string(blob, node, "ddr-tune", ogu_tune_done);
++	if (node < 0)
++		return 0;
++	fdt_setprop_string(blob, node, "ddr-tune", ogu_tune_done);
++	if (ogu_tune_lift[0])
++		fdt_setprop_string(blob, node, "ddr-tune-lift", ogu_tune_lift);
 +	return 0;
 +}
 +
@@ -151,7 +245,7 @@ kernel's device tree records the trained and the new values.
   * VOLUME-UP held at power-on: the eMMC as a USB disk for the computer
   * (USB mass storage on the USB-C port), to write a new image to it. It
   * ends when the computer ejects the disk, when the USB cable goes or with
-@@ -339,6 +448,7 @@
+@@ -339,6 +537,7 @@
  
  int meson_board_late_init(void)
  {

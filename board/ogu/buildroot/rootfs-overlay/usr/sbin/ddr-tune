@@ -6,22 +6,29 @@
 # the FIP and p1, next to the A/B sector; flash.sh puts it back over an
 # image, a system update does not touch it):
 #
-#   ddr_tune=11668+10 1118c-2
+#   ddr_tune=11668@+9 13468@-4 1118c-2
 #
-# CSR (hex: block << 16 | instance << 12 | r << 8 | register), + or -,
-# steps (hex). Taken: the DBYTEs' RxPBDly (register 68, lanes r 0-8, one
-# bit's delay) and RxClkDly (8c, nibbles u 0-1, the read strobe), each CSR
-# once (44 at most: 36 delays, 8 strobes); a value stays within 0..3f. The
-# CPU's bit b of byte n (of a 64-bit word) is DBYTE n%4, lane DqbLnSel
-# (register a0+b of that DBYTE): bit 42 = 11668.
+# CSR (hex: block << 16 | instance << 12 | r << 8 | register), steps (hex):
+#   CSR@+N, CSR@-N   a lane's own delay (RxPBDly, register 68, lanes r 0-7)
+#                    at the median of what BL2 trained for the other three
+#                    lanes of its nibble, plus or minus N (ddr-calibrate
+#                    writes these); a nibble whose lane would go below 0 is
+#                    lifted as a whole
+#   CSR+N, CSR-N     a delay (RxPBDly lanes 0-8, RxClkDly 8c nibbles u 0-1:
+#                    the read strobe) moved from what BL2 trained
+# Each CSR once (44 at most: 36 delays, 8 strobes); a value stays within
+# 0..3f. The CPU's bit b of byte n (of a 64-bit word) is DBYTE n%4, lane
+# DqbLnSel (register a0+b of that DBYTE): bit 42 = 11668.
 #
 #   ddr-tune               the line kept, what U-Boot did at this start
-#                          (/chosen/ddr-tune: CSR:trained>now) and the CSRs now
+#                          (/chosen/ddr-tune: CSR:trained>now; the nibbles
+#                          lifted, /chosen/ddr-tune-lift) and the CSRs now
 #   ddr-tune set 'LINE'    keep LINE (the part after "ddr_tune="), from the
 #                          next start on
 #   ddr-tune clear         nothing kept: BL2's training as it is
 #   ddr-tune apply         the kept line now, if U-Boot did not apply it at
-#                          this start (an older U-Boot): from the values now
+#                          this start (an older U-Boot): from the values now;
+#                          moves only (an older U-Boot knows no @ entries)
 SECTOR=32510	# 0x7efe in U-Boot's odroid-go-ultra.c
 PHY=0xfe000000
 
@@ -40,9 +47,9 @@ kept() {
 	dd if="$DISK" bs=512 skip=$SECTOR count=1 2>/dev/null | tr -d '\0' | sed -n 's/^ddr_tune=//p'
 }
 
-# CSR+STEPS / CSR-STEPS -> "csr sign steps", refused ones fail
+# CSR+STEPS, CSR-STEPS, CSR@+STEPS, CSR@-STEPS -> "csr [@]sign steps", refused ones fail
 parse() {
-	echo "$1" | sed -n 's/^\([0-9a-fA-F]\{5\}\)\([+-]\)\([0-9a-fA-F]\{1,2\}\)$/\1 \2 \3/p'
+	echo "$1" | sed -n 's/^\([0-9a-fA-F]\{5\}\)\(@\{0,1\}[+-]\)\([0-9a-fA-F]\{1,2\}\)$/\1 \2 \3/p'
 }
 csr_ok() {
 	c=$((0x$1))
@@ -55,8 +62,12 @@ check() {
 	seen=" "
 	for t in $1; do
 		set -- $(parse "$t")
-		[ $# -eq 3 ] || die "not CSR+STEPS or CSR-STEPS: $t"
+		[ $# -eq 3 ] || die "not CSR+STEPS, CSR-STEPS, CSR@+STEPS or CSR@-STEPS: $t"
 		csr_ok "$1" || die "not a DBYTE RxPBDly (..68) or RxClkDly (..8c) register: $1"
+		case $2 in @*)
+			[ $((0x$1 & 255)) -eq $((0x68)) ] && [ $((0x$1 >> 8 & 15)) -le 7 ] ||
+				die "$1: @ takes a lane's RxPBDly of a nibble (lanes 0-7)" ;;
+		esac
 		[ $((0x$3)) -le 63 ] || die "more than 3f steps: $t"
 		c=$(printf '%05x' $((0x$1)))
 		case $seen in *" $c "*) die "$c twice" ;; esac
@@ -73,6 +84,9 @@ case $1 in
 	done=
 	[ -e /proc/device-tree/chosen/ddr-tune ] && done=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune)
 	echo "applied by U-Boot at this start: ${done:-nothing}"
+	lift=
+	[ -e /proc/device-tree/chosen/ddr-tune-lift ] && lift=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-lift)
+	[ -z "$lift" ] || echo "nibbles lifted: $lift"
 	for t in $line; do
 		set -- $(parse "$t")
 		[ $# -eq 3 ] && printf '%s now %04x\n' "$1" "$(devmem "$(addr "$1")" 16)"
@@ -100,6 +114,7 @@ apply)
 	line=$(kept)
 	[ -n "$line" ] || die "nothing kept"
 	check "$line"
+	case " $line" in *@*) die "the line has @ entries: only U-Boot (patch 0020 of 2026-11-25) applies them" ;; esac
 	for t in $line; do
 		set -- $(parse "$t")
 		was=$(($(devmem "$(addr "$1")" 16)))

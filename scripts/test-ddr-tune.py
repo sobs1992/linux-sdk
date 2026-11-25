@@ -59,6 +59,18 @@ static ulong blk_dread(struct blk_desc *b, ulong start, ulong n, void *buf)
 	return 1;
 }
 static ulong hextoul(const char *p, char **e) { return strtoul(p, e, 16); }
+struct bd_info { int x; };
+static int fdt_find_or_add_subnode(void *blob, int parent, const char *name)
+{
+	(void)blob; (void)parent;
+	return strcmp(name, "chosen") ? -1 : 7;
+}
+static int fdt_setprop_string(void *blob, int node, const char *name, const char *v)
+{
+	(void)blob;
+	printf("prop %d %s=%s\n", node, name, v);
+	return 0;
+}
 """
 
 MAIN = r"""
@@ -66,14 +78,21 @@ int main(int argc, char **argv)
 {
 	FILE *f = fopen(argv[1], "rb");
 	size_t n = fread(sector, 1, sizeof sector, f);
+	unsigned c, v;
 
-	(void)argc;
 	(void)n;
 	fclose(f);
 	for (unsigned i = 0; i < 0x20000; i++)
 		regs[i] = 5;
+	if (argc > 2 && (f = fopen(argv[2], "r"))) {	/* "CSR VALUE" lines: what BL2 trained */
+		while (fscanf(f, "%x %x", &c, &v) == 2)
+			regs[c & 0x1ffff] = v;
+		fclose(f);
+	}
 	ogu_ddr_tune();
+	meson_ft_board_setup(NULL, NULL);
 	printf("done %s\n", ogu_tune_done);
+	printf("lift %s\n", ogu_tune_lift);
 	for (int db = 0; db < 4; db++) {
 		for (int r = 0; r < 9; r++)
 			printf("%05x=%d\n", 0x10000 | db << 12 | r << 8 | 0x68, regs[0x10000 | db << 12 | r << 8 | 0x68]);
@@ -100,8 +119,8 @@ class Matrix:
 def uboot_code(patch):
     lines = [l[1:] for l in open(patch).read().splitlines() if l.startswith("+") and not l.startswith("+++")]
     text = "\n".join(lines)
-    a = text.index("static char ogu_tune_done")
-    b = text.index("int meson_ft_board_setup")
+    a = text.index("#define OGU_PBD")
+    b = text.index("\n}\n", text.index("int meson_ft_board_setup")) + 3
     return text[a:b]
 
 
@@ -112,20 +131,32 @@ def uboot(m, work, patch):
         f.write(STUBS + uboot_code(patch) + MAIN)
     subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wno-unused-function", "-o", exe, c], check=True)
 
-    def run(line):
+    fdt_bad = []
+
+    def run(line, trained=None, lift=False):
         s = os.path.join(work, "sector")
         data = ("ddr_tune=%s\n" % line).encode()
         with open(s, "wb") as f:
             f.write(data + b"\0" * (512 - len(data)))
-        out = subprocess.run([exe, s], capture_output=True, text=True, check=True).stdout.splitlines()
+        t = os.path.join(work, "trained")
+        with open(t, "w") as f:
+            for c, v in (trained or {}).items():
+                f.write("%x %x\n" % (c, v))
+        out = subprocess.run([exe, s, t], capture_output=True, text=True, check=True).stdout.splitlines()
         done = [l for l in out if l.startswith("done ")][0][5:].split()
+        lifted = [l for l in out if l.startswith("lift ")][0][5:].split()
+        props = dict(l[len("prop 7 "):].split("=", 1) for l in out if l.startswith("prop 7 "))
+        # what the kernel gets in /chosen is what was recorded
+        if props.get("ddr-tune", "").split() != done or props.get("ddr-tune-lift", "").split() != lifted:
+            fdt_bad.append((line, props, done, lifted))
         regs = dict(l.split("=") for l in out if re.match(r"^[0-9a-f]{5}=", l))
-        return done, {k: int(v) for k, v in regs.items()}
+        regs = {k: int(v) for k, v in regs.items()}
+        return (done, regs, lifted) if lift else (done, regs)
 
     done, regs = run(" ".join(c + "+1" for c in ALL44))
     m.cell("uboot all44: 44 CSRs moved", len(ALL44) == 44 and all(regs[c] == 6 for c in ALL44), str(regs))
     m.cell("uboot all44: 44 CSRs recorded for /chosen", len(done) == 44 and
-           [d[:5] for d in done] == ALL44 and all(d.endswith(":0005>0006") for d in done),
+           sorted(d[:5] for d in done) == sorted(ALL44) and all(d.endswith(":0005>0006") for d in done),
            "%d recorded: %s" % (len(done), done[-3:]))
     done, regs = run("11668+10 1118c-2 11668x 13768+3f")
     m.cell("uboot parse: a bad entry ends the line, the ones before it stay",
@@ -133,6 +164,48 @@ def uboot(m, work, patch):
     done, regs = run("11668-9 13768+3f 21668+1")
     m.cell("uboot clamp: within 0..3f; another block refused",
            regs["11668"] == 0 and regs["13768"] == 0x3f and len(done) == 2, str(done))
+
+    # the median: DBYTE0 nibble 0 trained 6 0 2 6
+    def nib(vals, db=0, u=0):
+        return {0x10068 | db << 12 | (4 * u + i) << 8: v for i, v in enumerate(vals)}
+    done, regs, lifted = run("10268@+0", nib([6, 0, 2, 6]), True)
+    m.cell("uboot median: 10268@+0 -> the median of 6 0 6 = 6",
+           regs["10268"] == 6 and [regs["10068"], regs["10168"], regs["10368"]] == [6, 0, 6] and
+           done == ["10268:0002>0006"] and lifted == [], "%s %s" % (done, regs))
+    done, regs = run("10268@+0", nib([2, 6, 0, 10]))
+    m.cell("uboot median: the middle one of three different neighbours (2 6 10 -> 6)", regs["10268"] == 6,
+           str(regs["10268"]))
+    done, regs = run("10268@+0", nib([6, 0, 6, 6]))
+    m.cell("uboot median: the lane's own value does not count (6 instead of 2: still 6, nothing moved)",
+           regs["10268"] == 6 and done == [], str(done))
+    done, regs = run("10268@-4", nib([8, 2, 2, 8]))
+    m.cell("uboot median: follows the neighbours (8 2 8 -> 8, -4 = 4)", regs["10268"] == 4, str(regs["10268"]))
+    done, regs = run("13368@+3", nib([4, 4, 4, 9], db=3, u=0))
+    m.cell("uboot median: DBYTE3 lane 3: 4 4 4 -> 4 + 3 = 7", regs["13368"] == 7, str(regs["13368"]))
+    done, regs, lifted = run("10068@-4", nib([0, 0, 0, 0]), True)
+    m.cell("uboot lift: a lane below 0 lifts its nibble: 0 4 4 4, lift recorded",
+           [regs["10068"], regs["10168"], regs["10268"], regs["10368"]] == [0, 4, 4, 4] and
+           lifted == ["1008c+4"] and sorted(done) == ["10168:0000>0004", "10268:0000>0004", "10368:0000>0004"],
+           "%s %s %s" % ([regs["10068"], regs["10168"], regs["10268"], regs["10368"]], done, lifted))
+    done, regs, lifted = run("10068@-4 10168+2", nib([0, 0, 0, 0]), True)
+    m.cell("uboot lift: a move in a lifted nibble is lifted too (0+2+4)",
+           regs["10168"] == 6 and regs["10068"] == 0 and lifted == ["1008c+4"], str(regs))
+    done, regs, lifted = run("10168-4", nib([0, 0, 0, 0]), True)
+    m.cell("uboot lift: a move below 0 is clamped as before, no lift", regs["10168"] == 0 and lifted == [], str(regs))
+    done, regs = run("11668@+3f", nib([2, 2, 2, 2], db=1, u=1))
+    m.cell("uboot median: within 0..3f at the top", regs["11668"] == 0x3f, str(regs["11668"]))
+    done, regs = run("10868@+1 1008c@+1 11668@+9", nib([2, 2, 2, 2], db=1, u=1))
+    m.cell("uboot median: @ on lane 8 or a strobe refused, the rest taken",
+           regs["10868"] == 5 and regs["1008c"] == 5 and regs["11668"] == 11, str(done))
+    done, regs = run("11668@+9 11668+1", nib([2, 2, 2, 2], db=1, u=1))
+    m.cell("uboot twice: the second entry of a CSR refused", regs["11668"] == 11, str(regs["11668"]))
+    done, regs, lifted = run("10068@-4", nib([0, 0, 0, 0]), True)
+    m.cell("uboot /chosen: ddr-tune and ddr-tune-lift as recorded, in every run so far", not fdt_bad and lifted,
+           str(fdt_bad[:2]))
+    done, regs, lifted = run("11668@+9 13468@-6", {**nib([2, 2, 2, 2], db=1, u=1), **nib([0, 2, 2, 2], db=3, u=1)}, True)
+    m.cell("uboot two nibbles: 11668 = 11; DBYTE3 u1 lifted 4 (2-6 = -4): 0 6 6 6",
+           regs["11668"] == 11 and [regs["13468"], regs["13568"], regs["13668"], regs["13768"]] == [0, 6, 6, 6] and
+           lifted == ["1318c+4"], "%s %s" % (regs, lifted))
 
 
 def ddr_tune(m, script):
@@ -151,6 +224,14 @@ def ddr_tune(m, script):
     m.cell("ddr-tune steps: more than 3f refused", r.returncode == 1 and "more than 3f" in r.stderr, r.stderr)
     r = run("set", "11690+1")
     m.cell("ddr-tune csr: not a delay register refused", r.returncode == 1 and "not a DBYTE" in r.stderr, r.stderr)
+    r = run("set", "11668@+9 13468@-4 1118c-2")
+    m.cell("ddr-tune @: median entries and moves pass the check (then: no eMMC on the PC)",
+           r.returncode == 1 and "no eMMC" in r.stderr, r.stderr)
+    for bad in ("11868@+1", "1118c@-1"):
+        r = run("set", bad)
+        m.cell("ddr-tune @: %s refused (lanes 0-7 only)" % bad, r.returncode == 1 and "@ takes" in r.stderr, r.stderr)
+    r = run("set", "11668@+9 11668-1")
+    m.cell("ddr-tune @: a CSR twice in both forms refused", r.returncode == 1 and "11668 twice" in r.stderr, r.stderr)
 
 
 def keep(m, work, helper):
