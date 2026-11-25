@@ -99,6 +99,9 @@ class Test(unittest.TestCase):
                                       "Documents", "My Games", "pirates")
         put(os.path.join(self.pir_saves, "Начало.pirates_savegame"), os.urandom(70000))
         put(os.path.join(self.pir_saves, "Config.ini"), "[a]\nb=1\n")
+        # Wine leaves files of 1970 in the profile (a zip has no dates before 1980)
+        put(os.path.join(self.pir_saves, "Config.ini.wd2"), "old")
+        os.utime(os.path.join(self.pir_saves, "Config.ini.wd2"), (0, 0))
         os.makedirs(os.path.join(self.pir_saves, "empty"))
         self.h3 = [os.path.join(self.data, p) for p in ("vcmi", "config/vcmi", "cache/vcmi")]
         put(os.path.join(self.h3[0], "Saves", "1.vsgm1"), os.urandom(5000))
@@ -185,7 +188,7 @@ class Test(unittest.TestCase):
         self.assertEqual(m["system"], "test123")
         g = m["games"][0]
         self.assertEqual([d["exists"] for d in g["dirs"]], [False, True])
-        self.assertEqual(g["dirs"][1]["files"], 2)
+        self.assertEqual(g["dirs"][1]["files"], 3)
         # changed after the copy, then the copy back
         put(os.path.join(self.pir_saves, "Config.ini"), "changed")
         put(os.path.join(self.pir_saves, "new.sav"), "new")
@@ -443,7 +446,7 @@ class Test(unittest.TestCase):
         self.assertEqual([c["name"] for c in out["copies"]], [os.path.basename(path)])
         self.assertEqual(out["copies"][0]["where"], "card")
         pir = [g for g in out["games"] if g["folder"] == "pirates"][0]
-        self.assertEqual(pir["files"], 2)
+        self.assertEqual(pir["files"], 3)
         self.assertGreater(pir["size"], 70000)
         info = json.loads(self.bb("info", path).stdout)
         self.assertEqual(info["games"][0]["folder"], "pirates")
