@@ -727,7 +727,7 @@ static int unfinished(int done[4][2], char *line, size_t size, int *nline, int s
 			continue;
 		done[db][u] = 1;
 		n++;
-		for (char *t = k ? strtok(k + 6, " \n") : NULL; t && line; t = strtok(NULL, " \n"))
+		for (char *t = k ? strtok(k + 6, " \n") : NULL; t && line && *nline < (int)size - 16; t = strtok(NULL, " \n"))
 			*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
 		if (say)
 			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
@@ -1151,7 +1151,7 @@ int main(int argc, char **argv)
 			for (int u = 0; u < 2; u++)
 				nib_total++, nib_done += done[*dp - '0'][u];
 	say_progress(0);
-	printf("lane  bit  now  early  late  S    vs nibble\n");
+	printf("lane  bit  now  early  late  S    to place\n");
 	for (const char *dp = dbytes; *dp; dp++) {
 		int db = *dp - '0';
 
@@ -1366,7 +1366,12 @@ int main(int argc, char **argv)
 			int db = csr >> 12 & 15, r = csr >> 8 & 15, ours = (csr & 0xff) == 0x68 && r <= 7 &&
 			    strchr(dbytes, '0' + db);
 
-			if (strlen(t) > 6 && strlen(t) < 12 && csr_ours(csr) && !ours && nline < (int)sizeof line - 16)
+			char key[8];
+
+			/* not twice: -r brought the interrupted run's nibbles from the log already */
+			snprintf(key, sizeof key, "%.5s", t);
+			if (strlen(t) > 6 && strlen(t) < 12 && csr_ours(csr) && !ours && !strstr(line, key) &&
+			    nline < (int)sizeof line - 16)
 				nline += snprintf(line + nline, sizeof line - nline, "%s%s", nline ? " " : "", t);
 		}
 	}

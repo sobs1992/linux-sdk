@@ -341,7 +341,7 @@ def cell_moved32(binary, d):
 def table(r):
     """ddr-calibrate's table: {(db, r): its offset against its nibble}"""
     return {(int(a), int(b)): float(rel) for a, b, rel in
-            re.findall(r"^(\d)\.(\d)\s+\d+\s+[0-9a-f]{2}\s+\d+\+?\s+\d+\+?\s+[-\d.]+\s+([-+\d.]+)", r.stdout, re.M)}
+            re.findall(r"^(\d)\.(\d)\s+-?\d+\s+[0-9a-f]{2}\s+\d+\+?\s+\d+\+?\s+[-\d.]+\s+([-+\d.]+)", r.stdout, re.M)}
 
 
 def e2e(binary, d, name, bl2):
@@ -484,6 +484,25 @@ def cell_d_keeps_others(binary, d):
     lanes = sorted(l.split()[1] for l in r2.stdout.splitlines() if l.startswith("lane 1"))
     want = sorted("%05x" % k for k, v in parse_line(line1).items() if not isinstance(v, tuple))
     c.check(lanes == want, "lane lines %s, the @ entries %s" % (lanes, want))
+    return c
+
+
+def cell_resume_d(binary, d):
+    c = Cell("resume_d: -r -d 3 after a run killed in nibble 6: every CSR once in the line")
+    b = base_board(d)
+    r = run(binary, b, ["-p"])
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:] + " 10868+2"
+    b.retrain({})
+    b.uboot(line1)
+    r1 = run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "1100"})
+    c.check(r1.returncode == -9, "not killed: %d" % r1.returncode)
+    st = status(binary, b)
+    c.check(st.startswith("unfinished ") and st.split()[1] not in ("0", "8"), "-s: " + st)
+    run(binary, b, ["-R"])
+    r2 = run(binary, b, ["-p", "-r", "-d", "3"])
+    got = [t[:5] for t in [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()]
+    c.check(len(got) == len(set(got)), "twice: %s" % got)
+    c.check(sorted(got) == sorted(t[:5] for t in line1.split()), "line %s, read %s" % (got, line1))
     return c
 
 
@@ -727,7 +746,7 @@ def cell_no_sim_dir(binary, d):
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
          cell_e2e_half_step, cell_e2e_half_own, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others,
-         cell_unmeasured,
+         cell_resume_d, cell_unmeasured,
          cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
