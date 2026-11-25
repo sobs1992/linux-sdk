@@ -203,6 +203,13 @@ class Test(unittest.TestCase):
         imp = os.path.join(self.run_dir, "import-pirates.ini")
         self.assertIn("import-settings " + imp, lines)
         self.assertIn("reload pirates", lines)
+        # homm3 has no layer: its settings imported, no "reload"
+        path = self.backup("homm3")
+        self.bb("restore", path)
+        lines = self.fifo.wait_lines(3)
+        time.sleep(0.2)
+        self.assertIn("import-settings " + os.path.join(self.run_dir, "import-homm3.ini"), lines)
+        self.assertNotIn("reload homm3", self.fifo.lines)
         with open(imp) as f:
             self.assertIn("controls.0000abcd=a=b", f.read())
         with open(os.path.join(self.games, "recipes", "pirates", "wine.ini")) as f:

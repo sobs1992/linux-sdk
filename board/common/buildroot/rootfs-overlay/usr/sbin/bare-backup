@@ -804,7 +804,8 @@ def restore(path, only):
                         if had:
                             rmtree(target + ".bak")
                         report["recipes"].append(f)
-        for f in set(report["recipes"]) | set(report["settings"]):
+        # the layers read again (the settings need not: bare_app took them in)
+        for f in report["recipes"]:
             ctl("reload " + f)
     return report
 
