@@ -31,7 +31,8 @@ TUNE = r'''#!/bin/sh
 D=__DIR__
 echo "$*" >> $D/tune.calls
 case $1 in
-"") echo "kept: $(cat $D/kept 2>/dev/null || echo none)"; echo "applied by U-Boot at this start: nothing" ;;
+"") echo "kept: $(cat $D/kept 2>/dev/null || echo none)"; echo "applied by U-Boot at this start: nothing"
+   if [ -e $D/read_line ]; then echo "line U-Boot read at this start: $(cat $D/read_line)"; fi ;;
 set) echo "$2" > $D/kept; echo "kept: $2" ;;
 clear) rm -f $D/kept; echo "kept: none" ;;
 esac
@@ -39,12 +40,15 @@ esac
 
 
 class App:
-    def __init__(self, app, work, shots, board=None, kept=None, prefix=""):
+    def __init__(self, app, work, shots, board=None, kept=None, prefix="", read_line=None):
         self.work, self.shots, self.n, self.prefix = work, shots, 0, prefix
         self.board = board or sim.base_board(os.path.join(work, "board"))
         if kept:
             with open(os.path.join(work, "kept"), "w") as f:
                 f.write(kept + "\n")
+        if read_line is not None:
+            with open(os.path.join(work, "read_line"), "w") as f:
+                f.write(read_line + "\n")
         self.binary = os.path.join(work, "ddr-calibrate-sim")
         subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread", "-DDDR_SIM",
                         "-o", self.binary, sim.SRC], check=True)
@@ -281,6 +285,20 @@ def main():
         app.shot("saved")
     finally:
         app.quit()
+    # in use at this start: the line U-Boot read is the one kept (an @ lane BL2 trained where it belongs is not moved)
+    for read, used in (("11668@+4 13468@-6", True), ("11668@+3", False), ("none", False)):
+        wu = os.path.join(work, "used-" + read.split()[0].replace("@", "_"))
+        os.makedirs(wu)
+        app = App(a.app, wu, None, kept="11668@+4 13468@-6", read_line=read)
+        try:
+            app.ctl("open memcal")
+            ok = app.wait_log("memcal: kept: 2 lane(s)", 10)
+            line = [l for l in app.log().splitlines() if "memcal: kept: 2 lane(s)" in l]
+            cell("used: U-Boot read '%s': %s" % (read, "in use" if used else "not yet"),
+                 ok and line and (("not used yet" in line[-1]) != used), str(line[-1:]))
+        finally:
+            app.quit()
+
     # a run left by a bare_app that died: the next one keeps the guards until it ends
     work3 = os.path.join(work, "orphan")
     os.makedirs(work3)
