@@ -113,7 +113,8 @@ clear)
 	echo "kept: none (from the next start on)"
 	;;
 apply)
-	[ -e /proc/device-tree/chosen/ddr-tune ] && die "U-Boot applied it at this start already"
+	[ -e /proc/device-tree/chosen/ddr-tune ] || [ -e /proc/device-tree/chosen/ddr-tune-line ] &&
+		die "U-Boot applied it at this start already"
 	[ -e /run/ddr-tune.applied ] && die "applied at this start already"
 	disk
 	line=$(kept)

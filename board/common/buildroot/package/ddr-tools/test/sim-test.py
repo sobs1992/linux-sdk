@@ -109,7 +109,7 @@ class Board:
             f.write(buf)
         with open(self.path("boot_id"), "w") as f:
             f.write(str(uuid.uuid4()) + "\n")
-        for p in ("run/ddr-calibrate.saved", "frozen", "chosen", "chosen-lift"):
+        for p in ("run/ddr-calibrate.saved", "frozen", "chosen", "chosen-lift", "chosen-line"):
             if os.path.exists(self.path(p)):
                 os.unlink(self.path(p))
 
@@ -118,7 +118,7 @@ class Board:
         writes what the kernel would find in /chosen"""
         r = subprocess.run([uboot_tool(), line, self.path("phy")], capture_output=True, text=True, check=True)
         props = dict(l[len("prop 7 "):].split("=", 1) for l in r.stdout.splitlines() if l.startswith("prop 7 "))
-        for name, f in (("ddr-tune", "chosen"), ("ddr-tune-lift", "chosen-lift")):
+        for name, f in (("ddr-tune", "chosen"), ("ddr-tune-lift", "chosen-lift"), ("ddr-tune-line", "chosen-line")):
             if name in props:
                 with open(self.path(f), "w") as out:
                     out.write(props[name] + "\0")
@@ -132,7 +132,7 @@ class Board:
             buf = f.read()
         return {c: struct.unpack_from("<H", buf, c * 2)[0] for c in self.regs_start()}
 
-    def expected(self, thresh=4, lift=None):
+    def expected(self, thresh=4, lift=None, read=None):
         """the line ddr-calibrate should give, as {CSR: N} of "CSR@+N": a lane whose place
         (centred against its nibble) is thresh or more from BL2's value, N from the median
         of BL2's values of the other three lanes; lift[(db, u)]: U-Boot's lift at this start"""
@@ -147,7 +147,7 @@ class Board:
                 L = (lift or {}).get((db, u), 0)
                 for i, l in enumerate(lanes):
                     free = self.lanes[l][0] + rnd(S[l] - med) - L
-                    if abs(free - bl2[l]) >= thresh:
+                    if abs(free - bl2[l]) >= thresh or pbd(*l) in (read or {}):
                         others = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))
                         line[pbd(*l)] = free - others[1]
         return line
@@ -291,7 +291,7 @@ def result_of(r):
 # ---- the cells -------------------------------------------------------------
 
 def cell_base(binary, d):
-    c = Cell("base: a full run finds bit 42 and DBYTE3 r4/r5, lifts the nibble at 0")
+    c = Cell("base: a full run finds bit 42 and DBYTE3 r4/r5 (r4 below 0: U-Boot's to lift)")
     b = base_board(d)
     s0 = b.regs()
     r = run(binary, b, ["-p"])
@@ -371,6 +371,49 @@ def cell_e2e_lift(binary, d):
     c, props = e2e(binary, d, "e2e_lift: DBYTE3 r4 below 0: U-Boot lifts the nibble, the next run sees the lift",
                    {})
     c.check("1318c+" in props.get("ddr-tune-lift", ""), "no lift recorded: %s" % props)
+    return c
+
+
+def cell_e2e_odd_start(binary, d):
+    c = Cell("e2e_odd_start: calibrated where BL2 trained lane 0.2 at 6 (it belongs at 2): on the usual start "
+             "(2) the entry stays, the lane centred")
+    b = base_board(d, override={(0, 2): (6, 23, 11)})
+    r = run(binary, b, ["-p"])
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
+    c.check(0x10268 in parse_line(line1), "the cell tests nothing: 0.2 not in %s" % line1)
+    b.retrain({(0, 2): 2})
+    b.uboot(line1)
+    r2 = run(binary, b, ["-p"])
+    c.check(result_of(r2) == parse_line(line1), "line after %s, before %s" % (result_of(r2), parse_line(line1)))
+    off = {k: v for k, v in table(r2).items() if pbd(*k) in parse_line(line1) and abs(v) > 1}
+    c.check(not off, "corrected lanes not centred: %s" % off)
+    return c
+
+
+def cell_unmeasured(binary, d):
+    c = Cell("unmeasured: a lane of the line whose early edge is out of reach stays where U-Boot put it")
+    b = base_board(d)
+    r = run(binary, b, ["-p"])
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:] + " 10168@+3"
+    b.uboot(line1)
+    # 0.1's eye now ends beyond 3f: its early edge is not reached
+    with open(b.path("spec"), "a") as f:
+        x0 = b.regs()[pbd(0, 1)] - R * b.strobe[(0, 0)]
+        f.write("eye 0 1 %g %g\n" % (x0 - 11 + 0.5, x0 + 80))
+    r2 = run(binary, b, ["-p"])
+    c.check("(edge not reached)" in r2.stdout, "the cell tests nothing: every edge reached")
+    got = result_of(r2)
+    c.check(got.get(0x10168) == 3, "10168: %s in %s" % (got.get(0x10168), got))
+    # a line of the old kind (a move from BL2's value): the unmeasured lane becomes @ where it is
+    b.retrain({})
+    b.uboot("10168+5")
+    with open(b.path("spec"), "a") as f:
+        x0 = b.regs()[pbd(0, 1)] - R * b.strobe[(0, 0)]
+        f.write("eye 0 1 %g %g\n" % (x0 - 11 + 0.5, x0 + 80))
+    r3 = run(binary, b, ["-p", "-d", "0"])
+    bl2 = {r: b.lanes[(0, r)][0] for r in range(4)}
+    want = bl2[1] + 5 - sorted([bl2[0], bl2[2], bl2[3]])[1]
+    c.check(result_of(r3).get(0x10168) == want, "old move 10168+5: %s, expected @%+d" % (result_of(r3), want))
     return c
 
 
@@ -574,7 +617,8 @@ def cell_no_sim_dir(binary, d):
     return c
 
 
-CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
+CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
+         cell_unmeasured, cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]
 

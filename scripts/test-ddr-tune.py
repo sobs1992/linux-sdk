@@ -59,7 +59,8 @@ static ulong blk_dread(struct blk_desc *b, ulong start, ulong n, void *buf)
 	memcpy(buf, sector, 512);
 	return 1;
 }
-/* U-Boot's hextoul (lib/strto.c): hex digits only, no sign, no spaces; none: *e = p */
+/* like U-Boot's hextoul (lib/strto.c) for what ddr-tune writes: hex digits, no sign, no spaces
+ * (U-Boot's also takes a "0x"); none: *e = p */
 static ulong hextoul(const char *p, char **e)
 {
 	ulong v = 0;

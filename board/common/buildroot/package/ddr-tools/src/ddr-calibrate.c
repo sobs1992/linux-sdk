@@ -32,7 +32,9 @@
  * nibble's own position (its strobe) is trained anew at every start, a
  * lane's skew against its neighbours is the same every time. A lane whose
  * place so found is -t steps (4) or more from what BL2 trained for it makes
- * an entry of the ddr-tune line, "CSR@+N": N from the median of what BL2
+ * an entry of the ddr-tune line, "CSR@+N" (and stays there once it is in
+ * the line U-Boot read: the line must not depend on the start it was found
+ * at): N from the median of what BL2
  * trained for the other three lanes of its nibble (U-Boot 0020 sets it
  * there at every start; BL2 trains a single lane differently now and then,
  * the median of the others stays). BL2's values and U-Boot's lift of this
@@ -94,6 +96,7 @@
 static const char *path_log = "/data/ddr-calibrate.log",
 	*path_chosen = "/proc/device-tree/chosen/ddr-tune",
 	*path_lift = "/proc/device-tree/chosen/ddr-tune-lift",
+	*path_line = "/proc/device-tree/chosen/ddr-tune-line",
 	*path_saved = "/run/ddr-calibrate.saved",
 	*path_boot = "/proc/sys/kernel/random/boot_id",
 	*path_data = "/data",
@@ -610,6 +613,31 @@ static int med3(int a, int b, int c)
 	return c < a ? a : c > b ? b : c;
 }
 
+/* csr has a "CSR@+N" in the line U-Boot read at this start (/chosen/ddr-tune-line) */
+static int read_at(unsigned csr)
+{
+	static char buf[600];
+	static int read_once;
+	char key[8], *p;
+
+	if (!read_once) {
+		FILE *f = fopen(path_line, "r");
+
+		if (f) {
+			size_t n = fread(buf, 1, sizeof buf - 1, f);
+
+			buf[n] = 0;
+			fclose(f);
+		}
+		read_once = 1;
+	}
+	snprintf(key, sizeof key, "%05x@", csr);
+	for (p = buf; (p = strstr(p, key)); p++)
+		if (p == buf || p[-1] == ' ')
+			return 1;
+	return 0;
+}
+
 /* U-Boot's lift of nibble (db, u) at this start: /chosen/ddr-tune-lift "1<db><u>8c+L ..." */
 static int uboot_lift(int db, int u)
 {
@@ -844,8 +872,8 @@ static int restore_saved(void)
 }
 
 #ifdef DDR_SIM
-/* DDR_SIM_DIR: phy (the registers), spec, boot_id, ddr-calibrate.log, chosen, chosen-lift, run/, data/ */
-static char sim_paths[6][512];
+/* DDR_SIM_DIR: phy (the registers), spec, boot_id, ddr-calibrate.log, chosen, chosen-lift, chosen-line, run/, data/ */
+static char sim_paths[7][512];
 
 static int sim_setup(void)
 {
@@ -871,6 +899,8 @@ static int sim_setup(void)
 	path_boot = sim_paths[3];
 	path_data = sim_paths[4];
 	path_lift = sim_paths[5];
+	snprintf(sim_paths[6], 512, "%s/chosen-line", d);
+	path_line = sim_paths[6];
 	path_wdt = "";
 	sim_kill_probe = k ? atoi(k) : 0;
 	sim_sig_in_restore = getenv("DDR_SIM_SIG_IN_RESTORE") != NULL;
@@ -1231,18 +1261,32 @@ int main(int argc, char **argv)
 			 */
 			int lift = uboot_lift(db, u);
 
+			int nk = 0;
+			char kept_note[96] = "";
+
 			for (int i = 0; i < 4; i++) {
 				unsigned c = CSR_PBD(db, 4 * u + i);
-				int free = want[i] - lift, o, keepit;
+				int place = want[i] - lift, o, keepit;
+				/*
+				 * Once in the line, a lane stays: the line found must not
+				 * depend on the start it was found at (calibrated where BL2
+				 * trained the lane where it belongs, it would drop out and
+				 * miss the next start BL2 does not). Not measured: where it
+				 * is now (U-Boot put it there, or BL2 did).
+				 */
+				int had = read_at(c);
 
-				keepit = okv[i] ? abs(free - (int)bl2v[i]) >= thresh : free != (int)bl2v[i];
+				keepit = (okv[i] ? abs(place - (int)bl2v[i]) >= thresh : place != (int)bl2v[i]) || had;
 				if (!keepit)
 					continue;
-				o = free - med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
-				o = o < -VMAX ? -VMAX : o > VMAX ? VMAX : o;
+				o = place - med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
+				o = o < -VMAX ? -VMAX : o > VMAX ? VMAX : o;	/* a guard: values are 0..3f */
 				nline += snprintf(line + nline, sizeof line - nline, "%s%05x@%c%x",
 						  nline ? " " : "", c, o < 0 ? '-' : '+', abs(o));
+				nk += snprintf(kept_note + nk, sizeof kept_note - nk, " r%d@%+d", 4 * u + i, o);
 			}
+			if (nk)
+				printf("dbyte %d nibble %d: kept%s\n", db, u, kept_note);
 			/* the nibble's result on disk before the next one */
 			thaw();
 			DATA_WRITE();
@@ -1275,7 +1319,7 @@ int main(int argc, char **argv)
 	if (nline)
 		printf("ddr_tune=%s\n", line);
 	else
-		printf("ddr_tune= (nothing: every lane within %d steps of its nibble, none moved now)\n", thresh);
+		printf("ddr_tune= (nothing: every lane within %d steps of BL2's value, none in the line read)\n", thresh);
 out:
 	atomic_store(&stop, 1);
 	for (int i = 0; i < nw; i++)
