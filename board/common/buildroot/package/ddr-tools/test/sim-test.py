@@ -138,10 +138,13 @@ class Board:
             buf = f.read()
         return {c: struct.unpack_from("<H", buf, c * 2)[0] for c in self.regs_start()}
 
-    def expected(self, thresh=4, lift=None, read=None):
+    def expected(self, thresh=4, lift=None, read=None, unmeasured=()):
         """the line ddr-calibrate should give, as {CSR: N} of "CSR@+N": a lane whose place
         (centred against its nibble) is thresh or more from BL2's value, N from the median
-        of BL2's values of the other three lanes; lift[(db, u)]: U-Boot's lift at this start"""
+        of BL2's values of the other three lanes; lift[(db, u)]: U-Boot's lift at this start;
+        unmeasured: (db, r) lanes whose edge is out of reach (one in a nibble: the others
+        take the median of the three measured offsets, their own counted; such a lane
+        itself, at BL2's value here, is not kept)"""
         line = {}
         for db in range(4):
             for u in range(2):
@@ -153,8 +156,14 @@ class Board:
                 # C - the median of its three neighbours' offsets, rounded towards BL2's value
                 C = {l: self.lanes[l][0] - L + S[l] for l in lanes}
                 off = {l: C[l] - bl2[l] for l in lanes}
+                um = [l for l in lanes if l in unmeasured]
+                assert len(um) <= 1
                 for i, l in enumerate(lanes):
+                    if l in um:
+                        continue
                     med = sorted(off[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
+                    if um:
+                        med = sorted(off[m] for m in lanes if m not in um)[1]
                     mb = sorted(bl2[lanes[(i + k) % 4]] for k in (1, 2, 3))[1]
                     n = rnd0(C[l] - med - mb)       # N rounded on its own
                     if abs(mb + n - bl2[l]) >= thresh or pbd(*l) in (read or {}):
@@ -550,6 +559,24 @@ def cell_unmeasured(binary, d):
     return c
 
 
+def cell_three_measured(binary, d):
+    c = Cell("three_measured: one lane of a skewed nibble out of reach: the median of the three"
+             " measured offsets, no false entries for the lanes beside bit 42")
+    for unm in (4, 5, 7):
+        b = base_board(os.path.join(d, "u%d" % unm))
+        with open(b.path("spec"), "a") as f:
+            x0 = b.regs()[pbd(1, unm)] - R * b.strobe[(1, 1)]
+            f.write("eye 1 %d %g %g\n" % (unm, x0 - 11 + 0.5, x0 + 80))
+        r = run(binary, b, ["-p", "-d", "1"])
+        c.check("(edge not reached)" in r.stdout, "lane 1.%d: every edge reached" % unm)
+        got = {k: v for k, v in result_of(r).items() if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
+        exp = {k: v for k, v in b.expected(unmeasured=((1, unm),)).items()
+               if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
+        c.check(got == exp, "1.%d not measured: %s, expected %s" % (unm, got, exp))
+        c.check(set(got) == {0x11668}, "1.%d not measured: entries %s besides 11668" % (unm, got))
+    return c
+
+
 def cell_strobe_high(binary, d):
     c = Cell("strobe_high: a strobe at 0x3c: the lift stays within 0..3f, result right")
     over = {(2, r): (20, 31, 11 + (r == 1)) for r in range(4)}
@@ -752,7 +779,7 @@ def cell_no_sim_dir(binary, d):
 
 CELLS = [cell_base, cell_moved32, cell_e2e_lane_jump, cell_e2e_nibble_moves, cell_e2e_lift, cell_e2e_odd_start,
          cell_e2e_half_step, cell_e2e_half_own, cell_e2e_neighbour_jump, cell_e2e_pair, cell_d_keeps_others,
-         cell_resume_d, cell_unmeasured,
+         cell_resume_d, cell_unmeasured, cell_three_measured,
          cell_strobe_high, cell_stop, cell_stop_in_restore, cell_run_after_kill,
          cell_status_running, cell_kill_early, cell_sigint, cell_kill_same_boot, cell_reboot_resume,
          cell_stale_saved, cell_lock, cell_fail_trained, cell_restore_nothing, cell_no_sim_dir]

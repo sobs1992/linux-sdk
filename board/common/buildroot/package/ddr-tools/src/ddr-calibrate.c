@@ -727,8 +727,10 @@ static int unfinished(int done[4][2], char *line, size_t size, int *nline, int s
 			continue;
 		done[db][u] = 1;
 		n++;
+		/* an entry is CSR, sign or @, N: a longer token is not one (a log spoilt) */
 		for (char *t = k ? strtok(k + 6, " \n") : NULL; t && line && *nline < (int)size - 16; t = strtok(NULL, " \n"))
-			*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
+			if (strlen(t) < 12)
+				*nline += snprintf(line + *nline, size - *nline, "%s%s", *nline ? " " : "", t);
 		if (say)
 			printf("dbyte %d nibble %d: done before (%s)\n", db, u, k ? k + 1 : "keep: nothing");
 	}
@@ -1254,7 +1256,9 @@ int main(int argc, char **argv)
 			 * change: a lane's centre C = now - lift + S, its offset from
 			 * BL2's value C - BL2. A lane's place = its centre minus the
 			 * median of its three neighbours' offsets (the lane itself not
-			 * counted): every lane sampling as the typical neighbour does.
+			 * counted; with one of them not measured, of the three measured
+			 * lanes, itself counted): every lane sampling as the typical
+			 * neighbour does.
 			 * N (the place against the median of the neighbours' BL2 values)
 			 * rounds half a step towards 0.
 			 */
@@ -1278,7 +1282,13 @@ int main(int argc, char **argv)
 					if (!ce[(i + j) % 4] && !ct[(i + j) % 4])
 						On[k++] = off[(i + j) % 4];
 				ok = !ce[i] && !ct[i] && n >= 3 && k > 0;
-				pr = C[i] - (k == 3 ? med3d(On[0], On[1], On[2]) : k == 2 ? (On[0] + On[1]) / 2 : k ? On[0] : 0);
+				/*
+				 * three measured, the lane one of them: the median of the three
+				 * offsets, the lane's own counted (of two neighbours' alone the
+				 * mean would carry half of a skewed one's offset to the others)
+				 */
+				pr = C[i] - (k == 3 ? med3d(On[0], On[1], On[2]) :
+					     k == 2 ? med3d(off[i], On[0], On[1]) : k ? On[0] : 0);
 				/*
 				 * N, from the median of the neighbours' BL2 values, rounded on
 				 * its own (half a step towards 0): the lane's own BL2 value,
@@ -1385,7 +1395,7 @@ int main(int argc, char **argv)
 		for (char *t = strtok(tmp, " "); t; t = strtok(NULL, " ")) {
 			unsigned c = strtoul(t, 0, 16);
 
-			/* the lanes this run places ("CSR@+N"); strobes, lane 8, old moves only carried on */
+			/* the "CSR@+N" lanes (placed by this run or carried on); strobes, lane 8, old moves not */
 			if (strlen(t) > 6 && t[5] == '@')
 				printf("lane %05x %d %+d\n", c, cpu_bit(c >> 12 & 3, c >> 8 & 15), (int)strtol(t + 6, 0, 16));
 		}
