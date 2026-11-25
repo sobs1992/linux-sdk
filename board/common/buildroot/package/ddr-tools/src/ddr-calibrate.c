@@ -1294,7 +1294,8 @@ int main(int argc, char **argv)
 				 * its own (half a step towards 0): the lane's own BL2 value,
 				 * which jumps now and then, only decides whether it is kept -
 				 * with four lanes measured; with three, its own offset is in the
-				 * median: a jump that carries it over a neighbour's moves N too
+				 * median: its own jump can move N too (not while the offset
+				 * stays on the same side of the other two measured ones)
 				 */
 				int mb = med3(bl2v[(i + 1) % 4], bl2v[(i + 2) % 4], bl2v[(i + 3) % 4]);
 				d = pr - mb;

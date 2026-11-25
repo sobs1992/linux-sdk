@@ -574,8 +574,15 @@ def cell_three_measured(binary, d):
                if (k >> 12 & 3) == 1 and (k >> 8 & 15) >= 4}
         c.check(got == exp, "1.%d not measured: %s, expected %s" % (unm, got, exp))
         c.check(set(got) == {0x11668}, "1.%d not measured: entries %s besides 11668" % (unm, got))
-    # three measured: the lane's own offset is in the median; its own BL2 jump moves its N
-    # only when the offset crosses a measured neighbour's (docs/boards/ogu.md), by <= the jump
+    # three measured: the lane's own offset is in the median, so its own BL2 jump can move its
+    # N (by <= the jump; none while the offset stays on the same side of the other two, as
+    # docs/boards/ogu.md says). By hand: centres (BL2 frame, eyes fixed) 1.4 19, 1.5 14,
+    # 1.6 23; BL2 1.4 8, 1.5 5, 1.6 2, 1.7 8 (out of reach): offsets 11, 9, 21 ->
+    # 1.5: 14 - med(9,11,21)=3, N 3 - med(8,2,8) = -5; 1.6: 23 - 11 = 12, N 12 - 8 = +4.
+    # 1.5 at 8: offset 6, still below both: the same. 1.5 at 2: offset 12, now the median:
+    # 1.5: 14 - 12 = 2, N -6; 1.6: 23 - 12 = 11, N +3. 1.5 at 3, 1.7 at 0: offsets 11, 11,
+    # 21: 1.5: 14 - 11 = 3, N 3 - med(8,2,0) = +1 (half a step more of its own offset: 0);
+    # 1.6: 23 - 11 = 12, N 12 - med(8,3,0) = +9.
     over = {(1, 4): (8, 32, 10), (1, 5): (5, 28, 10), (1, 6): (2, 46, 4), (1, 7): (8, 30, 10)}
     b = base_board(os.path.join(d, "own"), override=over)
 
@@ -588,16 +595,15 @@ def cell_three_measured(binary, d):
     r = run(binary, b, ["-p", "-d", "1", "-t", "2"])
     l1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:]
     n1 = nib1(r)
-    c.check(0x11568 in n1, "own: 11568 not in %s" % n1)
-    for bl2, same in (({(1, 5): 8}, True), ({(1, 5): 2}, False)):
+    c.check(n1 == {0x11568: -5, 0x11668: 4}, "own, first start: %s" % n1)
+    for bl2, want in (({(1, 5): 8}, {0x11568: -5, 0x11668: 4}), ({(1, 5): 2}, {0x11568: -6, 0x11668: 3}),
+                      ({(1, 5): 3, (1, 7): 0}, {0x11568: 1, 0x11668: 9})):
         b.retrain(bl2)
         b.uboot(l1)
-        n2 = nib1(run(binary, b, ["-p", "-d", "1", "-t", "2"]))
-        if same:
-            c.check(n2 == n1, "own 1.5 5->8 (offset on the same side): %s, was %s" % (n2, n1))
-        else:
-            c.check(set(n2) == set(n1) and all(abs(n2[k] - n1[k]) <= 3 for k in n1),
-                    "own 1.5 5->2: %s, was %s (by more than the jump)" % (n2, n1))
+        r2 = run(binary, b, ["-p", "-d", "1", "-t", "2"])
+        n2 = nib1(r2)
+        c.check("(edge not reached)" in r2.stdout, "own %s: every edge reached" % bl2)
+        c.check(n2 == want, "own %s: %s, expected %s" % (bl2, n2, want))
     return c
 
 
