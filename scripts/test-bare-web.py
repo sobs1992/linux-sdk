@@ -313,6 +313,38 @@ class Test(unittest.TestCase):
                 if os.path.exists(p):
                     os.remove(p)
 
+    def test_upload_same_name(self):
+        """one upload of a name at a time: the second would write the same .part"""
+        c = socket.create_connection(("127.0.0.1", PORT))
+        c.sendall(b"PUT /api/upload/install/setup_two.exe HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nab")
+        part = os.path.join(GAMES, "install", "setup_two.exe.part")
+        deadline = time.time() + 5
+        while not os.path.exists(part) and time.time() < deadline:
+            time.sleep(0.02)
+        s, h, d = req("PUT", "/api/upload/install/setup_two.exe", b"0123456789")
+        self.assertEqual(s, 409, d)
+        c.sendall(b"cdefghij")
+        c.settimeout(10)
+        self.assertIn(b" 200 ", c.recv(4096).split(b"\r\n")[0])
+        c.close()
+        p = os.path.join(GAMES, "install", "setup_two.exe")
+        self.assertEqual(open(p, "rb").read(), b"abcdefghij")
+        os.remove(p)
+
+    def test_post_body_read(self):
+        """a POST's body is read even when its request is refused: the next
+        request on the connection is a request"""
+        c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+        c.request("POST", "/api/reboot-not", body=b'{"x": 1}', headers={"Content-Type": "application/json"})
+        r = c.getresponse()
+        r.read()
+        self.assertEqual(r.status, 404)
+        c.request("GET", "/api/status")
+        r = c.getresponse()
+        self.assertEqual(r.status, 200)
+        r.read()
+        c.close()
+
     def test_upload_usb_disk(self):
         touch(os.path.join(STATE, "usb-disk"))
         s, h, d = req("PUT", "/api/upload/install/setup_x.exe", b"data")
@@ -399,6 +431,7 @@ class Test(unittest.TestCase):
         self.assertEqual(s, 404)
         s, r = jreq("POST", "/api/install/remove", {"path": os.path.join(GAMES, "install", "..", "coldfear")})
         self.assertEqual(s, 404)
+        self.assertTrue(r["error"].startswith("Не удалось удалить: "), r)
         self.assertTrue(os.path.isdir(os.path.join(GAMES, "coldfear")))
         d = self.tiny_game("Bad Exe")
         s, r = jreq("POST", "/api/install/run", {"path": d, "exe": "../../x.exe"})

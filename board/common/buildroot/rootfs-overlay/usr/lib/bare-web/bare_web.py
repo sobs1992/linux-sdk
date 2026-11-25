@@ -712,6 +712,8 @@ def allowed_net():
 
 
 NET = None
+UPLOADS = set()	# (place, name) being uploaded: one at a time each
+UPLOADS_LOCK = threading.Lock()
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml",
          ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8"}
@@ -761,11 +763,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, body, ctype, h)
 
     def body_json(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 1 << 16:
-            return None
         try:
-            v = json.loads(self.rfile.read(n) or b"{}")
+            v = json.loads(self.body or b"{}")
         except ValueError:
             return None
         return v if isinstance(v, dict) else None
@@ -788,6 +787,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.fail(403, "Доступ только с компьютера на кабеле USB.")
         segs, q = self.parts()
         m = self.command
+        # a body other than an upload's read whole first: what is left of
+        # one would be the next request of the connection
+        self.body = b""
+        if m in ("POST", "DELETE"):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 1 << 16:
+                self.close_connection = True
+                return self.fail(413, "?")
+            self.body = self.rfile.read(n)
         if not segs or segs[0] != "api":
             if m in ("GET", "HEAD"):
                 return self.static(segs)
@@ -865,6 +876,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.fail(*why)
         place, name = segs[1], segs[2]
         n = int(self.headers["Content-Length"])
+        with UPLOADS_LOCK:
+            busy = (place, name) in UPLOADS
+            UPLOADS.add((place, name))
+        if busy:
+            self.close_connection = True
+            return self.fail(409, "Файл %s уже загружается." % name)
+        try:
+            self.upload(place, name, n)
+        finally:
+            with UPLOADS_LOCK:
+                UPLOADS.discard((place, name))
+
+    def upload(self, place, name, n):
         d = os.path.join(GAMES, place)
         dest = os.path.join(d, name)
         part = dest + ".part"
@@ -970,7 +994,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if why:
             return self.fail(503, why)
         if not self.entry_ok(path):
-            return self.fail(404, install_text("gone", ""))
+            return self.fail(404, install_text("gone", "", what == ["remove"]))
         if what == ["remove"]:
             if Jobs.running("install"):
                 return self.fail(409, install_text("busy", "", True), code="busy")
