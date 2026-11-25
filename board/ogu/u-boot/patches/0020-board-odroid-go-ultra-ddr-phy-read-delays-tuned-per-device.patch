@@ -25,8 +25,8 @@ BL2 trained for the other three lanes of its nibble, plus its own skew
 start to start now and then, its neighbours stay; a nibble whose lane
 would go below 0 is lifted as a whole. Moves from BL2's own value
 (CSR+N) are taken too. Only the DBYTEs' RxPBDly and RxClkDly registers,
-within 0..0x3f. /chosen/ddr-tune and /chosen/ddr-tune-lift of the
-kernel's device tree record what was done.
+within 0..0x3f. /chosen/ddr-tune-line, /chosen/ddr-tune and
+/chosen/ddr-tune-lift of the kernel's device tree record what was done.
 ---
 --- a/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
 +++ b/board/amlogic/odroid-go-ultra/odroid-go-ultra.c
@@ -44,7 +44,7 @@ kernel's device tree record what was done.
  #include <linux/bitops.h>
  #include <linux/delay.h>
  #include <power/pmic.h>
-@@ -308,6 +312,200 @@
+@@ -308,6 +312,205 @@
  }
  
  /*
@@ -75,8 +75,9 @@ kernel's device tree record what was done.
 + * image): the eMMC's, also when Linux starts from the SD card. U-Boot moves
 + * them before the kernel, also before one that resumes from hibernation
 + * (its Linux runs no init scripts). The kernel's device tree says what was
-+ * done: /chosen/ddr-tune "CSR:trained>now ..." for every delay moved,
-+ * /chosen/ddr-tune-lift "1<db><u>8c+L ..." for every nibble lifted.
++ * done: /chosen/ddr-tune-line the line as read, /chosen/ddr-tune
++ * "CSR:trained>now ..." for every delay moved, /chosen/ddr-tune-lift
++ * "1<db><u>8c+L ..." for every nibble lifted.
 + */
 +#define OGU_TUNE_SECTOR		0x7efe
 +#define OGU_PHY_CSR(csr)	((void __iomem *)(0xfe000000UL + ((csr) << 1)))
@@ -84,7 +85,8 @@ kernel's device tree record what was done.
 +#define OGU_CLK(db, u)		(0x1008cUL | (ulong)(db) << 12 | (ulong)(u) << 8)
 +
 +static char ogu_tune_done[704];	/* "CSR:was>now " (16 bytes) for all 44 CSRs taken */
-+static char ogu_tune_lift[64];	/* "1<db><u>8c+L " (8 bytes) for the 8 nibbles */
++static char ogu_tune_lift[80];	/* "1<db><u>8c+LL " (9 bytes) for the 8 nibbles */
++static char ogu_tune_line[512];	/* the line as read */
 +
 +static bool ogu_tune_csr_ok(ulong csr)
 +{
@@ -152,6 +154,7 @@ kernel's device tree record what was done.
 +	q = strchr(p, '\n');
 +	if (q)
 +		*q = '\0';
++	strlcpy(ogu_tune_line, p, sizeof(ogu_tune_line));
 +
 +	/* the line: a malformed entry ends it, a refused one is left out */
 +	while (*p) {
@@ -230,12 +233,14 @@ kernel's device tree record what was done.
 +{
 +	int node;
 +
-+	if (!ogu_tune_done[0])
++	if (!ogu_tune_line[0])
 +		return 0;
 +	node = fdt_find_or_add_subnode(blob, 0, "chosen");
 +	if (node < 0)
 +		return 0;
-+	fdt_setprop_string(blob, node, "ddr-tune", ogu_tune_done);
++	fdt_setprop_string(blob, node, "ddr-tune-line", ogu_tune_line);
++	if (ogu_tune_done[0])
++		fdt_setprop_string(blob, node, "ddr-tune", ogu_tune_done);
 +	if (ogu_tune_lift[0])
 +		fdt_setprop_string(blob, node, "ddr-tune-lift", ogu_tune_lift);
 +	return 0;
@@ -245,7 +250,7 @@ kernel's device tree record what was done.
   * VOLUME-UP held at power-on: the eMMC as a USB disk for the computer
   * (USB mass storage on the USB-C port), to write a new image to it. It
   * ends when the computer ejects the disk, when the USB cable goes or with
-@@ -339,6 +537,7 @@
+@@ -339,6 +542,7 @@
  
  int meson_board_late_init(void)
  {

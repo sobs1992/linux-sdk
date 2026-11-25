@@ -30,6 +30,7 @@ STUBS = r"""
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 typedef unsigned long ulong;
 typedef unsigned short u16;
 #define __iomem
@@ -58,7 +59,17 @@ static ulong blk_dread(struct blk_desc *b, ulong start, ulong n, void *buf)
 	memcpy(buf, sector, 512);
 	return 1;
 }
-static ulong hextoul(const char *p, char **e) { return strtoul(p, e, 16); }
+/* U-Boot's hextoul (lib/strto.c): hex digits only, no sign, no spaces; none: *e = p */
+static ulong hextoul(const char *p, char **e)
+{
+	ulong v = 0;
+	const char *s = p;
+
+	for (; isxdigit((unsigned char)*s); s++)
+		v = v * 16 + (isdigit((unsigned char)*s) ? *s - '0' : (tolower((unsigned char)*s) - 'a' + 10));
+	*e = (char *)s;
+	return v;
+}
 struct bd_info { int x; };
 static int fdt_find_or_add_subnode(void *blob, int parent, const char *name)
 {
@@ -132,6 +143,7 @@ def uboot(m, work, patch):
     subprocess.run(["gcc", "-std=gnu11", "-Wall", "-Wno-unused-function", "-o", exe, c], check=True)
 
     fdt_bad = []
+    last_props = {}
 
     def run(line, trained=None, lift=False):
         s = os.path.join(work, "sector")
@@ -147,8 +159,11 @@ def uboot(m, work, patch):
         lifted = [l for l in out if l.startswith("lift ")][0][5:].split()
         props = dict(l[len("prop 7 "):].split("=", 1) for l in out if l.startswith("prop 7 "))
         # what the kernel gets in /chosen is what was recorded
-        if props.get("ddr-tune", "").split() != done or props.get("ddr-tune-lift", "").split() != lifted:
+        if props.get("ddr-tune", "").split() != done or props.get("ddr-tune-lift", "").split() != lifted or \
+                props.get("ddr-tune-line") != line:
             fdt_bad.append((line, props, done, lifted))
+        last_props.clear()
+        last_props.update(props)
         regs = dict(l.split("=") for l in out if re.match(r"^[0-9a-f]{5}=", l))
         regs = {k: int(v) for k, v in regs.items()}
         return (done, regs, lifted) if lift else (done, regs)
@@ -200,8 +215,19 @@ def uboot(m, work, patch):
     done, regs = run("11668@+9 11668+1", nib([2, 2, 2, 2], db=1, u=1))
     m.cell("uboot twice: the second entry of a CSR refused", regs["11668"] == 11, str(regs["11668"]))
     done, regs, lifted = run("10068@-4", nib([0, 0, 0, 0]), True)
-    m.cell("uboot /chosen: ddr-tune and ddr-tune-lift as recorded, in every run so far", not fdt_bad and lifted,
-           str(fdt_bad[:2]))
+    m.cell("uboot /chosen: ddr-tune-line as read, ddr-tune and ddr-tune-lift as recorded, in every run so far",
+           not fdt_bad and lifted, str(fdt_bad[:2]))
+    done, regs = run("10268@+0", nib([6, 0, 6, 6]))
+    m.cell("uboot /chosen: a line that moves nothing is still in ddr-tune-line, no ddr-tune",
+           done == [] and last_props.get("ddr-tune-line") == "10268@+0" and "ddr-tune" not in last_props,
+           str(last_props))
+    eight = " ".join("1%d%d68@-14" % (db, 4 * u) for db in range(4) for u in range(2))
+    done, regs, lifted = run(eight, {0x10000 | db << 12 | r << 8 | 0x68: 0 for db in range(4) for r in range(8)}, True)
+    m.cell("uboot lift: all 8 nibbles lifted by 0x14: all 8 recorded in ddr-tune-lift",
+           sorted(lifted) == sorted("1%d%d8c+14" % (db, u) for db in range(4) for u in range(2)) and not fdt_bad,
+           "%s %s" % (lifted, fdt_bad[-1:]))
+    done, regs = run("11668+-3 11668@+2", nib([2, 2, 2, 2], db=1, u=1))
+    m.cell("uboot parse: '+-3' is no entry: the line ends there", regs["11668"] == 2 and done == [], str(done))
     done, regs, lifted = run("11668@+9 13468@-6", {**nib([2, 2, 2, 2], db=1, u=1), **nib([0, 2, 2, 2], db=3, u=1)}, True)
     m.cell("uboot two nibbles: 11668 = 11; DBYTE3 u1 lifted 4 (2-6 = -4): 0 6 6 6",
            regs["11668"] == 11 and [regs["13468"], regs["13568"], regs["13668"], regs["13768"]] == [0, 6, 6, 6] and

@@ -22,7 +22,8 @@
 #
 #   ddr-tune               the line kept, what U-Boot did at this start
 #                          (/chosen/ddr-tune: CSR:trained>now; the nibbles
-#                          lifted, /chosen/ddr-tune-lift) and the CSRs now
+#                          lifted, /chosen/ddr-tune-lift; the line it read,
+#                          /chosen/ddr-tune-line) and the CSRs now
 #   ddr-tune set 'LINE'    keep LINE (the part after "ddr_tune="), from the
 #                          next start on
 #   ddr-tune clear         nothing kept: BL2's training as it is
@@ -84,6 +85,9 @@ case $1 in
 	done=
 	[ -e /proc/device-tree/chosen/ddr-tune ] && done=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune)
 	echo "applied by U-Boot at this start: ${done:-nothing}"
+	read_line=
+	[ -e /proc/device-tree/chosen/ddr-tune-line ] && read_line=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-line)
+	echo "line U-Boot read at this start: ${read_line:-none}"
 	lift=
 	[ -e /proc/device-tree/chosen/ddr-tune-lift ] && lift=$(tr -d '\0' < /proc/device-tree/chosen/ddr-tune-lift)
 	[ -z "$lift" ] || echo "nibbles lifted: $lift"
