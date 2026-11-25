@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ODROID-GO Ultra</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <div class="brand">ODROID-GO Ultra <span id="unit"></span></div>
+  <nav>
+    <a href="#status">Состояние</a>
+    <a href="#install">Установка игр</a>
+    <a href="#games">Игры и журналы</a>
+    <a href="#reports">Отчёты</a>
+    <a href="#update">Обновление системы</a>
+  </nav>
+</header>
+<main>
+  <div id="banner" class="banner" hidden></div>
+
+  <section id="page-status" class="page">
+    <h1>Состояние приставки</h1>
+    <div id="status-body" class="cards"></div>
+  </section>
+
+  <section id="page-install" class="page" hidden>
+    <h1>Установка игр</h1>
+    <p class="hint">Перетащите сюда установщик игры из GOG (файл setup_….exe вместе со всеми
+      его файлами .bin) — файлы запишутся в папку <b>install</b> на карте игр. Потом нажмите
+      «Установить» у игры в списке ниже. Папку игры, уже установленной на компьютере, удобнее
+      скопировать через «USB-диск» на приставке.</p>
+    <div class="drop" data-place="install">
+      <p>Перетащите файлы сюда или</p>
+      <label class="button">выберите файлы<input type="file" multiple hidden></label>
+    </div>
+    <div class="uploads" data-place="install"></div>
+    <div id="install-job" class="job" hidden></div>
+    <div class="row-head">
+      <h2>В папке install</h2>
+      <button id="install-rescan" class="secondary">Проверить снова</button>
+    </div>
+    <div id="install-list"></div>
+    <div id="install-parts"></div>
+
+    <h2>Файлы Windows для игр (папка redist)</h2>
+    <p class="hint">Некоторым играм нужны файлы, которых нет в их установщике (список «Не хватает
+      файлов» у игры выше). Положите их сюда. Библиотеки DirectX приставка берёт сама из
+      установщиков GOG; если их там нет, скачайте с сайта Microsoft пакет
+      <a href="https://www.microsoft.com/en-us/download/details.aspx?id=8109" target="_blank"
+      rel="noopener">DirectX End-User Runtimes (June 2010)</a> (файл directx_Jun2010_redist.exe)
+      и перетащите его сюда как есть.</p>
+    <div class="drop" data-place="redist">
+      <p>Перетащите файлы сюда или</p>
+      <label class="button">выберите файлы<input type="file" multiple hidden></label>
+    </div>
+    <div class="uploads" data-place="redist"></div>
+    <div id="redist-list" class="small"></div>
+  </section>
+
+  <section id="page-games" class="page" hidden>
+    <h1>Игры и журналы</h1>
+    <p class="hint">Журнал 1 — последний запуск игры, 2 и 3 — запуски до него. Если игра не
+      запускается, скачайте журнал или отчёт и приложите к сообщению об ошибке.</p>
+    <div id="games-list"></div>
+    <div id="log-view" class="logview" hidden>
+      <div class="row-head"><h2 id="log-title"></h2>
+        <span><a id="log-download" class="button secondary" href="#">Скачать</a>
+        <button id="log-close" class="secondary">Закрыть</button></span></div>
+      <pre id="log-text"></pre>
+    </div>
+  </section>
+
+  <section id="page-reports" class="page" hidden>
+    <h1>Отчёты</h1>
+    <p class="hint">Отчёт — один текстовый файл о том, что стоит на приставке и что в ней
+      происходило (без паролей Wi-Fi и ключей). Его приложите к сообщению об ошибке.</p>
+    <div class="actions">
+      <button id="report-make">Сделать отчёт</button>
+      <span id="report-note" class="small"></span>
+    </div>
+    <div id="reports-list"></div>
+  </section>
+
+  <section id="page-update" class="page" hidden>
+    <h1>Обновление системы</h1>
+    <div id="update-state" class="cards"></div>
+    <p class="hint">Обновление ставится в запасную часть памяти, нынешняя система остаётся.
+      Если новая не запустится, приставка сама вернётся к нынешней.</p>
+    <div class="drop" data-place="updates">
+      <p>Перетащите сюда файл обновления (.upd) или</p>
+      <label class="button">выберите файл<input type="file" accept=".upd" hidden></label>
+    </div>
+    <div class="uploads" data-place="updates"></div>
+    <div id="update-job" class="job" hidden></div>
+    <h2>Найденные обновления</h2>
+    <div id="update-list"></div>
+    <div class="actions">
+      <button id="update-reboot" class="secondary">Перезагрузить приставку</button>
+      <button id="update-switch" class="secondary">Перейти на запасную систему</button>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# The device in a browser (/usr/sbin/bare-web): the computer on the USB
+# cable (S42usbnet, <net>.1) opens http://<net>.2/ to install games, read
+# their logs, take reports and update the system. Started in the
+# background: bare_app (S90) does not wait for Python. Its log is
+# /var/log/bare-web.log (256 KB at most, one older beside it).
+
+DAEMON=/usr/sbin/bare-web
+PIDFILE=/var/run/bare-web.pid
+
+start() {
+	start-stop-daemon -S -q -b -m -p $PIDFILE -x /usr/bin/python3 -- $DAEMON
+}
+
+stop() {
+	start-stop-daemon -K -q -p $PIDFILE
+	rc=$?
+	rm -f $PIDFILE
+	return $rc
+}
+
+case "$1" in
+start)
+	printf "Starting the web pages: "
+	start && echo "OK" || echo "FAIL"
+	;;
+stop)
+	printf "Stopping the web pages: "
+	stop && echo "OK" || echo "FAIL"
+	;;
+restart|reload)
+	stop
+	sleep 1
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
