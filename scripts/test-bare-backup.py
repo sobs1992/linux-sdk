@@ -405,6 +405,12 @@ class Test(unittest.TestCase):
         self.bb("auto", "pirates")
         self.assertIn(os.path.basename(hand), os.listdir(os.path.dirname(first)))
         self.assertEqual(len([n for n in os.listdir(os.path.dirname(first)) if n.endswith("-auto.zip")]), 3)
+        # the last copy deleted by hand: the next one is made though nothing changed
+        last = sorted(n for n in os.listdir(os.path.dirname(first)) if n.endswith("-auto.zip"))[-1]
+        self.assertEqual(self.bb("auto", "pirates").stdout.strip(), "unchanged")
+        os.unlink(os.path.join(os.path.dirname(first), last))
+        time.sleep(1.05)
+        self.assertTrue(self.bb("auto", "pirates").stdout.strip().endswith("-auto.zip"))
 
     def test_auto_nothing(self):
         shutil.rmtree(self.pir_saves)

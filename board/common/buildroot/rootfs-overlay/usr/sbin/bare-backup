@@ -6,7 +6,8 @@ stage 2), for the device in a browser (bare-web), for bare_app after each game, 
   bare-backup backup FOLDER|all [DIR]   a copy into DIR (else /games/backups on the
                                         card, /data/backups without it); prints its path
   bare-backup auto FOLDER               the same, only if the game's data changed since
-                                        its last automatic copy; the last 3 kept
+                                        its last automatic copy (or that copy is gone);
+                                        the last 3 kept
   bare-backup restore ZIP [--game FOLDER]   the copy's data back (the game must not run)
   bare-backup list [DIR]                the copies there (else on the card and in /data)
                                         and the games' data, JSON
@@ -843,7 +844,8 @@ def cmd_auto(args):
                 old = json.load(f)
         except (OSError, ValueError):
             pass
-        if old and old.get("sum") == now["sum"]:
+        # the same data, its copy still there: none
+        if old and old.get("sum") == now["sum"] and os.path.isfile(old.get("copy") or ""):
             print("unchanged")
             return
         path, _ = make_copy(state, [folder], None, auto=True)
