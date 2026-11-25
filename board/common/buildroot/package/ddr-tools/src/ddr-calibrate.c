@@ -1295,7 +1295,8 @@ int main(int argc, char **argv)
 
 				printf("%d.%d   %2d   %02x   %2d%s   %2d%s  %5.1f  %+5.1f%s\n", db, r, cpu_bit(db, r), cur,
 				       E[i], ce[i] ? "+" : " ", T[i], ct[i] ? "+" : " ", S[i], ok ? rel : 0.0,
-				       ok ? (abs(di) >= thresh ? "  <-" : "") : "  (edge not reached)");
+				       ok ? (abs(di) >= thresh ? "  <-" : read_at(c) ? "  <- (in the line)" : "") :
+				       "  (edge not reached)");
 				nl += snprintf(nib + nl, sizeof nib - nl, " r%d E%d%s T%d%s %+d", r, E[i], ce[i] ? "+" : "",
 					       T[i], ct[i] ? "+" : "", ok ? reli : 0);
 				/* not measured: where it stands */
@@ -1363,8 +1364,9 @@ int main(int argc, char **argv)
 		snprintf(tmp, sizeof tmp, "%s", line_read());
 		for (char *save = NULL, *t = strtok_r(tmp, " \n", &save); t; t = strtok_r(NULL, " \n", &save)) {
 			unsigned csr = strtoul(t, 0, 16);
-			int db = csr >> 12 & 15, r = csr >> 8 & 15, ours = (csr & 0xff) == 0x68 && r <= 7 &&
-			    strchr(dbytes, '0' + db);
+			/* lanes 0-7 of a nibble this run (or the interrupted one it goes on with) did */
+			int db = csr >> 12 & 15, r = csr >> 8 & 15, ours = (csr & 0xff) == 0x68 && r <= 7 && db <= 3 &&
+			    (strchr(dbytes, '0' + db) || done[db][r / 4]);
 
 			char key[8];
 

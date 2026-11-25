@@ -488,10 +488,15 @@ def cell_d_keeps_others(binary, d):
 
 
 def cell_resume_d(binary, d):
-    c = Cell("resume_d: -r -d 3 after a run killed in nibble 6: every CSR once in the line")
+    c = Cell("resume_d: -r -d 3 after a run killed in nibble 6: every CSR once, an old move of a nibble done "
+             "before stays decided (dropped)")
     b = base_board(d)
     r = run(binary, b, ["-p"])
-    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:] + " 10868+2"
+    line1 = [l for l in r.stdout.splitlines() if l.startswith("result ")][0][7:] + " 10868+2 10068+1"
+    b.retrain({})
+    b.uboot(line1)
+    rf = run(binary, b, ["-p"])     # a whole run on this start: what -r must come to
+    full = [l for l in rf.stdout.splitlines() if l.startswith("result ")][0][7:]
     b.retrain({})
     b.uboot(line1)
     r1 = run(binary, b, ["-p"], {"DDR_SIM_KILL_PROBE": "1100"})
@@ -502,7 +507,8 @@ def cell_resume_d(binary, d):
     r2 = run(binary, b, ["-p", "-r", "-d", "3"])
     got = [t[:5] for t in [l for l in r2.stdout.splitlines() if l.startswith("result ")][0][7:].split()]
     c.check(len(got) == len(set(got)), "twice: %s" % got)
-    c.check(sorted(got) == sorted(t[:5] for t in line1.split()), "line %s, read %s" % (got, line1))
+    c.check(sorted(got) == sorted(t[:5] for t in full.split()), "line %s, the whole run's %s" % (got, full))
+    c.check("10068" not in got, "the old move 10068+1 came back: %s" % got)
     return c
 
 
