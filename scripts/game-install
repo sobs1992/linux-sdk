@@ -995,7 +995,7 @@ def lock():
         _lock = open(LOCK, "a")
         fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        die("another game is being installed or removed", "busy", "")
+        die("another game is being installed or removed", "busy")	# its words for an older bare_app
     except OSError as e:
         die("%s: %s" % (LOCK, e))
 
