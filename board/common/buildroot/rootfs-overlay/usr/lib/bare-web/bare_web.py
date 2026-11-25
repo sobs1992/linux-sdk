@@ -45,6 +45,27 @@ password (Wi-Fi is later, with a PIN on the screen).
   POST /api/saves/info             {where, name}: its manifest (bare-backup info)
   POST /api/saves/restore          {where, name, game}: bare-backup restore;
                                    409 while the game runs
+  GET  /api/schema                 the keys of wine.ini and game.ini (schema.json),
+                                   bare_app_wine --actions and --defaults
+  GET  /api/recipe/FOLDER          the game's recipe: base (its ini), layer (the
+                                   player's changes, /games/recipes/FOLDER), the
+                                   effective ini (bare_app's merge), defaults,
+                                   the player's own buttons and options
+  PUT  /api/recipe/FOLDER/layer    {sections: {...}} or ini text: the layer
+                                   written with only what differs from the
+                                   game's ini, then FIFO "reload FOLDER"
+  DELETE /api/recipe/FOLDER/layer  the layer removed, "reload"
+  POST /api/recipe/FOLDER/adopt-controls  the player's buttons (controls.<key>)
+                                   into the layer's [keys] and [labels], then
+                                   dropped from bare_app.conf (import-settings)
+  GET  /api/state                  state.json of bare_app: the game running, its
+                                   frames a second, CPU, GPU, memory
+  POST /api/game/FOLDER/launch|quit|options   FIFO launch, quit-game, options
+                                   (launch: 409 while another game runs)
+  GET  /api/shot.png[?w=W]         the screen now (SIGUSR1, bare_app's PPM)
+  POST /api/pad                    {button, down}: FIFO press/release
+  POST /api/stick                  {stick, x, y, ms}: the stick held there
+  GET  /api/logs/GAME/live         1.log as it grows (text/event-stream)
   GET  /api/job                    the job running or the last one
   GET  /api/job/ID/events          its lines (text/event-stream)
 
@@ -61,12 +82,18 @@ log), BARE_WEB_POWER (/sys/class/power_supply), BARE_WEB_RELEASE, the
 programs BARE_WEB_GAME_INSTALL, BARE_WEB_BARE_REPORT, BARE_WEB_SYSTEM_UPDATE,
 BARE_WEB_AB_STATE, BARE_WEB_USB_DISK, BARE_WEB_UNIT, BARE_WEB_REBOOT,
 BARE_WEB_UPDATE_LOCK, BARE_WEB_BARE_BACKUP, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
-BARE_WEB_BIND.
+BARE_WEB_BIND; of bare_app BARE_WEB_RUN (games.json, state.json, ini/), BARE_WEB_CONF,
+BARE_WEB_CTL (its FIFO), BARE_WEB_WINE (bare_app_wine), BARE_WEB_SHOT, BARE_WEB_NATIVE_DIRS,
+BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks). In a test a place it does not name is
+none: never the device's own (hook()).
 """
 import http.server
+import io
 import json
 import os
 import re
+import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -717,6 +744,894 @@ def update_state():
 
 # ---- HTTP -------------------------------------------------------------------
 
+# ---- bare_app: games.json, state.json, its FIFO (stages 4 and 5) ----------------
+
+def hook(name, default):
+    """a place a test names; in a test a place it does not name is none
+    (never the device's own)"""
+    v = E(name)
+    if v is not None:
+        return v
+    return None if TEST else default
+
+
+RUN = hook("BARE_WEB_RUN", "/run/bare_app")
+CONF = hook("BARE_WEB_CONF", "/etc/bare_app.conf")
+CTL = hook("BARE_WEB_CTL", "/tmp/bare_app.ctl")
+WINE = hook("BARE_WEB_WINE", "/usr/bin/bare_app_wine")
+SHOT = E("BARE_WEB_SHOT")	# else what bare_app's environment says (shot_path())
+SYS_INPUT = hook("BARE_WEB_SYS_INPUT", "/sys/class/input")
+DEV_INPUT = hook("BARE_WEB_DEV_INPUT", "/dev/input")
+NATIVE_DIRS = (hook("BARE_WEB_NATIVE_DIRS", "/games /usr/share/bare_app/games") or "").split()
+RECIPES = os.path.join(GAMES, "recipes")
+SCHEMA = os.path.join(STATIC, "schema.json")
+STATE_STALE = 3		# s: state.json older than this is no game running
+NO_BARE_APP = "bare_app не запущен: дождитесь главного экрана приставки и повторите."
+NO_CTL = "bare_app не принимает команды (он не запущен?)."
+# the buttons a [keys] names (gp_names.c) and the FIFO presses
+BUTTONS = ("up", "down", "left", "right", "a", "b", "x", "y", "l1", "r1", "l2", "r2",
+           "select", "start", "f1", "f2", "f3", "f4", "f5", "f6")
+DIRS = ("up", "down", "left", "right")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def games_json():
+    """games.json of the bare_app that runs, None if it does not"""
+    if not RUN:
+        return None
+    try:
+        with open(os.path.join(RUN, "games.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    pid = st.get("pid") if isinstance(st, dict) else None
+    if not isinstance(pid, int) or pid <= 0 or not alive(pid):
+        return None
+    if not TEST and (read("/proc/%d/comm" % pid) or "").strip() != "bare_app":
+        return None
+    return st
+
+
+def game_entry(folder, st=None):
+    """bare_app's entry of the game in folder (games.json); without bare_app
+    the card's game of that directory (no key then)"""
+    st = st if st is not None else games_json()
+    for g in (st or {}).get("games") or []:
+        if isinstance(g, dict) and g.get("folder") == folder:
+            return g
+    if st is None and card_mounted():
+        d = os.path.join(GAMES, folder)
+        if os.path.isfile(os.path.join(d, "wine.ini")):
+            return {"folder": folder, "kind": "wine", "dir": d, "name": ini_name(os.path.join(d, "wine.ini")) or folder}
+        if os.path.isfile(os.path.join(d, "game.ini")):
+            return {"folder": folder, "kind": "native", "dir": d, "name": ini_name(os.path.join(d, "game.ini")) or folder}
+    return None
+
+
+def ctl(line):
+    """a command to bare_app's FIFO; False if nobody reads it"""
+    if not CTL:
+        return False
+    try:
+        fd = os.open(CTL, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        os.write(fd, (line + "\n").encode())
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    log.info("ctl: %s", line)
+    return True
+
+
+def ctl_ready():
+    """bare_app reads its FIFO (nothing written)"""
+    if not CTL:
+        return False
+    try:
+        os.close(os.open(CTL, os.O_WRONLY | os.O_NONBLOCK))
+    except OSError:
+        return False
+    return True
+
+
+def game_state():
+    """state.json (bare_app, ctl_state.c) while it is renewed; else no game"""
+    p = os.path.join(RUN, "state.json") if RUN else None
+    try:
+        st = os.stat(p)
+        with open(p, encoding="utf-8") as f:
+            s = json.load(f)
+    except (OSError, TypeError, ValueError):
+        return {"running": None, "stale": True}
+    if not isinstance(s, dict) or time.time() - st.st_mtime > STATE_STALE:
+        return {"running": None, "stale": True}
+    s["stale"] = False
+    return s
+
+
+def running_game(st=None):
+    """the folder of the game running now, None: none"""
+    s = game_state()
+    if s.get("running"):
+        return s["running"]
+    st = st if st is not None else games_json()
+    r = (st or {}).get("running")
+    return r.get("folder") if isinstance(r, dict) else None
+
+
+def conf_values():
+    """bare_app.conf's name=value lines"""
+    out = {}
+    for line in (read(CONF, 1 << 20) or "").splitlines() if CONF else []:
+        k, eq, v = line.partition("=")
+        if eq and k.strip() and not line.lstrip().startswith("#"):
+            out[k.strip()] = v.strip()
+    return out
+
+
+REMAP_OTHER = ("lx", "ly", "rx", "ry", "lsens", "rsens", "gyro", "gyrosens")
+
+
+def remap_pairs(text):
+    """controls.<key> of bare_app.conf (core/remap.h) as (name, value) pairs"""
+    out = []
+    for p in (text or "").split(","):
+        k, eq, v = p.partition("=")
+        if eq and k.strip():
+            out.append((k.strip(), v.strip()))
+    return out
+
+
+# ---- the games' ini and the recipes' layers (ini_layer.h) -----------------------
+
+LISTS = ("reg", "modes", "saves", "needs")	# INI_LAYER_LISTS
+KEY_RE = re.compile(r"^[A-Za-z0-9_.+\-]{1,63}$")
+SECTION_RE = re.compile(r"^[A-Za-z0-9_.\-]{0,63}$")
+LAYER_MAX = 64 << 10
+
+
+class IniError(Exception):
+    pass
+
+
+def ini_parse(text, strict=False):
+    """(section, key, value) of ini text as bare_app's ini.c reads it; strict:
+    a line that is not one of a layer (ini_layer_check()) raises IniError"""
+    out = []
+    sec = ""
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if strict and (any(ord(c) < 32 and c != "\t" for c in raw) or len(raw.encode()) > 1000):
+            raise IniError("строка %d: управляющие символы или длиннее 1000 байт" % n)
+        if not line or line[0] in ";#":
+            continue
+        if line[0] == "[":
+            e = line.find("]")
+            if strict and (e < 0 or line[e + 1:].strip()):
+                raise IniError("строка %d: секция без «]»" % n)
+            sec = (line[1:e] if e > 0 else line[1:]).strip()[:63]
+            continue
+        k, eq, v = line.partition("=")
+        if not eq:
+            if strict:
+                raise IniError("строка %d: нет «=»" % n)
+            continue
+        v = v.strip()
+        m = re.search(r"\s[;#]", v)
+        if m:
+            v = v[:m.start()].rstrip()
+        if k.strip():
+            out.append((sec, k.strip(), v))
+    return out
+
+
+def is_list(sec, key):
+    return sec == "" and key.lower() in LISTS
+
+
+def ini_merge(base, layer):
+    """ini_layer.c merge(): the layer's entries over base's"""
+    out = list(base)
+    begun = set()
+
+    def same(e, s, k):
+        return e[0].lower() == s.lower() and e[1].lower() == k.lower()
+    for s, k, v in layer:
+        if is_list(s, k):
+            if k.lower() not in begun:
+                begun.add(k.lower())
+                out = [e for e in out if not same(e, s, k)]
+            if v:
+                out.append((s, k, v))
+            continue
+        idx = [i for i, e in enumerate(out) if same(e, s, k)]
+        if v and idx:
+            out[idx[0]] = (out[idx[0]][0], out[idx[0]][1], v)
+            drop = set(idx[1:])
+        else:
+            drop = set(idx)
+        out = [e for i, e in enumerate(out) if i not in drop]
+        if v and not idx:
+            out.append((s, k, v))
+    return out
+
+
+def ini_sections(entries):
+    """{section: {key: value}} (lower case; a list key: [values]; else the
+    last value, as the readers take it)"""
+    out = {}
+    for s, k, v in entries:
+        s, k = s.lower(), k.lower()
+        d = out.setdefault(s, {})
+        if is_list(s, k):
+            if v:
+                d.setdefault(k, []).append(v)
+            else:
+                d.setdefault(k, [])
+        else:
+            d[k] = v
+    return out
+
+
+def sections_entries(sections):
+    """{section: {key: value}} back to entries (a list: a line each)"""
+    out = []
+    for s, keys in sections.items():
+        for k, v in keys.items():
+            if isinstance(v, list):
+                out += [(s, k, x) for x in v] or [(s, k, "")]
+            else:
+                out.append((s, k, v))
+    return out
+
+
+def layer_text(entries, folder, base_path):
+    lines = ["; the player's changes of %s's recipe, only what differs from %s" % (folder, base_path),
+             "; (bare-web %s; ini_layer.h: a key replaces the game's, \"key =\" drops it)"
+             % time.strftime("%Y-%m-%d %H:%M")]
+    top = [e for e in entries if not e[0]]
+    lines += ["%s = %s" % (k, v) if v else "%s =" % k for _, k, v in top]
+    done = []
+    for s, _, _ in entries:
+        if s and s not in done:
+            done.append(s)
+    for s in done:
+        lines += ["", "[%s]" % s]
+        lines += ["%s = %s" % (k, v) if v else "%s =" % k for es, k, v in entries if es == s]
+    return "\n".join(lines) + "\n"
+
+
+def layer_diff(desired, base):
+    """what of desired ({section: {key: value}}, the layer's values) differs
+    from base: a value other than the game's, a list other than its (all of
+    it), "" where the game has the key (dropped); the same as the game's: no
+    line"""
+    out = []
+    for s, keys in desired.items():
+        for k, v in keys.items():
+            have = base.get(s, {}).get(k)
+            if is_list(s, k):
+                want = [str(x).strip() for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+                have = have or []
+                if want == have:
+                    continue
+                out += [(s, k, x) for x in want] if want else [(s, k, "")]
+            else:
+                v = str(v).strip()
+                if v == "":
+                    if have:
+                        out.append((s, k, ""))
+                elif v != have:
+                    out.append((s, k, v))
+    return out
+
+
+# ---- the schema (/usr/share/bare-web/schema.json) and bare_app_wine's tables -----
+
+_SCHEMA = None
+_WINE = {"actions": None, "defaults": None}
+_WINE_LOCK = threading.Lock()
+
+
+def schema():
+    global _SCHEMA
+    if _SCHEMA is None:
+        try:
+            with open(SCHEMA, encoding="utf-8") as f:
+                _SCHEMA = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning("%s: %s", SCHEMA, e)
+            _SCHEMA = {"wine": [], "game": [], "controls": [], "env_presets": [], "lists": list(LISTS)}
+    return _SCHEMA
+
+
+def schema_keys(kind):
+    return {(e["section"], e["key"]): e for e in schema().get("game" if kind == "native" else "wine", [])}
+
+
+def wine_tables():
+    """bare_app_wine --actions and --defaults, read once"""
+    with _WINE_LOCK:
+        if _WINE["actions"] is None and WINE:
+            rc, out, err = run([WINE, "--actions"], timeout=10)
+            acts = []
+            for line in out.splitlines() if rc == 0 else []:
+                f = line.split("\t")
+                if len(f) >= 2:
+                    acts.append({"group": f[0], "name": f[1], "takes": f[2].split(",") if len(f) > 2 else None})
+            if rc:
+                log.warning("%s --actions: %s", WINE, (err or "exit %d" % rc).strip())
+            _WINE["actions"] = acts
+            rc, out, err = run([WINE, "--defaults"], timeout=10)
+            _WINE["defaults"] = ini_sections(ini_parse(out)) if rc == 0 else {}
+        return _WINE["actions"] or [], _WINE["defaults"] or {}
+
+
+def defaults_of(kind):
+    """the values a key has where the ini says nothing: bare_app_wine's for
+    a Windows game, the schema's for bare_app's own keys"""
+    out = {}
+    for (s, k), e in schema_keys(kind).items():
+        if "default" in e:
+            out.setdefault(s, {})[k] = [e["default"]] if e.get("repeat") else e["default"]
+    if kind == "wine":
+        for s, keys in wine_tables()[1].items():
+            out.setdefault(s, {}).update(keys)
+    return out
+
+
+MODE_RE = re.compile(r"^(\d{3,4})x(\d{3,4})$")
+
+
+def value_problem(kind, s, k, v):
+    """why value v of [s] k is not one the readers take (None: it is), and
+    a warning (an unknown key)"""
+    if any(ord(c) < 32 for c in v) or len(v.encode()) > 900:
+        return "%s: управляющие символы или слишком длинно" % k, None
+    if v[:1] in (";", "#") or re.search(r"\s[;#]", v):
+        return "%s: «;» или «#» после пробела читается как комментарий" % k, None
+    e = schema_keys(kind).get((s, k))
+    if e is None:
+        return None, "%s%s: ключа нет в схеме, записан как текст" % ("[%s] " % s if s else "", k)
+    if v == "":
+        return None, None
+    t = e["type"]
+    if t == "enum" and v not in e["values"]:
+        return "%s: одно из %s" % (k, ", ".join(e["values"])), None
+    if t in ("int", "float"):
+        if v in e.get("also", []):
+            return None, None
+        try:
+            n = int(v) if t == "int" else float(v)
+        except ValueError:
+            return "%s: нужно %s" % (k, "целое число" if t == "int" else "число"), None
+        if n < e.get("min", n) or n > e.get("max", n):
+            return "%s: от %s до %s" % (k, e["min"], e["max"]), None
+    if t == "bool" and v.lower() not in ("yes", "no", "true", "false", "1", "0"):
+        return "%s: yes или no" % k, None
+    if t == "text" and e.get("pattern") and not re.match(e["pattern"], v):
+        return "%s: не в том виде (пример: %s)" % (k, e.get("example", "")), None
+    if t == "text" and k == "mode":
+        m = MODE_RE.match(v)
+        if not (320 <= int(m.group(1)) <= 4096 and 200 <= int(m.group(2)) <= 4096):
+            return "mode: от 320x200 до 4096x4096", None
+    if t == "list":
+        if e.get("item_pattern") and not re.match(e["item_pattern"], v):
+            return "%s: не в том виде: %s" % (k, v), None
+        if e.get("item") == "reg":
+            key, eq, _ = v.partition("=")
+            if not eq or "\\" not in key or key.endswith("\\") or key.startswith("\\"):
+                return "reg: нужно KEY\\NAME=DATA: %s" % v, None
+    if t in ("keys", "stick") and kind == "wine":
+        acts = wine_tables()[0]
+        if not acts:
+            return None, None	# no table: bare_app_wine says it in the log
+        if t == "stick":
+            ok = [a["name"] for a in acts if a["group"] == "stick" and k in (a["takes"] or [])]
+            if v not in ok:
+                return "%s: одно из %s" % (k, ", ".join(ok)), None
+            return None, None
+        single = {a["name"] for a in acts if a["group"] in ("mouse", "pad", "special")}
+        keys = {a["name"] for a in acts if a["group"] == "key"}
+        if v in single:
+            return None, None
+        parts = action_keys(v)
+        if parts is None or not 0 < len(parts) <= 4 or not all(p.lower() in keys for p in parts):
+            return "%s: не клавиша и не действие: %s" % (k, v), None
+    return None, None
+
+
+def action_keys(v):
+    """the keys of an action joined by "+" as bare_app_wine's parse_action()
+    splits them (kp+ is a key), None if it would not"""
+    out, i = [], 0
+    while i < len(v):
+        j = v.find("+", i)
+        j = len(v) if j < 0 else j
+        if j - i == 2 and v[i:j] == "kp" and j < len(v):
+            j += 1
+        if j < len(v) and v[j] != "+":
+            return None
+        if j > i:
+            out.append(v[i:j])
+        i = j + 1
+    return out
+
+
+def layer_check(kind, desired):
+    """the desired layer's problems (400) and warnings"""
+    errors, warnings = [], []
+    if not isinstance(desired, dict):
+        return ["нет секций"], []
+    for s, keys in desired.items():
+        if not isinstance(s, str) or not SECTION_RE.match(s) or not isinstance(keys, dict):
+            errors.append("секция не подходит: %r" % (s,))
+            continue
+        for k, v in keys.items():
+            if not isinstance(k, str) or not KEY_RE.match(k):
+                errors.append("ключ не подходит: %r" % (k,))
+                continue
+            vals = v if isinstance(v, list) else [v]
+            if isinstance(v, list) and not is_list(s, k):
+                errors.append("%s: одно значение, не список" % k)
+                continue
+            for x in vals:
+                if not isinstance(x, (str, int, float)) or isinstance(x, bool):
+                    errors.append("%s: значение не текст" % k)
+                    continue
+                e, w = value_problem(kind, s, k, str(x).strip())
+                if e:
+                    errors.append(e)
+                if w and w not in warnings:
+                    warnings.append(w)
+    return errors, warnings
+
+
+def lower_sections(d):
+    out = {}
+    for s, keys in (d or {}).items():
+        if isinstance(s, str) and isinstance(keys, dict):
+            t = out.setdefault(s.strip().lower(), {})
+            for k, v in keys.items():
+                t[k.strip().lower() if isinstance(k, str) else k] = v
+        else:
+            out[s] = keys
+    return out
+
+
+class Recipe:
+    """a game's ini (its recipe), the layer of the player's changes, the
+    effective ini bare_app merged"""
+
+    def __init__(self, g):
+        self.folder = g["folder"]
+        self.g = g
+        kind = g.get("kind")
+        self.kind = kind if kind in ("wine", "native") else "built-in"
+        self.ini = {"wine": "wine.ini", "native": "game.ini"}.get(self.kind)
+        self.base_path = None
+        if self.kind == "wine" and g.get("dir"):
+            self.base_path = os.path.join(g["dir"], "wine.ini")
+        elif self.kind == "native":
+            cands = [os.path.join(g["dir"], "game.ini")] if g.get("dir") else []
+            for d in NATIVE_DIRS:
+                cands += [os.path.join(d, self.folder + ".ini"), os.path.join(d, self.folder, "game.ini")]
+            self.base_path = next((c for c in cands if os.path.isfile(c)), None)
+        self.layer_dir = os.path.join(RECIPES, self.folder)
+        self.layer_path = os.path.join(self.layer_dir, self.ini) if self.ini else None
+        name = self.folder + (".ini" if self.kind == "wine" else ".game.ini")
+        self.eff_path = os.path.join(RUN, "ini", name) if RUN and self.ini else None
+
+    def editable(self):
+        return bool(self.ini and self.base_path and os.path.isfile(self.base_path))
+
+    def base_entries(self):
+        return ini_parse(read(self.base_path, 1 << 20) or "") if self.base_path else []
+
+    def layer_raw(self):
+        if not self.layer_path or os.path.islink(self.layer_path):
+            return None
+        return read(self.layer_path, LAYER_MAX + 1)
+
+    def effective(self):
+        """the effective ini: bare_app's file when it is of this layer, else
+        merged here by the same rules; without a layer the game's"""
+        base = self.base_entries()
+        raw = self.layer_raw()
+        if raw is None:
+            return base, "base"
+        try:
+            lm = os.stat(self.layer_path).st_mtime_ns
+            em = os.stat(self.eff_path).st_mtime_ns if self.eff_path else -1
+        except OSError:
+            em, lm = -1, 0
+        if em >= lm:
+            return ini_parse(read(self.eff_path, 1 << 20) or ""), "bare_app"
+        try:
+            return ini_merge(base, ini_parse(raw, strict=True)), "server"
+        except IniError:
+            return base, "base"
+
+    def describe(self, st):
+        out = {"folder": self.folder, "name": self.g.get("name") or self.folder, "kind": self.kind,
+               "ini": self.ini, "editable": self.editable(), "base_path": self.base_path,
+               "layer_path": self.layer_path, "key": self.g.get("key"),
+               "layer_state": self.g.get("layer"), "layer_error": self.g.get("layer_error"),
+               "running": running_game(st) == self.folder}
+        if not out["editable"]:
+            return out
+        raw = self.layer_raw()
+        layer, err = None, None
+        if raw is not None:
+            try:
+                layer = ini_sections(ini_parse(raw, strict=True))
+            except IniError as e:
+                err = str(e)
+        eff, src = self.effective()
+        out.update(base=ini_sections(self.base_entries()), layer=layer, layer_text=raw,
+                   layer_problem=err, effective=ini_sections(eff), effective_source=src,
+                   defaults=defaults_of(self.kind))
+        key = self.g.get("key")
+        conf = conf_values() if key else {}
+        ctrl = conf.get("controls." + key) if key else None
+        out["player_controls"] = {"key": "controls." + key if key else None, "value": ctrl,
+                                  "pairs": [{"from": a, "to": b} for a, b in remap_pairs(ctrl)]}
+        out["player_options"] = {"key": "options." + key if key else None,
+                                 "value": conf.get("options." + key) if key else None}
+        return out
+
+
+RECIPE_LOCK = threading.Lock()	# one change of a layer at a time
+
+
+class Refused(Exception):
+    def __init__(self, status, text):
+        super().__init__(text)
+        self.status = status
+
+
+def recipe_of(folder, st=None):
+    if not isinstance(folder, str) or not safe_name(folder):
+        raise Refused(400, "Имя игры не подходит: %s" % folder)
+    g = game_entry(folder, st)
+    if not g:
+        raise Refused(404, "Такой игры нет: %s" % folder)
+    r = Recipe(g)
+    if not r.editable():
+        raise Refused(400, "У этой игры нет рецепта (wine.ini или game.ini), который можно править.")
+    return r
+
+
+def wait_effective(r, had_layer, timeout=2.0):
+    """after "reload": until bare_app has written (or removed) the effective
+    ini of the layer as it is now"""
+    if not r.eff_path:
+        return
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            lm = os.stat(r.layer_path).st_mtime_ns
+        except OSError:
+            lm = None
+        try:
+            em = os.stat(r.eff_path).st_mtime_ns
+        except OSError:
+            em = None
+        if (lm is None and em is None) or (lm is not None and em is not None and em >= lm):
+            return
+        time.sleep(0.05)
+
+
+def put_layer(r, entries):
+    """the layer's file: entries (only what differs) written, none: the file
+    removed; then bare_app reads the game's ini again. Returns whether
+    bare_app was told"""
+    why = card_problem()
+    if why:
+        raise Refused(503, why)
+    if os.path.islink(r.layer_dir) or os.path.islink(RECIPES) or \
+            (os.path.lexists(r.layer_path) and not os.path.isfile(r.layer_path)) or os.path.islink(r.layer_path):
+        raise Refused(409, "Папка правок %s — ссылка или не файл: не трогаю." % r.layer_dir)
+    text = layer_text(entries, r.folder, r.base_path) if entries else None
+    if text and len(text.encode()) > LAYER_MAX:
+        raise Refused(413, "Правок слишком много (больше 64 КБ).")
+    try:
+        with CardWriting():
+            if text:
+                os.makedirs(r.layer_dir, exist_ok=True)
+                tmp = os.path.join(r.layer_dir, ".%s.web" % r.ini)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, r.layer_path)
+            else:
+                if os.path.lexists(r.layer_path):
+                    os.remove(r.layer_path)
+                for d in (r.layer_dir, RECIPES):	# only if empty: never anything else
+                    try:
+                        os.rmdir(d)
+                    except OSError:
+                        break
+    except (CardError, OSError) as e:
+        raise Refused(500, "Правки не записаны: %s" % e)
+    log.info("layer %s: %s", r.folder, "%d lines" % len(entries) if text else "removed")
+    told = ctl("reload " + r.folder)
+    if told:
+        wait_effective(r, bool(text))
+    return told
+
+
+def adopt_controls(r, st):
+    """the player's own buttons (controls.<key>) written into the layer's
+    [keys] and [labels]: device button A that is B for the game does what B
+    does (its action and its label); then bare_app drops them from the
+    player's settings (import-settings). What a [keys] cannot say (an axis
+    inverted, a stick's sensitivity, the gyro, the D-pad's directions while
+    it is not arrows) stays the player's."""
+    key = r.g.get("key")
+    if not key or not st:
+        raise Refused(503, NO_BARE_APP)
+    if r.kind != "wine":
+        raise Refused(400, "Перенос кнопок в рецепт есть только у игр Windows.")
+    if running_game(st) == r.folder:
+        raise Refused(409, "Игра идёт: перестановка кнопок игрока сейчас действует. Выйдите из игры.")
+    conf = conf_values()
+    ctrl = conf.get("controls." + key)
+    if not ctrl:
+        raise Refused(409, "У игрока нет своей перестановки кнопок этой игры.")
+    if not RUN or not ctl_ready():
+        raise Refused(503, NO_CTL)
+    eff = ini_sections(r.effective()[0])
+    keys = dict(defaults_of("wine").get("keys", {}))
+    keys.update(eff.get("keys", {}))
+    arrows = keys.get("dpad", "arrows") not in ("mouse", "scroll", "pad")
+    raw = r.layer_raw()
+    try:
+        layer = ini_sections(ini_parse(raw, strict=True)) if raw is not None else {}
+    except IniError:
+        raise Refused(409, "Правки этой игры не читаются: сначала сбросьте их.")
+    keep, moved = [], []
+    want = {"keys": {}, "labels": {}, "labels.ru": {}}
+    for a, b in remap_pairs(ctrl):
+        if a in REMAP_OTHER or a not in BUTTONS or (b != "-" and b not in BUTTONS) or \
+                (not arrows and (a in DIRS or b in DIRS)):
+            keep.append((a, b))
+            continue
+        want["keys"][a] = "none" if b == "-" else keys.get(b, "none")
+        for s in ("labels", "labels.ru"):
+            want[s][a] = "" if b == "-" else eff.get(s, {}).get(b, "")
+        moved.append((a, b))
+    if not moved:
+        raise Refused(409, "В перестановке игрока нет кнопок, которые можно перенести в [keys].")
+    for s, kv in want.items():
+        layer.setdefault(s, {}).update(kv)
+    base = ini_sections(r.base_entries())
+    entries = layer_diff(layer, base)
+    rest = ",".join("%s=%s" % p for p in keep)
+    imp = os.path.join(RUN, "import-web-%s.ini" % r.folder)
+    lines = ["; bare-web: the player's buttons of %s moved into its recipe" % r.folder, "game=" + key]
+    if rest:
+        lines.append("controls.%s=%s" % (key, rest))
+    if conf.get("options." + key):
+        lines.append("options.%s=%s" % (key, conf["options." + key]))
+    with RECIPE_LOCK:
+        put_layer(r, entries)
+        try:
+            with open(imp + ".tmp", "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(imp + ".tmp", imp)
+        except OSError as e:
+            restore_layer(r, raw)
+            raise Refused(500, "Файл для bare_app не записан: %s" % e)
+        if not ctl("import-settings " + imp):
+            restore_layer(r, raw)
+            os.remove(imp)
+            raise Refused(503, NO_CTL)
+        # bare_app keeps the settings in its file a second later
+        done = False
+        end = time.monotonic() + 4
+        while time.monotonic() < end:
+            now = conf_values().get("controls." + key)
+            if set(remap_pairs(now)) == set(keep):
+                done = True
+                break
+            time.sleep(0.1)
+        try:
+            os.remove(imp)
+        except OSError:
+            pass
+    log.info("adopt %s: %s moved, %s kept", r.folder, moved, keep)
+    return {"moved": [{"from": a, "to": b} for a, b in moved], "kept": [{"from": a, "to": b} for a, b in keep],
+            "settings_done": done}
+
+
+def restore_layer(r, raw):
+    """the layer as it was (raw None: none)"""
+    try:
+        if raw is None:
+            put_layer(r, [])
+        else:
+            put_layer(r, ini_parse(raw))
+    except Refused as e:
+        log.warning("layer %s not put back: %s", r.folder, e)
+
+
+# ---- the screen, the buttons, the sticks (the check of a game) -------------------
+
+SHOT_LOCK = threading.Lock()
+SHOT_WAIT = 2.0
+
+
+def shot_path(pid):
+    """where bare_app writes its screenshot: $BARE_APP_SHOT of its own
+    environment, else its default (view.c snapshot())"""
+    if SHOT:
+        return SHOT
+    if TEST:
+        return None
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as f:
+            for v in f.read().split(b"\0"):
+                if v.startswith(b"BARE_APP_SHOT=") and len(v) > 14:
+                    return v[14:].decode()
+    except OSError:
+        pass
+    return "/tmp/bare_app.ppm"
+
+
+def take_shot(width):
+    """the screen now (bare_app's layers, SIGUSR1) as PNG bytes; width: at
+    most that wide"""
+    st = games_json()
+    if not st:
+        raise Refused(503, NO_BARE_APP)
+    path = shot_path(st["pid"])
+    if not path:
+        raise Refused(503, "Снимок экрана не настроен.")
+    with SHOT_LOCK:
+        try:
+            os.remove(path)	# what comes now is the new one (written whole, renamed)
+        except OSError:
+            pass
+        os.kill(st["pid"], signal.SIGUSR1)
+        end = time.monotonic() + SHOT_WAIT
+        data = None
+        while time.monotonic() < end:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                break
+            except OSError:
+                time.sleep(0.03)
+        if data is None:
+            raise Refused(504, "bare_app не дал снимок экрана за %d с." % SHOT_WAIT)
+        try:
+            os.remove(path)	# 1,2 MB of /run otherwise
+        except OSError:
+            pass
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        if width and width < im.width:
+            im = im.resize((width, max(1, round(im.height * width / im.width))), Image.BILINEAR)
+        out = io.BytesIO()
+        im.save(out, "PNG", compress_level=1)
+    except Exception as e:	# a broken file, no Pillow
+        raise Refused(500, "Снимок не читается: %s" % e)
+    return out.getvalue()
+
+
+PRESSED = {}	# button: the press's number (released on its own after PRESS_MAX)
+PRESS_LOCK = threading.Lock()
+PRESS_MAX = 10.0
+PRESS_SEQ = [0]
+
+
+def pad_button(name, down):
+    if name not in BUTTONS:
+        raise Refused(400, "Нет такой кнопки: %s" % name)
+    if not ctl(("press " if down else "release ") + name):
+        raise Refused(503, NO_CTL)
+    with PRESS_LOCK:
+        if not down:
+            PRESSED.pop(name, None)
+            return
+        PRESS_SEQ[0] += 1
+        seq = PRESSED[name] = PRESS_SEQ[0]
+
+    def later():
+        with PRESS_LOCK:
+            if PRESSED.get(name) != seq:
+                return
+            PRESSED.pop(name, None)
+        ctl("release " + name)	# the page let go of it without saying so
+    t = threading.Timer(PRESS_MAX, later)
+    t.daemon = True
+    t.start()
+
+
+def release_all():
+    with PRESS_LOCK:
+        names = list(PRESSED)
+        PRESSED.clear()
+    for n in names:
+        ctl("release " + n)
+
+
+EVENT = struct.Struct("qqHHi")	# struct input_event (64-bit time)
+EV_SYN, EV_ABS = 0, 3
+
+
+def _ioc_read(nr, size):
+    return (2 << 30) | (size << 16) | (ord("E") << 8) | nr
+
+
+def stick_device(which):
+    """the evdev node of the left or right stick (adc-joystick-left, -right)"""
+    want = "adc-joystick-" + ("left" if which == "stick" else "right")
+    if not SYS_INPUT or not DEV_INPUT:
+        return None
+    try:
+        names = sorted(os.listdir(SYS_INPUT))
+    except OSError:
+        return None
+    for e in names:
+        if e.startswith("event") and (read(os.path.join(SYS_INPUT, e, "device", "name")) or "").strip() == want:
+            return os.path.join(DEV_INPUT, e)
+    return None
+
+
+def stick_hold(which, x, y, ms):
+    """the stick held at x, y (-1..1, up and left negative) for ms, as
+    scripts/ogu-hold.c does: the values written every 2 ms (the polled
+    stick reports its real position every 10 ms)"""
+    import fcntl
+    dev = stick_device(which)
+    if not dev:
+        raise Refused(503, "Стика %s нет." % which)
+    try:
+        fd = os.open(dev, os.O_WRONLY)
+    except OSError as e:
+        raise Refused(503, "Стик не открывается: %s" % e)
+    try:
+        bits = bytearray(8)
+        fcntl.ioctl(fd, _ioc_read(0x20 + EV_ABS, len(bits)), bits)
+        codes = [c for c in range(64) if bits[c // 8] >> (c % 8) & 1][:2]
+        if len(codes) < 2:
+            raise Refused(503, "У стика нет двух осей.")
+        axes = []
+        for c, v in zip(codes, (x, y)):
+            info = bytearray(24)
+            fcntl.ioctl(fd, _ioc_read(0x40 + c, 24), info)
+            _, lo, hi = struct.unpack("iii", bytes(info[:12]))
+            axes.append((c, int((lo + hi) / 2 + max(-1.0, min(1.0, v)) * (hi - lo) / 2), (lo + hi) // 2))
+        end = time.monotonic() + ms / 1000
+        while time.monotonic() < end:
+            os.write(fd, b"".join(EVENT.pack(0, 0, EV_ABS, c, v) for c, v, _ in axes) +
+                     EVENT.pack(0, 0, EV_SYN, 0, 0))
+            time.sleep(0.002)
+        os.write(fd, b"".join(EVENT.pack(0, 0, EV_ABS, c, mid) for c, _, mid in axes) +
+                 EVENT.pack(0, 0, EV_SYN, 0, 0))
+    except OSError as e:
+        raise Refused(503, "Стик не принял движение: %s" % e)
+    finally:
+        os.close(fd)
+
+
 def allowed_net():
     n = E("BARE_WEB_NET")
     if n is None:
@@ -739,7 +1654,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     timeout = 120	# a computer that went away mid-upload: the request ends
 
     def log_message(self, fmt, *args):
-        if not self.path.startswith(("/api/status", "/api/job")):
+        if not self.path.startswith(("/api/status", "/api/job", "/api/state", "/api/shot.png")):
             log.info("%s %s", self.client_address[0], fmt % args)
 
     # ---- answers
@@ -817,7 +1732,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if m in ("GET", "HEAD"):
                 return self.static(segs)
             return self.fail(405, "?")
-        name = "_".join([m.lower()] + [s for s in segs[1:3] if re.fullmatch(r"[a-z]+", s or "")])
+        name = "_".join([m.lower()] + [s.replace(".", "_") for s in segs[1:3]
+                                       if re.fullmatch(r"[a-z]+(\.png)?", s or "")])
         for n in (name, "_".join(name.split("_")[:2])):
             h = getattr(self, "api_" + n, None)
             if h:
@@ -843,7 +1759,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # an upload that will be refused is refused before its body comes
         if self.command == "PUT" and self.allowed():
             segs, _ = self.parts()
-            if segs[:3] == ["api", "saves", "upload"]:
+            if segs[:2] == ["api", "recipe"]:
+                why = None	# small: read whole (api_put_recipe)
+            elif segs[:3] == ["api", "saves", "upload"]:
                 why = self.saves_upload_problem(segs[3:])
             else:
                 why = self.upload_problem(segs[2:] if segs[:2] == ["api", "upload"] else None)
@@ -1059,6 +1977,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.json({"games": games(), "problem": None if card_mounted() else NO_CARD})
 
     def api_get_logs(self, segs, q):
+        if len(segs) == 3 and safe_name(segs[1]) and segs[2] == "live":
+            return self.log_live(segs[1])
         if len(segs) != 3 or not safe_name(segs[1]) or segs[2] not in ("1", "2", "3"):
             return self.fail(404, "?")
         p = os.path.join(LOGS, segs[1], segs[2] + ".log")
@@ -1383,6 +2303,224 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return	# the page went away
 
 
+    # ---- the workshop: a game's recipe and the layer of changes (stage 4)
+    def api_get_schema(self, segs, q):
+        acts, defs = wine_tables()
+        s = dict(schema())
+        s["actions"] = acts
+        s["wine_defaults"] = defs
+        s["start_select"] = (kv(read(RELEASE) or "").get("FIRMWARE") or "") != "ogu"
+        self.json(s)
+
+    def refused(self, e):
+        return self.fail(e.status, str(e))
+
+    def api_get_recipe(self, segs, q):
+        if len(segs) != 2:
+            return self.fail(404, "?")
+        st = games_json()
+        try:
+            if not safe_name(segs[1]):
+                raise Refused(400, "Имя игры не подходит: %s" % segs[1])
+            g = game_entry(segs[1], st)
+            if not g:
+                raise Refused(404, "Такой игры нет: %s" % segs[1])
+        except Refused as e:
+            return self.refused(e)
+        out = Recipe(g).describe(st)
+        out["bare_app"] = st is not None
+        self.json(out)
+
+    def read_put_body(self):
+        try:
+            n = int(self.headers.get("Content-Length"))
+        except (TypeError, ValueError):
+            n = -1
+        if not 0 <= n <= LAYER_MAX:
+            self.close_connection = True
+            raise Refused(413 if n > 0 else 411, "Нужно тело запроса до 64 КБ.")
+        return self.rfile.read(n)
+
+    def api_put_recipe(self, segs, q):
+        try:
+            body = self.read_put_body()
+            if len(segs) != 3 or segs[2] != "layer":
+                raise Refused(404, "?")
+            r = recipe_of(segs[1])
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype == "application/json":
+                try:
+                    b = json.loads(body or b"{}")
+                except ValueError:
+                    raise Refused(400, "Тело — не JSON.")
+                if not isinstance(b, dict) or not isinstance(b.get("sections"), dict):
+                    raise Refused(400, "Нужно {\"sections\": {...}}.")
+                desired = lower_sections(b["sections"])
+            else:
+                try:
+                    desired = ini_sections(ini_parse(body.decode("utf-8"), strict=True))
+                except (UnicodeDecodeError, IniError) as e:
+                    raise Refused(400, "Текст правок не читается: %s" % e)
+            errors, warnings = layer_check(r.kind, desired)
+            if errors:
+                return self.fail(400, "Правки не подходят: " + "; ".join(errors), errors=errors, warnings=warnings)
+            entries = layer_diff(desired, ini_sections(r.base_entries()))
+            with RECIPE_LOCK:
+                told = put_layer(r, entries)
+        except Refused as e:
+            return self.refused(e)
+        st = games_json()
+        out = recipe_of(segs[1], st).describe(st)
+        out.update(ok=True, warnings=warnings, reloaded=told, lines=len(entries))
+        self.json(out)
+
+    def api_delete_recipe(self, segs, q):
+        try:
+            if len(segs) != 3 or segs[2] != "layer":
+                raise Refused(404, "?")
+            r = recipe_of(segs[1])
+            with RECIPE_LOCK:
+                told = put_layer(r, [])
+        except Refused as e:
+            return self.refused(e)
+        st = games_json()
+        out = recipe_of(segs[1], st).describe(st)
+        out.update(ok=True, reloaded=told)
+        self.json(out)
+
+    def api_post_recipe(self, segs, q):
+        try:
+            if len(segs) != 3 or segs[2] != "adopt-controls":
+                raise Refused(404, "?")
+            st = games_json()
+            r = recipe_of(segs[1], st)
+            res = adopt_controls(r, st)
+        except Refused as e:
+            return self.refused(e)
+        st = games_json()
+        out = recipe_of(segs[1], st).describe(st)
+        out.update(ok=True, **res)
+        self.json(out)
+
+    # ---- the check of a game (stage 5)
+    def api_get_state(self, segs, q):
+        self.json(game_state())
+
+    def api_post_game(self, segs, q):
+        if len(segs) != 3 or segs[2] not in ("launch", "quit", "options"):
+            return self.fail(404, "?")
+        st = games_json()
+        if not st:
+            return self.fail(503, NO_BARE_APP)
+        folder = segs[1]
+        if not safe_name(folder) or not game_entry(folder, st):
+            return self.fail(404, "Такой игры нет: %s" % folder)
+        now = running_game(st)
+        if segs[2] == "launch":
+            if now and now != folder:
+                return self.fail(409, "Идёт другая игра (%s): сначала выйдите из неё." % now)
+            if now == folder:
+                return self.json({"ok": True, "already": True})
+            line = "launch " + folder
+        elif segs[2] == "options":
+            if now:
+                return self.fail(409, "Идёт игра: её опции открываются, когда она закрыта.")
+            line = "options " + folder
+        else:
+            line = "quit-game"
+            release_all()
+        if not ctl(line):
+            return self.fail(503, NO_CTL)
+        self.json({"ok": True})
+
+    def api_get_shot_png(self, segs, q):
+        try:
+            w = int((q.get("w") or ["0"])[0])
+        except ValueError:
+            w = 0
+        try:
+            png = take_shot(max(0, min(w, 1920)))
+        except Refused as e:
+            return self.refused(e)
+        self.send(200, png, "image/png")
+
+    def api_post_pad(self, segs, q):
+        b = self.body_json()
+        if b is None or not isinstance(b.get("button"), str):
+            return self.fail(400, "Нужно {button, down}.")
+        try:
+            pad_button(b["button"], bool(b.get("down")))
+        except Refused as e:
+            return self.refused(e)
+        self.json({"ok": True})
+
+    def api_post_stick(self, segs, q):
+        b = self.body_json()
+        try:
+            if b is None or b.get("stick") not in ("stick", "rstick"):
+                raise Refused(400, "Нужно {stick: stick|rstick, x, y, ms}.")
+            x, y = float(b.get("x", 0)), float(b.get("y", 0))
+            ms = int(b.get("ms", 300))
+            if not (-1 <= x <= 1 and -1 <= y <= 1 and 20 <= ms <= 2000):
+                raise Refused(400, "x, y от -1 до 1, ms от 20 до 2000.")
+            stick_hold(b["stick"], x, y, ms)
+        except (TypeError, ValueError):
+            return self.fail(400, "x, y, ms — числа.")
+        except Refused as e:
+            return self.refused(e)
+        self.json({"ok": True})
+
+    def log_live(self, game):
+        """the launch log 1.log as it grows (text/event-stream): its last
+        lines first, then each new one; the file begun anew (the next start)
+        is read from its start"""
+        p = os.path.join(LOGS, game, "1.log")
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        ino, pos, rest, quiet = None, 0, b"", 0
+        end = time.monotonic() + 3600
+        try:
+            while time.monotonic() < end:
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    st = None
+                out = []
+                if st and (st.st_ino != ino or st.st_size < pos):
+                    if ino is not None:
+                        out.append({"reset": True})
+                    first = ino is None
+                    ino, pos, rest = st.st_ino, 0, b""
+                    if first and st.st_size > 16384:
+                        pos = st.st_size - 16384	# the end of what is there
+                if st and st.st_size > pos:
+                    with open(p, "rb") as f:
+                        f.seek(pos)
+                        data = f.read(min(st.st_size - pos, 1 << 20))
+                    pos += len(data)
+                    lines = (rest + data).split(b"\n")
+                    rest = lines.pop()
+                    out += [{"line": l.decode("utf-8", "replace")} for l in lines]
+                if out:
+                    self.wfile.write("".join("data: %s\n\n" % json.dumps(e, ensure_ascii=False)
+                                             for e in out).encode())
+                    self.wfile.flush()
+                    quiet = 0
+                else:
+                    quiet += 1
+                    if quiet >= 30:
+                        self.wfile.write(b": quiet\n\n")
+                        self.wfile.flush()
+                        quiet = 0
+                time.sleep(0.5)
+        except OSError:
+            return	# the page went away
+
+
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
@@ -1391,6 +2529,8 @@ class Server(http.server.ThreadingHTTPServer):
 def make_server(bind, port):
     global NET
     NET = allowed_net()
+    # bare_app_wine's tables once, at the start
+    threading.Thread(target=wine_tables, daemon=True).start()
     return Server((bind, port), Handler)
 
 

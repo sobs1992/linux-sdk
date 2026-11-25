@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -100,7 +101,14 @@ ENV = {
     "BARE_BACKUP_RUN": os.path.join(TOP, "run"), "BARE_BACKUP_CONF": os.path.join(TOP, "bare_app.conf"),
     "BARE_BACKUP_CTL": os.path.join(TOP, "no-ctl"), "BARE_BACKUP_RELEASE": os.path.join(TOP, "sdk-release"),
     "BARE_BACKUP_UNIT": os.path.join(BIN, "unit"), "BARE_BACKUP_USB_DISK": os.path.join(BIN, "usb-disk"),
+    # bare_app's places for the workshop and the check of a game (stages 4, 5)
+    "BARE_WEB_RUN": os.path.join(TOP, "run"), "BARE_WEB_CONF": os.path.join(TOP, "bare_app.conf"),
+    "BARE_WEB_CTL": os.path.join(TOP, "ctl"), "BARE_WEB_WINE": os.path.join(BIN, "bare_app_wine"),
+    "BARE_WEB_SHOT": os.path.join(TOP, "run", "shot.ppm"), "BARE_WEB_NATIVE_DIRS": GAMES,
+    "BARE_WEB_SYS_INPUT": os.path.join(TOP, "sys-input"), "BARE_WEB_DEV_INPUT": os.path.join(TOP, "dev-input"),
 }
+# bare_app_wine of the PC's build (a copy) for --actions and --defaults
+HOST_WINE = os.path.join(SDK, "apps", "bare_app", "build-host-ut", "bare_app_wine")
 
 
 def make_world():
@@ -139,6 +147,8 @@ def make_world():
         os.makedirs(os.path.join(LOGS, "coldfear"), exist_ok=True)
         with open(os.path.join(LOGS, "coldfear", "%d.log" % n), "w") as f:
             f.write("bare_app: a launch of a game\nlaunch %d\n" % n)
+    if os.path.isfile(HOST_WINE):
+        shutil.copy(HOST_WINE, ENV["BARE_WEB_WINE"])
     os.makedirs(os.path.join(LOGS, "homm3"))
     with open(os.path.join(LOGS, "homm3", "1.log"), "w") as f:
         f.write("homm3 log\n")
@@ -763,6 +773,483 @@ class SavesTest(unittest.TestCase):
         s, h, d = req("GET", "/api/saves/pirates/backup")
         self.assertEqual(s, 500)
         self.assertIn("bare_app не запущен", json.loads(d)["error"])
+
+
+class FakeBareApp:
+    """bare_app's FIFO (BARE_WEB_CTL): its lines kept; "reload FOLDER" writes
+    the effective ini as bare_app would (the server's merge stands in for
+    ini_layer.c here), "import-settings FILE" replaces those games' entries
+    of bare_app.conf as ctl_settings.c does"""
+
+    def __init__(self):
+        self.lines = []
+        self.fd = None
+        self.games = {}	# folder: (base path, layer path, effective path)
+
+    def start(self):
+        if not os.path.exists(ENV["BARE_WEB_CTL"]):
+            os.mkfifo(ENV["BARE_WEB_CTL"])
+        self.fd = os.open(ENV["BARE_WEB_CTL"], os.O_RDWR)
+        threading.Thread(target=self.loop, args=(self.fd,), daemon=True).start()
+
+    def stop(self):
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            os.write(fd, b"\x00stop\n")
+            time.sleep(0.1)
+
+    def loop(self, fd):
+        buf = b""
+        while True:
+            b = os.read(fd, 4096)
+            buf += b
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.decode()
+                if line == "\x00stop":
+                    os.close(fd)
+                    return
+                self.lines.append(line)
+                self.react(line)
+
+    def react(self, line):
+        cmd, _, arg = line.partition(" ")
+        if cmd == "reload" and arg in self.games:
+            base, layer, eff = self.games[arg]
+            if os.path.exists(layer):
+                os.makedirs(os.path.dirname(eff), exist_ok=True)
+                m = bw.ini_merge(bw.ini_parse(open(base).read()), bw.ini_parse(open(layer).read()))
+                with open(eff, "w") as f:
+                    f.write("; merged by bare_app from %s + %s\n" % (base, layer))
+                    sec = None
+                    for e in [e for e in m if not e[0]] + [e for e in m if e[0]]:
+                        if e[0] != sec and e[0]:
+                            f.write("\n[%s]\n" % e[0])
+                        sec = e[0]
+                        f.write("%s = %s\n" % (e[1], e[2]))
+            elif os.path.exists(eff):
+                os.remove(eff)
+        elif cmd == "import-settings":
+            text = open(arg).read()
+            names = set()
+            for l in text.splitlines():
+                k, eq, v = l.partition("=")
+                if not eq or l.startswith(";"):
+                    continue
+                names.add(v if k == "game" else k.split(".", 1)[1])
+            conf = open(ENV["BARE_WEB_CONF"]).read().splitlines()
+            keep = [l for l in conf if not any(l.startswith(("controls.%s=" % n, "options.%s=" % n)) for n in names)]
+            new = [l for l in text.splitlines() if l.startswith(("controls.", "options.")) and l.split("=", 1)[1]]
+            with open(ENV["BARE_WEB_CONF"], "w") as f:
+                f.write("\n".join(keep + new) + "\n")
+
+
+BARE_APP = FakeBareApp()
+BARE_APP.start()
+PIRATES_KEY = "0ecf99f4"
+
+
+def file_lines(p):
+    return [l for l in open(p).read().splitlines() if l and not l.startswith(";")]
+
+
+class RecipeTest(unittest.TestCase):
+    """the workshop: /api/recipe over a copy of the reference wine.ini"""
+
+    def setUp(self):
+        for d in (os.path.join(GAMES, "recipes"), os.path.join(ENV["BARE_WEB_RUN"], "ini")):
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+        self.pirates = os.path.join(GAMES, "pirates")
+        os.makedirs(self.pirates, exist_ok=True)
+        shutil.copy(os.path.join(SDK, "apps", "bare_app", "ports", "wine", "wine.ini"),
+                    os.path.join(self.pirates, "wine.ini"))
+        os.makedirs(os.path.join(GAMES, "fake"), exist_ok=True)
+        with open(os.path.join(GAMES, "fake", "game.ini"), "w") as f:
+            f.write("name = Fake game\nexe = fake\nneeds = data.pak\nfps_limit = 60\n[labels]\na = jump\n")
+        with open(ENV["BARE_WEB_CONF"], "w") as f:
+            f.write("lang=ru\ncontrols.%s=a=b,b=a,x=-,ly=invert\noptions.%s=fps=25\ncontrols.0badc0de=a=b\n"
+                    % (PIRATES_KEY, PIRATES_KEY))
+        self.state()
+        run = ENV["BARE_WEB_RUN"]
+        BARE_APP.games = {
+            "pirates": (os.path.join(self.pirates, "wine.ini"), os.path.join(GAMES, "recipes", "pirates", "wine.ini"),
+                        os.path.join(run, "ini", "pirates.ini")),
+            "fake": (os.path.join(GAMES, "fake", "game.ini"), os.path.join(GAMES, "recipes", "fake", "game.ini"),
+                     os.path.join(run, "ini", "fake.game.ini"))}
+        del BARE_APP.lines[:]
+        for f in ("state.json",):
+            p = os.path.join(run, f)
+            if os.path.exists(p):
+                os.remove(p)
+
+    def state(self, running=None, pid=None):
+        os.makedirs(ENV["BARE_WEB_RUN"], exist_ok=True)
+        with open(os.path.join(ENV["BARE_WEB_RUN"], "games.json"), "w") as f:
+            json.dump({"version": 1, "pid": pid or os.getpid(), "running": running, "games": [
+                {"folder": "pirates", "name": "Sid Meier's Pirates!", "kind": "wine", "key": PIRATES_KEY,
+                 "dir": self.pirates, "available": True, "storage": [], "has_layer": False, "layer": "none"},
+                {"folder": "fake", "name": "Fake game", "kind": "native", "key": "00000fa4",
+                 "dir": os.path.join(GAMES, "fake"), "available": True, "storage": []},
+                {"folder": "homm3", "name": "Heroes", "kind": "homm3", "key": "fef6251f",
+                 "dir": os.path.join(GAMES, "heroes3"), "available": True, "storage": []}]}, f)
+
+    def layer(self, folder="pirates", ini="wine.ini"):
+        return os.path.join(GAMES, "recipes", folder, ini)
+
+    def test_get_without_layer(self):
+        s, r = jreq("GET", "/api/recipe/pirates")
+        self.assertEqual(s, 200, r)
+        self.assertTrue(r["editable"])
+        self.assertEqual((r["kind"], r["layer"], r["effective_source"]), ("wine", None, "base"))
+        self.assertEqual(r["effective"], r["base"])
+        self.assertEqual(r["base"][""]["mode"], "800x600")
+        self.assertEqual(r["base"][""]["saves"], ["Documents/My Games/pirates"])
+        self.assertEqual(r["base"]["keys"]["b"], "esc")
+        self.assertEqual(r["player_controls"]["value"], "a=b,b=a,x=-,ly=invert")
+        self.assertEqual(r["player_options"]["value"], "fps=25")
+        self.assertIn({"from": "x", "to": "-"}, r["player_controls"]["pairs"])
+        self.assertEqual(r["defaults"][""]["fps_limit"], "none")	# the schema's
+        if os.path.isfile(HOST_WINE):	# bare_app_wine --defaults
+            self.assertEqual(r["defaults"]["keys"]["l1"], "pgup")
+            self.assertEqual(r["defaults"][""]["modes"], ["640x480", "800x600", "1024x768"])
+        # a game of bare_app's own: no recipe to edit; one that is not there
+        s, r = jreq("GET", "/api/recipe/homm3")
+        self.assertEqual((s, r["kind"], r["editable"]), (200, "built-in", False))
+        self.assertNotIn("base", r)
+        self.assertEqual(jreq("GET", "/api/recipe/nothere")[0], 404)
+        self.assertEqual(jreq("GET", "/api/recipe/..")[0], 400)
+        self.assertEqual(jreq("GET", "/api/recipe/.hidden")[0], 400)
+
+    def test_put_only_what_differs(self):
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
+            "": {"mode": "1024x768", "fps_limit": "30", "name": "Sid Meier's Pirates!",
+                 "modes": ["1280x960"], "Locale": "ru_RU"},
+            "keys": {"select": "esc", "a": "lbutton", "R1": "kp5"},
+            "Labels.RU": {"a": "клик", "f4": "карта мира"}}})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(file_lines(self.layer()), ["mode = 1024x768", "[keys]", "select = esc", "[labels.ru]",
+                                                    "f4 = карта мира"])
+        self.assertIn("reload pirates", BARE_APP.lines)
+        self.assertEqual(r["layer"], {"": {"mode": "1024x768"}, "keys": {"select": "esc"},
+                                      "labels.ru": {"f4": "карта мира"}})
+        self.assertEqual(r["effective_source"], "bare_app")
+        self.assertEqual((r["effective"][""]["mode"], r["base"][""]["mode"]), ("1024x768", "800x600"))
+        self.assertEqual(r["effective"]["keys"]["select"], "esc")
+        self.assertEqual(r["effective"]["labels.ru"]["f4"], "карта мира")
+        # a second PUT replaces the whole layer: only what it says
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"gamma": "1.3"}}})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(file_lines(self.layer()), ["gamma = 1.3"])
+        self.assertEqual(r["effective"][""]["mode"], "800x600")
+        # without bare_app's file of it the server merges by the same rules
+        os.remove(os.path.join(ENV["BARE_WEB_RUN"], "ini", "pirates.ini"))
+        s, r = jreq("GET", "/api/recipe/pirates")
+        self.assertEqual((r["effective_source"], r["effective"][""]["gamma"]), ("server", "1.3"))
+
+    def test_empty_value_drops(self):
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
+            "": {"dlls": "", "args": "", "saves": [], "modes": ["1280x960", "1600x1200"], "esc_delay": ""},
+            "labels": {"x": ""}}})
+        self.assertEqual(s, 200, r)
+        # dlls, saves and the label are the game's: dropped; args is empty in
+        # it and esc_delay not there: nothing to drop
+        self.assertEqual(file_lines(self.layer()), ["dlls =", "saves =", "modes = 1280x960",
+                                                    "modes = 1600x1200", "[labels]", "x ="])
+        eff = r["effective"]
+        self.assertNotIn("dlls", eff[""])
+        self.assertNotIn("saves", eff[""])	# "saves =": no list at all
+        self.assertEqual(eff[""]["modes"], ["1280x960", "1600x1200"])
+        self.assertNotIn("x", eff["labels"])
+        self.assertEqual(eff["labels"]["a"], "click")
+        # a layer the same as the game: no file at all
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"mode": "800x600"}}})
+        self.assertEqual((s, r["lines"], r["layer"]), (200, 0, None))
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "recipes")))
+
+    def test_put_checked(self):
+        for sections, what in (({"": {"mode": "big"}}, "mode"), ({"": {"fps_limit": "500"}}, "fps_limit"),
+                               ({"": {"scale": "zoom"}}, "scale"), ({"keys": {"a": "esc ;x"}}, "комментарий"),
+                               ({"": {"reg": ["noslash=1"]}}, "reg"), ({"": {"mode": ["800x600"]}}, "список"),
+                               ({"": {"bad key": "1"}}, "ключ"), ({"": {"exe": "a\nb"}}, "управляющие")) + \
+                ((({"keys": {"a": "nokey"}}, "клавиша"), ({"keys": {"dpad": "numpad"}}, "dpad"),
+                  ({"keys": {"a": "a+b+c+d+e"}}, "клавиша")) if os.path.isfile(HOST_WINE) else ()):
+            s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": sections})
+            self.assertEqual(s, 400, (sections, r))
+            self.assertIn(what, r["error"])
+        self.assertFalse(os.path.exists(self.layer()))
+        # allowed: an unknown key (a warning), fps_limit none, kp+, ctrl+s, the ini as text
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
+            "": {"newthing": "1", "fps_limit": "none"}, "keys": {"l1": "kp+", "l2": "ctrl+s", "stick_up": "w"}}})
+        self.assertEqual(s, 200, r)
+        self.assertTrue(any("newthing" in w for w in r["warnings"]), r["warnings"])
+        s, h, d = req("PUT", "/api/recipe/pirates/layer", "mode = 640x480\n[keys]\ny = esc\n".encode(),
+                      {"Content-Type": "text/plain"})
+        self.assertEqual(s, 200, d)
+        self.assertEqual(file_lines(self.layer()), ["mode = 640x480", "[keys]", "y = esc"])
+        s, h, d = req("PUT", "/api/recipe/pirates/layer", b"mode 640x480\n", {"Content-Type": "text/plain"})
+        self.assertEqual(s, 400)
+        # games without a recipe, names
+        self.assertEqual(jreq("PUT", "/api/recipe/homm3/layer", {"sections": {"": {"a": "1"}}})[0], 400)
+        self.assertEqual(jreq("PUT", "/api/recipe/nothere/layer", {"sections": {}})[0], 404)
+        self.assertEqual(jreq("PUT", "/api/recipe/a%2Fb/layer", {"sections": {}})[0], 400)
+        self.assertEqual(jreq("PUT", "/api/recipe/pirates/other", {"sections": {}})[0], 404)
+
+    def test_delete(self):
+        jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"mode": "1024x768"}}})
+        self.assertTrue(os.path.exists(os.path.join(ENV["BARE_WEB_RUN"], "ini", "pirates.ini")))
+        del BARE_APP.lines[:]
+        # a file of someone else's in the game's folder of the recipes stays
+        touch(os.path.join(GAMES, "recipes", "pirates", "notes.txt"), b"mine")
+        s, r = jreq("DELETE", "/api/recipe/pirates/layer")
+        self.assertEqual(s, 200, r)
+        self.assertEqual((r["layer"], r["effective_source"], r["effective"][""]["mode"]), (None, "base", "800x600"))
+        self.assertEqual(BARE_APP.lines, ["reload pirates"])
+        self.assertFalse(os.path.exists(self.layer()))
+        self.assertEqual(os.listdir(os.path.join(GAMES, "recipes", "pirates")), ["notes.txt"])
+        self.assertFalse(os.path.exists(os.path.join(ENV["BARE_WEB_RUN"], "ini", "pirates.ini")))
+        os.remove(os.path.join(GAMES, "recipes", "pirates", "notes.txt"))
+        s, r = jreq("DELETE", "/api/recipe/pirates/layer")
+        self.assertEqual(s, 200)
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "recipes")))
+
+    def test_without_fifo(self):
+        BARE_APP.stop()
+        try:
+            s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"mode": "1024x768"}}})
+            self.assertEqual((s, r["reloaded"], r["effective_source"]), (200, False, "server"))
+            self.assertEqual(r["effective"][""]["mode"], "1024x768")
+            s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+            self.assertEqual(s, 503, r)
+            self.assertEqual(jreq("POST", "/api/game/pirates/launch")[0], 503)
+        finally:
+            BARE_APP.start()
+
+    def test_adopt_controls(self):
+        conf_before = open(ENV["BARE_WEB_CONF"]).read()
+        jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"mode": "1024x768"}, "keys": {"y": "esc"}}})
+        del BARE_APP.lines[:]
+        s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+        self.assertEqual(s, 200, r)
+        # A is B for the player: A does what B did (esc, "back (Esc)"), B what A
+        # did, X nothing; the axis stays the player's
+        self.assertEqual(file_lines(self.layer()), [
+            "mode = 1024x768", "[keys]", "y = esc", "a = esc", "b = lbutton", "x = none",
+            "[labels]", "a = back (Esc)", "b = click", "x =",
+            "[labels.ru]", "a = назад (Esc)", "b = клик", "x ="])
+        self.assertEqual(BARE_APP.lines[0], "reload pirates")
+        self.assertTrue(BARE_APP.lines[1].startswith("import-settings "), BARE_APP.lines)
+        self.assertFalse(os.path.exists(BARE_APP.lines[1].split(" ", 1)[1]))	# removed after
+        self.assertTrue(r["settings_done"])
+        self.assertEqual(r["kept"], [{"from": "ly", "to": "invert"}])
+        conf = open(ENV["BARE_WEB_CONF"]).read()
+        self.assertIn("controls.%s=ly=invert\n" % PIRATES_KEY, conf)
+        self.assertIn("options.%s=fps=25\n" % PIRATES_KEY, conf)	# the options stay
+        self.assertIn("controls.0badc0de=a=b\n", conf)	# another game's too
+        self.assertIn("lang=ru\n", conf)
+        self.assertEqual(r["player_controls"]["value"], "ly=invert")
+        self.assertEqual(r["effective"]["keys"]["a"], "esc")
+        # nothing left to move: refused, nothing changed
+        layer = open(self.layer()).read()
+        s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+        self.assertEqual(s, 409, r)
+        self.assertEqual(open(self.layer()).read(), layer)
+        self.assertNotEqual(conf, conf_before)
+
+    def test_adopt_refused(self):
+        self.state(running={"folder": "pirates", "key": PIRATES_KEY, "pid": os.getpid()})
+        s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+        self.assertEqual(s, 409, r)
+        self.state()
+        # the D-pad as the mouse: its directions are no [keys] buttons then
+        with open(ENV["BARE_WEB_CONF"], "w") as f:
+            f.write("controls.%s=up=a\n" % PIRATES_KEY)
+        jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"keys": {"dpad": "mouse"}}})
+        s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+        self.assertEqual(s, 409, r)
+        self.assertEqual(file_lines(self.layer()), ["[keys]", "dpad = mouse"])
+        self.assertEqual(jreq("POST", "/api/recipe/fake/adopt-controls")[0], 400)
+
+    def test_native(self):
+        s, r = jreq("GET", "/api/recipe/fake")
+        self.assertEqual((s, r["kind"], r["ini"]), (200, "native", "game.ini"))
+        self.assertEqual(r["base"][""]["needs"], ["data.pak"])
+        s, r = jreq("PUT", "/api/recipe/fake/layer", {"sections": {"": {"fps_limit": "30", "filter": "nearest"},
+                                                                  "labels": {"a": "jump"}}})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(file_lines(self.layer("fake", "game.ini")), ["fps_limit = 30", "filter = nearest"])
+        self.assertEqual(r["effective"][""]["filter"], "nearest")
+        self.assertEqual(jreq("PUT", "/api/recipe/fake/layer", {"sections": {"": {"filter": "x"}}})[0], 400)
+
+    def test_schema(self):
+        s, r = jreq("GET", "/api/schema")
+        self.assertEqual(s, 200)
+        keys = {(e["section"], e["key"]): e for e in r["wine"]}
+        for k in (("", "mode"), ("", "env"), ("", "reg"), ("keys", "stick"), ("keys", "f6"), ("labels.ru", "a")):
+            self.assertIn(k, keys)
+        self.assertTrue(keys[("", "reg")]["repeat"])
+        self.assertFalse(r["start_select"])	# FIRMWARE=ogu has none
+        self.assertTrue(r["env_presets"])
+        if os.path.isfile(HOST_WINE):
+            names = {(a["group"], a["name"]) for a in r["actions"]}
+            self.assertLessEqual({("key", "esc"), ("mouse", "lbutton"), ("pad", "pad_a"), ("stick", "numpad")}, names)
+
+
+SHOT_HELPER = r"""
+import os, signal, sys, time
+path, mode = sys.argv[1], sys.argv[2]
+def shot(*_):
+    if mode == "deaf":
+        return
+    time.sleep(0.05)
+    w, h = 64, 32
+    px = bytes((x * 4, y * 8, 128) [c] for y in range(h) for x in range(w) for c in range(3))
+    with open(path + ".tmp", "wb") as f:
+        f.write(b"P6\n%d %d\n255\n" % (w, h) + px)
+    os.rename(path + ".tmp", path)
+    with open(path + ".count", "a") as f:
+        f.write("1")
+signal.signal(signal.SIGUSR1, shot)
+print("ready", flush=True)
+while True:
+    time.sleep(1)
+"""
+
+
+class CheckTest(unittest.TestCase):
+    """the check of a game: state, launch/quit, screenshot, pad, live log"""
+
+    setUp = RecipeTest.setUp
+    state = RecipeTest.state
+
+    def write_state(self, running, age=0):
+        p = os.path.join(ENV["BARE_WEB_RUN"], "state.json")
+        with open(p, "w") as f:
+            json.dump({"running": running, "pid": 123 if running else 0, "fps": 30.5 if running else None,
+                       "cpu_pct": 80, "time": int(time.time())}, f)
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def test_state(self):
+        self.assertEqual(jreq("GET", "/api/state")[1]["running"], None)
+        self.write_state("pirates")
+        s, r = jreq("GET", "/api/state")
+        self.assertEqual((s, r["running"], r["fps"], r["stale"]), (200, "pirates", 30.5, False))
+        self.write_state("pirates", age=5)	# not renewed: no game
+        self.assertEqual(jreq("GET", "/api/state")[1]["running"], None)
+
+    def test_launch_quit_options(self):
+        self.write_state("coldfear")
+        s, r = jreq("POST", "/api/game/pirates/launch")
+        self.assertEqual(s, 409, r)
+        self.assertIn("coldfear", r["error"])
+        self.assertEqual(jreq("POST", "/api/game/pirates/options")[0], 409)
+        self.assertEqual(BARE_APP.lines, [])
+        self.write_state("pirates")
+        s, r = jreq("POST", "/api/game/pirates/launch")
+        self.assertEqual((s, r.get("already")), (200, True))
+        os.remove(os.path.join(ENV["BARE_WEB_RUN"], "state.json"))
+        self.assertEqual(jreq("POST", "/api/game/pirates/launch")[0], 200)
+        self.assertEqual(jreq("POST", "/api/game/pirates/options")[0], 200)
+        self.assertEqual(jreq("POST", "/api/game/pirates/quit")[0], 200)
+        time.sleep(0.1)
+        self.assertEqual(BARE_APP.lines, ["launch pirates", "options pirates", "quit-game"])
+        # games.json says one runs (state.json not there yet)
+        self.state(running={"folder": "coldfear", "key": "1", "pid": os.getpid()})
+        self.assertEqual(jreq("POST", "/api/game/pirates/launch")[0], 409)
+        self.assertEqual(jreq("POST", "/api/game/nothere/launch")[0], 404)
+        self.assertEqual(jreq("POST", "/api/game/pirates/kill")[0], 404)
+
+    def test_shot(self):
+        path = ENV["BARE_WEB_SHOT"]
+        for mode in ("draw", "deaf"):
+            p = subprocess.Popen([sys.executable, "-c", SHOT_HELPER, path, mode], stdout=subprocess.PIPE)
+            try:
+                self.assertEqual(p.stdout.readline().strip(), b"ready")
+                self.state(pid=p.pid)	# SIGUSR1 goes to the helper, never to this test
+                if mode == "deaf":
+                    old, bw.SHOT_WAIT = bw.SHOT_WAIT, 0.5
+                    try:
+                        s, h, d = req("GET", "/api/shot.png")
+                    finally:
+                        bw.SHOT_WAIT = old
+                    self.assertEqual(s, 504, d)
+                    continue
+                s, h, d = req("GET", "/api/shot.png")
+                self.assertEqual((s, dict(h)["Content-Type"]), (200, "image/png"), d)
+                from PIL import Image
+                im = Image.open(io.BytesIO(d))
+                self.assertEqual(im.size, (64, 32))
+                self.assertFalse(os.path.exists(path))	# not left in /run
+                s, h, d = req("GET", "/api/shot.png?w=32")
+                self.assertEqual(Image.open(io.BytesIO(d)).size, (32, 16))
+                # at the same time: one after another, each its own picture
+                res = []
+                ts = [threading.Thread(target=lambda: res.append(req("GET", "/api/shot.png")[0])) for _ in range(3)]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+                self.assertEqual(res, [200, 200, 200])
+                self.assertEqual(open(path + ".count").read(), "11111")
+            finally:
+                p.kill()
+                p.wait()
+                p.stdout.close()
+                self.state()
+                for f in (path + ".count",):
+                    if os.path.exists(f):
+                        os.remove(f)
+
+    def test_pad(self):
+        self.assertEqual(jreq("POST", "/api/pad", {"button": "f1", "down": True})[0], 200)
+        self.assertEqual(jreq("POST", "/api/pad", {"button": "f1", "down": False})[0], 200)
+        self.assertEqual(jreq("POST", "/api/pad", {"button": "power", "down": True})[0], 400)
+        self.assertEqual(jreq("POST", "/api/pad", {"button": "a; reboot", "down": True})[0], 400)
+        old, bw.PRESS_MAX = bw.PRESS_MAX, 0.2
+        try:
+            jreq("POST", "/api/pad", {"button": "a", "down": True})
+            time.sleep(0.5)	# the page never let go: released on its own
+        finally:
+            bw.PRESS_MAX = old
+        self.assertEqual(BARE_APP.lines, ["press f1", "release f1", "press a", "release a"])
+        # the sticks: no device in this test
+        s, r = jreq("POST", "/api/stick", {"stick": "stick", "x": 1, "y": 0})
+        self.assertEqual(s, 503, r)
+        self.assertEqual(jreq("POST", "/api/stick", {"stick": "stick", "x": 5, "y": 0})[0], 400)
+
+    def test_log_live(self):
+        d = os.path.join(LOGS, "livegame")
+        os.makedirs(d, exist_ok=True)
+        log1 = os.path.join(d, "1.log")
+        with open(log1, "w") as f:
+            f.write("first\nsecond\n")
+        c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+        c.request("GET", "/api/logs/livegame/live")
+        r = c.getresponse()
+        self.assertEqual(r.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+
+        def next_events(n):
+            out = []
+            while len(out) < n:
+                line = r.readline().decode().rstrip("\n")
+                if line.startswith("data: "):
+                    out.append(json.loads(line[6:]))
+            return out
+        self.assertEqual(next_events(2), [{"line": "first"}, {"line": "second"}])
+        with open(log1, "a") as f:
+            f.write("third\nhalf")
+        self.assertEqual(next_events(1), [{"line": "third"}])
+        with open(log1, "a") as f:
+            f.write(" of it\n")
+        self.assertEqual(next_events(1), [{"line": "half of it"}])
+        # the next start: a new 1.log
+        os.rename(log1, os.path.join(d, "2.log"))
+        with open(log1, "w") as f:
+            f.write("new start\n")
+        self.assertEqual(next_events(2), [{"reset": True}, {"line": "new start"}])
+        c.close()
+        shutil.rmtree(d)
 
 
 if __name__ == "__main__":
