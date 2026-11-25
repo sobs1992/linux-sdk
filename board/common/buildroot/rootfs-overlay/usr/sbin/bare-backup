@@ -1,0 +1,945 @@
+#!/usr/bin/python3 -S
+"""
+bare-backup: copies of the games' saved games and settings (docs/web-service-plan.md,
+stage 2), for the device in a browser (bare-web), for bare_app after each game, by hand.
+
+  bare-backup backup FOLDER|all [DIR]   a copy into DIR (else /games/backups on the
+                                        card, /data/backups without it); prints its path
+  bare-backup auto FOLDER               the same, only if the game's data changed since
+                                        its last automatic copy; the last 3 kept
+  bare-backup restore ZIP [--game FOLDER]   the copy's data back (the game must not run)
+  bare-backup list [DIR]                the copies there (else on the card and in /data)
+                                        and the games' data, JSON
+  bare-backup info ZIP                  the copy's manifest, JSON
+
+What a game's data is comes from bare_app itself: /run/bare_app/games.json (its folder,
+key, the data directories of game_def.storage), so bare_app must run. A copy is a zip,
+saves-<folder>-<date>.zip (saves-all-<date>.zip for all the games; automatic ones end
+in -auto.zip): manifest.json (unit, date, system, the games, their directories with
+their size and md5), the directories under data/ (relative to /data), the game's
+controls.<key> and options.<key> of /etc/bare_app.conf in settings.ini, its recipe's
+layer (/games/recipes/<folder>) in recipe/. A copy of all: games/<folder>/settings.ini,
+recipes/ (all of /games/recipes), bare_app.conf without its network settings.
+
+Restoring checks every name of the zip first (only data/ inside the directories its
+manifest names, which must be in /data and, for a game bare_app knows, its own; no
+"..", no links), unpacks each directory beside it (<dir>.new-restore), checks its md5,
+then moves the old one to <dir>.bak, the new one in place, and deletes the .bak; any
+failure puts the old ones back. The settings go to bare_app through its FIFO
+(import-settings: only bare_app writes its settings file), the layer to the card,
+then "reload".
+
+The card is read-only: remounted rw only while this writes, ro again if it was ro.
+Exit status: 0 done, 1 failed (the reason on stderr, in Russian: the pages show it),
+2 wrong use, 3 the game runs, 4 busy (another copy is being made).
+
+Tests (scripts/test-bare-backup.py) name every place: BARE_BACKUP_DATA, BARE_BACKUP_GAMES
+(the card: a directory as it is, no remount), BARE_BACKUP_RUN (games.json, the lock,
+the import files), BARE_BACKUP_CONF, BARE_BACKUP_CTL, BARE_BACKUP_RELEASE; optional
+BARE_BACKUP_UNIT, BARE_BACKUP_USB_DISK (programs), BARE_BACKUP_SWAP_FAIL (the move of
+the N-th directory fails: the old ones must come back). Setting one of them and not all the
+required ones is refused: a test never falls back to the device's real places.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+import zipfile
+
+E = os.environ.get
+HOOKS = ("BARE_BACKUP_DATA", "BARE_BACKUP_GAMES", "BARE_BACKUP_RUN", "BARE_BACKUP_CONF",
+         "BARE_BACKUP_CTL", "BARE_BACKUP_RELEASE")
+TEST = any(k in os.environ for k in HOOKS + ("BARE_BACKUP_UNIT", "BARE_BACKUP_USB_DISK"))
+if TEST:
+    missing = [k for k in HOOKS if not E(k)]
+    if missing:
+        sys.stderr.write("bare-backup: test hooks without %s: refused\n" % ", ".join(missing))
+        sys.exit(2)
+DATA = os.path.normpath(E("BARE_BACKUP_DATA", "/data"))
+GAMES = os.path.normpath(E("BARE_BACKUP_GAMES", "/games"))
+RUN = os.path.normpath(E("BARE_BACKUP_RUN", "/run/bare_app"))
+CONF = E("BARE_BACKUP_CONF", "/etc/bare_app.conf")
+CTL = E("BARE_BACKUP_CTL", "/tmp/bare_app.ctl")
+RELEASE = E("BARE_BACKUP_RELEASE", "/etc/sdk-release")
+UNIT = E("BARE_BACKUP_UNIT", "" if TEST else "/usr/sbin/unit")
+USB_DISK = E("BARE_BACKUP_USB_DISK", "" if TEST else "/usr/sbin/usb-disk")
+LOCK = os.path.join(RUN, "bare-backup.lock") if TEST else "/run/bare-backup.lock"
+RECIPES = os.path.join(GAMES, "recipes")
+CARD_BACKUPS = os.path.join(GAMES, "backups")
+DATA_BACKUPS = os.path.join(DATA, "backups")
+KEEP_AUTO = 3
+NAME_RE = re.compile(r"^saves-(.+)-(\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d)(-\d+)?(-auto)?\.zip$")
+STAGE = ".new-restore"
+# settings of bare_app.conf a copy of all leaves out: networks, Bluetooth, anything secret
+CONF_SKIP = re.compile(r"^(wifi|bluetooth|bt)|pass|psk|secret|pin", re.I)
+
+
+class Fail(Exception):
+    def __init__(self, text, code=1):
+        Exception.__init__(self, text)
+        self.code = code
+
+
+def say(text):
+    sys.stderr.write("bare-backup: %s\n" % text)
+
+
+def run(argv, timeout=30):
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return 127, ""
+    return r.returncode, r.stdout.decode("utf-8", "replace")
+
+
+def safe_folder(f):
+    return (bool(f) and len(f) <= 128 and "/" not in f and "\\" not in f and f not in (".", "..")
+            and not f.startswith(".") and not f.startswith("-") and
+            not any(ord(c) < 32 for c in f))
+
+
+def inside(path, top):
+    """path is top or below it, by its own names and by what links make of them"""
+    p, t = os.path.normpath(path), os.path.normpath(top)
+    if p != t and not p.startswith(t + "/"):
+        return False
+    rp, rt = os.path.realpath(p), os.path.realpath(t)
+    return rp == rt or rp.startswith(rt + "/")
+
+
+def data_dir_ok(d):
+    """a data directory a copy may hold: absolute, in /data (not /data itself, not the
+    copies' directory), no "..", not through a link"""
+    if not d.startswith("/") or os.path.normpath(d) != d or "/../" in d + "/":
+        return False
+    if d == DATA or not inside(d, DATA) or inside(d, DATA_BACKUPS):
+        return False
+    return True
+
+
+# ---- bare_app: its games, its FIFO ---------------------------------------------
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def bare_app_state():
+    """games.json of the bare_app that runs"""
+    path = os.path.join(RUN, "games.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        raise Fail("bare_app не запущен (нет %s): список игр и их данных даёт он. "
+                   "Дождитесь главного экрана приставки и повторите." % path)
+    pid = state.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or not alive(pid):
+        raise Fail("bare_app не запущен: дождитесь главного экрана приставки и повторите.")
+    if not TEST:
+        try:
+            with open("/proc/%d/comm" % pid) as f:
+                if f.read().strip() != "bare_app":
+                    raise Fail("bare_app не запущен: дождитесь главного экрана и повторите.")
+        except OSError:
+            raise Fail("bare_app не запущен: дождитесь главного экрана и повторите.")
+    games = {}
+    for g in state.get("games") or []:
+        f = g.get("folder")
+        if isinstance(f, str) and safe_folder(f) and f not in games:
+            games[f] = g
+    state["by_folder"] = games
+    return state
+
+
+def running(state, folder):
+    """the game in folder runs: bare_app says so, or a process of it is there"""
+    r = state.get("running")
+    if isinstance(r, dict) and r.get("folder") == folder:
+        pid = r.get("pid")
+        if not isinstance(pid, int) or pid <= 0 or alive(pid):
+            return True
+    g = state["by_folder"].get(folder)
+    game_dir = g.get("dir") if g else None
+    if not game_dir or TEST:
+        return False
+    # bare_app_wine <its directory>, an engine started in it
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % p, "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if game_dir.encode() in argv[1:3]:
+            return True
+    return False
+
+
+def ctl(line):
+    """a command to bare_app's FIFO; False if nobody reads it"""
+    try:
+        fd = os.open(CTL, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        os.write(fd, (line + "\n").encode())
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+# ---- the card --------------------------------------------------------------------
+
+def card_opts():
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                p = line.split()
+                if len(p) > 3 and p[1] == GAMES:
+                    return p[3].split(",")
+    except OSError:
+        pass
+    return None
+
+
+def card_there():
+    if USB_DISK:
+        rc, _ = run([USB_DISK, "status"], timeout=10)
+        if rc not in (1, 127):
+            return False	# the computer's USB disk now
+    return os.path.isdir(GAMES) if TEST else card_opts() is not None
+
+
+class CardWriting:
+    """with CardWriting(): the card writable inside, read-only again after if it was"""
+    def __enter__(self):
+        self.ro = False
+        if not TEST:
+            opts = card_opts()
+            if opts is None:
+                raise Fail("Карты игр нет в приставке.")
+            if "ro" in opts:
+                rc, _ = run(["mount", "-o", "remount,rw", GAMES])
+                if rc:
+                    raise Fail("Карту игр не удалось сделать доступной для записи.")
+                self.ro = True
+        return self
+
+    def __exit__(self, *exc):
+        os.sync()
+        if self.ro:
+            rc, _ = run(["mount", "-o", "remount,ro", GAMES])
+            if rc:
+                say("%s stays writable (busy)" % GAMES)
+        return False
+
+
+class NoWriting:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def writing(path):
+    return CardWriting() if inside(path, GAMES) else NoWriting()
+
+
+# ---- the lock --------------------------------------------------------------------
+
+class Lock:
+    def __init__(self, wait):
+        self.wait = wait
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+        self.fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        end = time.monotonic() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    os.close(self.fd)
+                    raise Fail("Сейчас уже делается или восстанавливается другая копия.", 4)
+                time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        os.close(self.fd)
+        return False
+
+
+# ---- trees -----------------------------------------------------------------------
+
+def walk(top):
+    """(relative path, absolute path, is a directory) under top, sorted, links and
+    other file systems left out (and named in skipped)"""
+    out, skipped = [], []
+    try:
+        dev = os.lstat(top).st_dev
+    except OSError:
+        return out, skipped
+
+    def rec(d, rel):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            return
+        for n in names:
+            p, r = os.path.join(d, n), (rel + "/" + n if rel else n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode) or st.st_dev != dev:
+                skipped.append(p)
+            elif stat.S_ISDIR(st.st_mode):
+                out.append((r, p, True))
+                rec(p, r)
+            elif stat.S_ISREG(st.st_mode):
+                out.append((r, p, False))
+            else:
+                skipped.append(p)
+    rec(top, "")
+    return out, skipped
+
+
+def file_md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def tree_sum(top):
+    """files, bytes and md5 of a directory: of each file's relative path and md5,
+    in order (the directories' own names in it too)"""
+    entries, skipped = walk(top)
+    h, files, size = hashlib.md5(), 0, 0
+    for rel, p, is_dir in entries:
+        if is_dir:
+            h.update(b"D " + rel.encode("utf-8", "surrogateescape") + b"\n")
+            continue
+        files += 1
+        size += os.lstat(p).st_size
+        h.update(b"F " + rel.encode("utf-8", "surrogateescape") + b" " + file_md5(p).encode() + b"\n")
+    return {"files": files, "size": size, "md5": h.hexdigest()}, entries, skipped
+
+
+def tree_stamp(top):
+    """what changes when anything in it changes: names, sizes, times"""
+    entries, _ = walk(top)
+    h, newest = hashlib.md5(), 0
+    for rel, p, is_dir in entries:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        newest = max(newest, st.st_mtime_ns)
+        h.update(("%s %d %d %d\n" % (rel, is_dir, 0 if is_dir else st.st_size,
+                                    st.st_mtime_ns)).encode("utf-8", "surrogateescape"))
+    return h.hexdigest(), newest
+
+
+def rmtree(top):
+    """a tree of ours, never through a link or into another file system"""
+    try:
+        st = os.lstat(top)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        os.unlink(top)
+        return
+    dev = st.st_dev
+
+    def rec(d):
+        for n in os.listdir(d):
+            p = os.path.join(d, n)
+            s = os.lstat(p)
+            if stat.S_ISDIR(s.st_mode):
+                if s.st_dev != dev or os.path.ismount(p):
+                    raise Fail("%s: под ним другая файловая система, не удаляю" % p)
+                rec(p)
+                os.rmdir(p)
+            else:
+                os.unlink(p)
+    rec(top)
+    os.rmdir(top)
+
+
+# ---- what a game has -------------------------------------------------------------
+
+def read_text(path, limit=1 << 20):
+    try:
+        with open(path, "rb") as f:
+            return f.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def conf_lines():
+    text = read_text(CONF) or ""
+    out = []
+    for line in text.splitlines():
+        k, eq, v = line.partition("=")
+        if eq and k.strip() and not line.lstrip().startswith("#"):
+            out.append((k.strip(), v.strip()))
+    return out
+
+
+def settings_of(key):
+    """settings.ini of a game: its key and its own controls and options"""
+    lines = ["; bare_app's settings of this game (bare-backup)", "game=%s" % key]
+    for k, v in conf_lines():
+        if k in ("controls." + key, "options." + key):
+            lines.append("%s=%s" % (k, v))
+    return "\n".join(lines) + "\n"
+
+
+def game_dirs(g):
+    """its data directories a copy holds, the ones left out"""
+    dirs, skipped = [], []
+    for d in g.get("storage") or []:
+        if isinstance(d, str) and data_dir_ok(d):
+            if d not in dirs:
+                dirs.append(d)
+        else:
+            skipped.append(d)
+    return dirs, skipped
+
+
+def release():
+    out = {}
+    for line in (read_text(RELEASE) or "").splitlines():
+        k, eq, v = line.partition("=")
+        if eq:
+            out[k.strip()] = v.strip()
+    return out
+
+
+def unit_label():
+    if not UNIT:
+        return "test"
+    rc, out = run([UNIT, "label"], timeout=10)
+    return out.strip() or "ogu"
+
+
+def target_dir(dest):
+    if dest:
+        d = os.path.normpath(os.path.abspath(dest))
+        if not (inside(d, DATA) or inside(d, GAMES)):
+            raise Fail("Копии кладутся только на карту или в /data, не в %s." % dest, 2)
+        return d
+    return CARD_BACKUPS if card_there() else DATA_BACKUPS
+
+
+def copy_name(dirpath, folder, auto):
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    tail = "-auto" if auto else ""
+    name = "saves-%s-%s%s.zip" % (folder, stamp, tail)
+    n = 2
+    while os.path.exists(os.path.join(dirpath, name)):
+        name = "saves-%s-%s-%d%s.zip" % (folder, stamp, n, tail)
+        n += 1
+    return name
+
+
+def zip_add_tree(z, top, arc_top):
+    entries, skipped = walk(top)
+    z.write(top, arc_top + "/")
+    for rel, p, is_dir in entries:
+        z.write(p, arc_top + "/" + rel + ("/" if is_dir else ""))
+    return skipped
+
+
+def make_copy(state, folders, dest, auto=False):
+    """the zip of those games (all: every game, the settings, the recipes); its path"""
+    every = folders is None
+    games = [state["by_folder"][f] for f in (sorted(state["by_folder"]) if every else folders)]
+    d = target_dir(dest)
+    with writing(d):
+        os.makedirs(d, exist_ok=True)
+        name = copy_name(d, "all" if every else folders[0], auto)
+        path = os.path.join(d, name)
+        part = os.path.join(d, "." + name + ".part")
+        manifest = {"format": 1, "kind": "all" if every else "game", "unit": unit_label(),
+                    "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "system": release().get("SDK", ""),
+                    "release": release(), "games": []}
+        try:
+            with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+                sums = {}	# a directory two games share: in the zip once
+                for g in games:
+                    folder = g["folder"]
+                    prefix = "games/%s/" % folder if every else ""
+                    dirs, skipped = game_dirs(g)
+                    entry = {"folder": folder, "name": g.get("name", folder), "kind": g.get("kind", ""),
+                             "key": g.get("key", ""), "prefix": prefix, "dirs": [], "skipped": skipped}
+                    for dd in dirs:
+                        rel = os.path.relpath(dd, DATA)
+                        info = {"path": dd, "rel": rel, "exists": os.path.isdir(dd)}
+                        if info["exists"]:
+                            if dd not in sums:
+                                s, _, _ = tree_sum(dd)
+                                s["links"] = zip_add_tree(z, dd, "data/" + rel)
+                                sums[dd] = s
+                            info.update(sums[dd])
+                        entry["dirs"].append(info)
+                    key = g.get("key", "")
+                    if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{1,8}", key):
+                        z.writestr(prefix + "settings.ini", settings_of(key))
+                        entry["settings"] = True
+                    rdir = os.path.join(RECIPES, folder)
+                    entry["recipe"] = False
+                    if not every and os.path.isdir(rdir):
+                        zip_add_tree(z, rdir, "recipe")
+                        entry["recipe"] = True
+                    manifest["games"].append(entry)
+                if every:
+                    conf = [(k, v) for k, v in conf_lines() if not CONF_SKIP.search(k)]
+                    z.writestr("bare_app.conf", "".join("%s=%s\n" % kv for kv in conf))
+                    manifest["conf"] = True
+                    manifest["recipes"] = []
+                    if os.path.isdir(RECIPES):
+                        for f in sorted(os.listdir(RECIPES)):
+                            if safe_folder(f) and os.path.isdir(os.path.join(RECIPES, f)) and \
+                                    not os.path.islink(os.path.join(RECIPES, f)):
+                                zip_add_tree(z, os.path.join(RECIPES, f), "recipes/" + f)
+                                manifest["recipes"].append(f)
+                z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+            with open(part, "rb") as f:
+                os.fsync(f.fileno())
+            os.rename(part, path)
+        except BaseException:
+            try:
+                os.unlink(part)
+            except OSError:
+                pass
+            raise
+    return path, manifest
+
+
+# ---- the copies there ------------------------------------------------------------
+
+def copies(dirs):
+    out = []
+    for where, d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in sorted(names):
+            m = NAME_RE.match(n)
+            p = os.path.join(d, n)
+            if not m or not os.path.isfile(p):
+                continue
+            st = os.stat(p)
+            out.append({"where": where, "dir": d, "name": n, "folder": m.group(1), "size": st.st_size,
+                        "date": m.group(2), "auto": bool(m.group(4)), "mtime": int(st.st_mtime)})
+    return out
+
+
+def rotate(d, folder):
+    """the last KEEP_AUTO automatic copies of folder in d, older ones deleted"""
+    mine = sorted(c["name"] for c in copies([("", d)]) if c["folder"] == folder and c["auto"])
+    for n in mine[:-KEEP_AUTO]:
+        try:
+            os.unlink(os.path.join(d, n))
+        except OSError as e:
+            say("%s: %s" % (n, e))
+
+
+def stamp_of(g):
+    h = hashlib.md5()
+    newest = 0
+    dirs, _ = game_dirs(g)
+    for d in dirs:
+        s, n = tree_stamp(d) if os.path.isdir(d) else ("-", 0)
+        h.update(("%s %s\n" % (d, s)).encode("utf-8", "surrogateescape"))
+        newest = max(newest, n)
+    key = g.get("key", "")
+    if isinstance(key, str):
+        h.update(settings_of(key).encode())
+    r = os.path.join(RECIPES, g["folder"])
+    if os.path.isdir(r):
+        s, n = tree_stamp(r)
+        h.update(("recipe %s\n" % s).encode())
+    return {"sum": h.hexdigest(), "newest": newest}
+
+
+def stamp_path(folder):
+    return os.path.join(DATA_BACKUPS, ".stamp-" + folder)
+
+
+def has_data(g):
+    dirs, _ = game_dirs(g)
+    return any(os.path.isdir(d) and os.listdir(d) for d in dirs) or \
+        os.path.isdir(os.path.join(RECIPES, g["folder"]))
+
+
+# ---- restoring -------------------------------------------------------------------
+
+def bad_name(n):
+    return (not n or n.startswith("/") or "\\" in n or "\0" in n or
+            any(p in ("..", ".") for p in n.rstrip("/").split("/")) or "//" in n.rstrip("/"))
+
+
+def check_copy(z, state, only):
+    """the manifest and every name of z; the games to restore"""
+    try:
+        manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+    except (KeyError, ValueError, UnicodeDecodeError):
+        raise Fail("Это не копия сохранений: в архиве нет manifest.json.")
+    if manifest.get("format") != 1 or not isinstance(manifest.get("games"), list):
+        raise Fail("Копия сделана другой версией (формат %r)." % manifest.get("format"))
+    games, dirs_of = {}, {}
+    for g in manifest["games"]:
+        f = g.get("folder") if isinstance(g, dict) else None
+        if not isinstance(f, str) or not safe_folder(f):
+            raise Fail("В копии игра с недопустимым именем папки: %r." % f)
+        prefix = g.get("prefix", "")
+        if prefix not in ("", "games/%s/" % f):
+            raise Fail("В копии недопустимое место настроек игры %s." % f)
+        known = state["by_folder"].get(f)
+        allowed = game_dirs(known)[0] if known else None
+        dl = []
+        for d in g.get("dirs") or []:
+            p = d.get("path") if isinstance(d, dict) else None
+            rel = d.get("rel") if isinstance(d, dict) else None
+            if not isinstance(p, str) or not isinstance(rel, str) or bad_name(rel) or \
+                    os.path.join(DATA, rel) != p and os.path.join("/data", rel) != p:
+                raise Fail("В копии недопустимый каталог: %r." % p)
+            target = os.path.join(DATA, rel)	# here, whatever /data the copy came from
+            if not data_dir_ok(target):
+                raise Fail("Каталог копии %s вне /data: не восстанавливаю." % p)
+            if allowed is not None and target not in allowed:
+                raise Fail("Каталог %s не относится к игре %s на этой приставке." % (p, f))
+            dl.append(dict(d, target=target))
+        games[f] = g
+        dirs_of[f] = dl
+    if only and only not in games:
+        raise Fail("В копии нет игры %s." % only)
+    all_rel = ["data/" + d["rel"] for f in dirs_of for d in dirs_of[f]]
+    recipes = manifest.get("recipes") or []
+    for info in z.infolist():
+        n = info.filename
+        if bad_name(n):
+            raise Fail("Недопустимый путь в копии: %r." % n)
+        mode = info.external_attr >> 16
+        if mode and stat.S_ISLNK(mode):
+            raise Fail("Ссылка в копии: %s." % n)
+        if n in ("manifest.json", "bare_app.conf", "settings.ini"):
+            continue
+        if n.startswith("recipe/") or n == "recipe/":
+            continue
+        m = re.match(r"^games/([^/]+)/(settings\.ini|recipe/.*)$", n)
+        if m and m.group(1) in games:
+            continue
+        m = re.match(r"^recipes/([^/]+)(/.*)?$", n)
+        if m and safe_folder(m.group(1)) and m.group(1) in recipes:
+            continue
+        if any(n == r or n == r + "/" or n.startswith(r + "/") for r in all_rel):
+            continue
+        raise Fail("Недопустимый путь в копии: %s." % n)
+    return manifest, [f for f in games if not only or f == only], games, dirs_of
+
+
+def unpack(z, arc_top, dest):
+    """the members under arc_top/ into dest (made here), modes and times kept"""
+    os.makedirs(dest)
+    pref = arc_top + "/"
+    for info in z.infolist():
+        n = info.filename
+        if not n.startswith(pref) or n == pref:
+            continue
+        rel = n[len(pref):]
+        out = os.path.join(dest, rel)
+        if not inside(out, dest):
+            raise Fail("Недопустимый путь в копии: %s." % n)
+        if n.endswith("/"):
+            os.makedirs(out, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with z.open(info) as src, open(out, "wb") as dst:
+            for b in iter(lambda: src.read(1 << 20), b""):
+                dst.write(b)
+        mode = (info.external_attr >> 16) & 0o777
+        os.chmod(out, mode or 0o644)
+        t = time.mktime(info.date_time + (0, 0, -1))
+        os.utime(out, (t, t))
+
+
+def swap_in(pairs):
+    """each (stage, target): target to target.bak, stage to target; all of them or,
+    on a failure, the old ones back"""
+    done = []	# [stage, target, it was there, the stage moved in]
+    fail_at = int(E("BARE_BACKUP_SWAP_FAIL", "-1")) if TEST else -1
+    try:
+        for i, (stage_dir, target) in enumerate(pairs):
+            if i == fail_at:
+                raise OSError("test: the move of %s fails" % target)
+            had = os.path.lexists(target)
+            if had:
+                os.rename(target, target + ".bak")
+            step = [stage_dir, target, had, False]
+            done.append(step)
+            os.rename(stage_dir, target)
+            step[3] = True
+    except BaseException:
+        for stage_dir, target, had, moved in reversed(done):
+            if moved:
+                os.rename(target, stage_dir)
+            if had:
+                os.rename(target + ".bak", target)
+        raise
+    return [(st, t, had) for st, t, had, _ in done]
+
+
+def restore(path, only):
+    try:
+        z = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as e:
+        raise Fail("Файл не открывается как zip: %s." % e)
+    with z:
+        bad = z.testzip()
+        if bad:
+            raise Fail("Копия повреждена (%s): ничего не изменено." % bad)
+        state = bare_app_state()
+        manifest, targets, games, dirs_of = check_copy(z, state, only)
+        for f in targets:
+            if running(state, f):
+                raise Fail("Игра %s сейчас запущена: закройте её и повторите." % f, 3)
+        # every directory unpacked beside its place first
+        pairs, done = [], []
+        try:
+            for f in targets:
+                for d in dirs_of[f]:
+                    if not d.get("exists"):
+                        continue
+                    target = d["target"]
+                    if os.path.lexists(target + ".bak"):
+                        raise Fail("Осталась %s.bak от прерванного восстановления: "
+                                   "разберитесь с ней и повторите." % target)
+                    stage_dir = target + STAGE
+                    if os.path.lexists(stage_dir):
+                        rmtree(stage_dir)
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    unpack(z, "data/" + d["rel"], stage_dir)
+                    pairs.append((stage_dir, target))
+                    s, _, _ = tree_sum(stage_dir)
+                    if s["md5"] != d.get("md5"):
+                        raise Fail("Распакованное в %s не совпало с копией (md5): ничего не "
+                                   "изменено." % target)
+            done = swap_in(pairs)
+        except BaseException:
+            for stage_dir, _ in pairs:
+                if os.path.lexists(stage_dir):
+                    rmtree(stage_dir)
+            raise
+        for _, target, had in done:
+            if had:
+                rmtree(target + ".bak")
+        report = {"restored": [], "settings": [], "recipes": []}
+        for f in targets:
+            report["restored"].append(f)
+        # the settings: through bare_app
+        for f in targets:
+            name = games[f].get("prefix", "") + "settings.ini"
+            if name not in z.namelist():
+                continue
+            imp = os.path.join(RUN, "import-%s.ini" % f)
+            with open(imp + ".tmp", "wb") as out:
+                out.write(z.read(name))
+            os.rename(imp + ".tmp", imp)
+            if ctl("import-settings " + imp):
+                report["settings"].append(f)
+            else:
+                say("bare_app does not read %s: the settings of %s not restored" % (CTL, f))
+        # the recipes' layers: onto the card
+        layers = []
+        for f in targets:
+            arc = "games/%s/recipe" % f if games[f].get("prefix") else "recipe"
+            if any(n.startswith(arc + "/") for n in z.namelist()):
+                layers.append((f, arc))
+        if manifest.get("kind") == "all":
+            for f in manifest.get("recipes") or []:
+                if (not only or f == only) and all(f != x for x, _ in layers):
+                    layers.append((f, "recipes/" + f))
+        if layers:
+            if not card_there():
+                say("no card: the recipes' layers not restored")
+            else:
+                with CardWriting():
+                    for f, arc in layers:
+                        target = os.path.join(RECIPES, f)
+                        stage_dir = target + STAGE
+                        if os.path.lexists(stage_dir):
+                            rmtree(stage_dir)
+                        os.makedirs(RECIPES, exist_ok=True)
+                        unpack(z, arc, stage_dir)
+                        had = os.path.lexists(target)
+                        if had:
+                            if os.path.lexists(target + ".bak"):
+                                rmtree(target + ".bak")
+                            os.rename(target, target + ".bak")
+                        os.rename(stage_dir, target)
+                        if had:
+                            rmtree(target + ".bak")
+                        report["recipes"].append(f)
+        for f in set(report["recipes"]) | set(report["settings"]):
+            ctl("reload " + f)
+    return report
+
+
+# ---- the commands ----------------------------------------------------------------
+
+def cmd_backup(args):
+    if not args or len(args) > 2:
+        raise Fail("backup FOLDER|all [DIR]", 2)
+    what, dest = args[0], args[1] if len(args) > 1 else None
+    state = bare_app_state()
+    if what != "all" and (not safe_folder(what) or what not in state["by_folder"]):
+        raise Fail("Нет игры %s." % what)
+    with Lock(30):
+        path, _ = make_copy(state, None if what == "all" else [what], dest)
+    print(path)
+
+
+def cmd_auto(args):
+    if len(args) != 1 or not safe_folder(args[0]):
+        raise Fail("auto FOLDER", 2)
+    folder = args[0]
+    state = bare_app_state()
+    g = state["by_folder"].get(folder)
+    if not g:
+        raise Fail("Нет игры %s." % folder)
+    with Lock(120):
+        if not has_data(g):
+            print("nothing")
+            return
+        now = stamp_of(g)
+        old = None
+        try:
+            with open(stamp_path(folder)) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if old and old.get("sum") == now["sum"]:
+            print("unchanged")
+            return
+        path, _ = make_copy(state, [folder], None, auto=True)
+        with writing(path):
+            rotate(os.path.dirname(path), folder)
+        os.makedirs(DATA_BACKUPS, exist_ok=True)
+        tmp = stamp_path(folder) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(dict(now, copy=path), f)
+        os.rename(tmp, stamp_path(folder))
+    print(path)
+
+
+def cmd_restore(args):
+    only = None
+    if "--game" in args:
+        i = args.index("--game")
+        if i + 1 >= len(args):
+            raise Fail("restore ZIP [--game FOLDER]", 2)
+        only = args[i + 1]
+        args = args[:i] + args[i + 2:]
+        if not safe_folder(only):
+            raise Fail("Недопустимое имя папки: %s." % only, 2)
+    if len(args) != 1:
+        raise Fail("restore ZIP [--game FOLDER]", 2)
+    with Lock(30):
+        report = restore(args[0], only)
+    print(json.dumps(report, ensure_ascii=False))
+
+
+def dir_size(d):
+    total, files = 0, 0
+    for _, p, is_dir in walk(d)[0]:
+        if not is_dir:
+            files += 1
+            try:
+                total += os.lstat(p).st_size
+            except OSError:
+                pass
+    return total, files
+
+
+def cmd_list(args):
+    if len(args) > 1:
+        raise Fail("list [DIR]", 2)
+    if args:
+        places = [("dir", os.path.normpath(os.path.abspath(args[0])))]
+    else:
+        places = [("card", CARD_BACKUPS), ("data", DATA_BACKUPS)]
+    out = {"copies": copies(places), "card": card_there(), "games": []}
+    try:
+        state = bare_app_state()
+    except Fail as e:
+        out["error"] = str(e)
+        state = None
+    if state:
+        r = state.get("running")
+        out["running"] = r.get("folder") if isinstance(r, dict) else None
+        for f, g in sorted(state["by_folder"].items()):
+            dirs, skipped = game_dirs(g)
+            info = {"folder": f, "name": g.get("name", f), "kind": g.get("kind", ""), "dirs": [],
+                    "size": 0, "files": 0, "has_layer": bool(g.get("has_layer")),
+                    "available": bool(g.get("available"))}
+            for d in dirs:
+                size, files = dir_size(d) if os.path.isdir(d) else (0, 0)
+                info["dirs"].append({"path": d, "exists": os.path.isdir(d), "size": size, "files": files})
+                info["size"] += size
+                info["files"] += files
+            out["games"].append(info)
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_info(args):
+    if len(args) != 1:
+        raise Fail("info ZIP", 2)
+    try:
+        with zipfile.ZipFile(args[0]) as z:
+            manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, UnicodeDecodeError):
+        raise Fail("Это не копия сохранений (нет manifest.json или архив повреждён).")
+    print(json.dumps(manifest, ensure_ascii=False))
+
+
+def main(argv):
+    cmds = {"backup": cmd_backup, "auto": cmd_auto, "restore": cmd_restore, "list": cmd_list,
+            "info": cmd_info}
+    if len(argv) < 2 or argv[1] not in cmds:
+        say(__doc__.strip().splitlines()[0])
+        return 2
+    try:
+        cmds[argv[1]](argv[2:])
+    except Fail as e:
+        say(str(e))
+        return e.code
+    except OSError as e:
+        say("%s" % e)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
