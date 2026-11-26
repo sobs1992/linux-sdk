@@ -1580,6 +1580,71 @@ md5-and-state.txt); bare_app.conf вернулся к md5 48ccbba…, карта
 Замечено: test_stream (этап 10) нестабилен на ПК — `wait_viewers(3, 1000)` в строке 487 падает и без этой
 правки (4 из 10 прогонов на коммите 36248e2, 2 из 10 с правкой; полный прогон после b3299eb прошёл 10/10); не исправлялся.
 
+## Ревью 7 (этап 10): замечания и исправления (2026-11-26, builder, ветка `web`, не слито, не запушено)
+
+Ревью этапа 10: PASS с правками. Инварианты: (1) отставший TCP-игрок (RTSP) и браузер получают кадры
+целиком или пропуск до ключевого, никогда короткую запись (место — половина SO_SNDBUF для обоих); (2)
+сломавшийся кодер Layer II не достаётся следующему браузеру; (3) вход второго браузера не начинает счётчики
+TS первого заново; (4) остановка потока при смотрящем браузере выгружает libavcodec; (5) на странице один
+плеер на один выбор «Поток», а запрос `on`, вернувшийся после ухода, кончается `off`; (6) игра Windows в
+петле ждёт в очереди не больше ~40 мс, без маршрута — как раньше (ALSA_CARD=0, конфигурация alsa-lib своя).
+
+| Замечание | Что сделано | Коммит |
+|---|---|---|
+| 1. room() для RTSP по TCP не строгий | `sock_room(..., true)`; в test_stream первый браузер и RTSP-игрок читаются в своих нитях, пока входит второй; test_slow_rtsp (буфер 16 КБ, ~300 КБ/с, 6 с — не отключён) | bare_app 5bc0c60 |
+| 2. второй плеер при Поток→Снимок→Поток, уход во время POST | счётчик запусков в checkTab: устаревший showStream ничего не создаёт и шлёт `off`, если поток в этой вкладке не нужен; `ended` убрана | SDK 1539f4a |
+| 3. сломанный mp2 следующему браузеру | `mp2_failed` → http_follow() выгружает сразу, on_audio() не кормит | bare_app 5bc0c60 |
+| 4. тесты: счётчики первого браузера, stream_stop при браузере | ts_seen.cc_breaks по всем PID — 0 у первого браузера за всё время (вход второго внутри), gaps 0; test_stop_watched: конец соединения, libavcodec выгружена | bare_app 5bc0c60 |
+| 5. mpegts.js каждый раз 273 КБ | ETag (md5 файла) + Cache-Control: no-cache, 304 без тела; остальное no-store | SDK e8ae1b9 |
+| 6. задержка звука Windows-игр в петле | замер: 73–85 мс (больше 60) → data/wine-alsa.conf через ALSA_CONFIG_PATH только в петле: 28–40 мс | bare_app 9e5cd25 |
+
+Замер п. 6. В /proc у подпотока петли под dmix appl_ptr = 0: dmix его ядру не сообщает. Сумма dmix в shm
+тоже не годится — она не очищается. Поэтому мерил shim-библиотекой через LD_PRELOAD (только на время
+замера, в /tmp): snd_pcm_delay до и после каждого snd_pcm_writei у winealsa, итог каждые 2 с. Свой
+«default» петли (cards/Loopback.conf: softvol над dmix, периоды 1024): Pirates! и NFSU — до записи от
+3520, после записи до 4096 кадров, в среднем 4025–4075 (73–85 мс; winealsa держит 4 периода). С
+wine-alsa.conf (plug над стандартным dmix:CARD,DEV из ALSA_CARD/ALSA_PCM_DEVICE,
+defaults.dmix.Loopback.period_size 480 и periods 4; capture — null): 1344–1920, в среднем 1820–1920
+(28–40 мс), hw_params петли 480/1920. Четыре запуска подряд (Pirates!, NFSU, Pirates!, NFSU) — все в
+pcmC1D0p. NFSU 80 с: на card0 0 перезапусков и 0 XRUN, в очереди не меньше 1036 кадров, в потоке −21,8 дБ;
+в журналах игр одна строка «underrun» в момент старта. Отброшенный вариант — свой `type dmix` в файле:
+после убитого клиента следующий не открывал slave («unable to open slave», EINVAL), и каждая вторая игра
+уходила в устройство. Стандартное определение dmix такой ошибки не даёт (причину не выяснял; в нём
+явно указан подпоток 0); проверено atest: kill -9, затем снова — ok, три раза. Добавку card0 passthrough (22–30 мс) не мерил.
+
+Тесты: bare_app ctest 10/10. test_stream — по 10 прогонов при шести `yes > /dev/null`: 0/10 падений в
+сборке без заголовков FFmpeg и 0/10 в сборке с ними (FFMPEG_INCLUDE_DIR из scratchpad, Layer II через
+libavcodec ПК). test-bare-web.py: 88 OK. Мутации (все пойманы): ts_init для каждого браузера, нет mp2_close
+в stream_stop, room() не строгий, ALSA_CONFIG_PATH не передан, передан и для устройства, ETag всегда 200,
+no-store у mpegts.js.
+
+OGU1 (копия до замены: /media/D/OdroidLab/backups/ogu/web-stage1-2026-11-25/stage10d-before/ — files.tar:
+bare_app, /usr/share/bare-web, bare_web.py, bare_app.conf; md5-and-state.txt). Установлены bare_app 9e5cd25
+(md5 2b5eae6c…), /usr/share/bare_app/wine-alsa.conf (b74d27b6…), app.js 1539f4a (32adce79…), bare_web.py
+e8ae1b9 (c903802a…); S43web перезапущен.
+- Pirates! при `stream=1`: у игры в окружении ALSA_CONFIG_PATH=/usr/share/bare_app/wine-alsa.conf, она
+  держит pcmC1D0p 480/1920, state.json sound true.
+- RTSP по TCP при идущей Pirates! (cvlc у Ubuntu без live555 и `--rtsp-tcp` не знает, поэтому ffmpeg
+  `-rtsp_transport tcp`): 14 с записаны целиком (13,996 с), пауза чтения 3 с — зритель остаётся (viewers 1),
+  в журнале только connected/plays/gone. Медленный читатель на Python (буфер 16 КБ, 100 КБ/с, 12 с) не
+  отключён. Однако и прежний bare_app b3299eb в тех же условиях его не отключал: на приставке короткая запись
+  не воспроизвелась. Строгость проверяется тестом test_slow_rtsp на ПК — мутация ловится.
+- mpegts.js: 200 272 955 Б с ETag, с If-None-Match — 304 0 Б.
+- Headless Chrome: вкладка «Проверка», через 300 мс «Снимок», «Поток», «Снимок», «Поток» подряд → через 7 с
+  viewers 1, видео идёт.
+Не проверено: уход с вкладки во время ожидания POST на приставке с `stream=0` (только логика и сценарий
+переключателя); сломавшийся кодер Layer II (libavcodec по заказу не ломается, теста нет); слух и задержка
+card0; образ (`make FW=ogu rootfs`) не собирался — wine-alsa.conf ставится `install(FILES …)` в
+CMakeLists.txt, как errors.ini.
+
+Замечено попутно: на OGU1 в /games/backups лежит saves-pirates-2026-11-26_13-25-05-auto.zip, и
+/data/backups/.stamp-pirates изменился (67e52804…). Это сделала не эта работа. В журнале bare_app в это
+время: запуск Pirates! через FIFO в 13:23 UTC, «quit combo» в 13:25 (после моей сдачи предыдущего круга),
+затем автокопия; там же попытки GET /live.ts с 192.168.7.1 (403). Файлы не трогал.
+
+После: игра закрыта, bare_app.conf md5 48ccbba… (`stream=1`, `web=auto`), режим auto, карта ro, writers 0,
+тестовых файлов в /tmp нет (shim, atest, pcmwatch, конфиги удалены). OGU2 не тронута.
+
 ## Риски
 
 - Память: Python-сервер ~10–15 МБ при играх у предела памяти → запуск по кабелю.
