@@ -88,7 +88,6 @@ BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks). In a test a place it doe
 none: never the device's own (hook()).
 """
 import http.server
-import io
 import json
 import os
 import re
@@ -99,6 +98,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import zlib
 
 E = os.environ.get
 TEST = "BARE_WEB_GAMES" in os.environ	# the card: a directory of a test, as it is
@@ -1314,9 +1314,17 @@ def recipe_of(folder, st=None):
     return r
 
 
-def wait_effective(r, had_layer, timeout=2.0):
+def games_json_stamp():
+    try:
+        return os.stat(os.path.join(RUN, "games.json")).st_mtime_ns
+    except (OSError, TypeError):
+        return None
+
+
+def wait_effective(r, before, timeout=2.0):
     """after "reload": until bare_app has written (or removed) the effective
-    ini of the layer as it is now"""
+    ini of the layer as it is now, and games.json again (its state of the
+    layer; before: its time before the reload)"""
     if not r.eff_path:
         return
     end = time.monotonic() + timeout
@@ -1329,7 +1337,8 @@ def wait_effective(r, had_layer, timeout=2.0):
             em = os.stat(r.eff_path).st_mtime_ns
         except OSError:
             em = None
-        if (lm is None and em is None) or (lm is not None and em is not None and em >= lm):
+        if ((lm is None and em is None) or (lm is not None and em is not None and em >= lm)) and \
+                games_json_stamp() != before:
             return
         time.sleep(0.05)
 
@@ -1368,9 +1377,10 @@ def put_layer(r, entries):
     except (CardError, OSError) as e:
         raise Refused(500, "Правки не записаны: %s" % e)
     log.info("layer %s: %s", r.folder, "%d lines" % len(entries) if text else "removed")
+    before = games_json_stamp()
     told = ctl("reload " + r.folder)
     if told:
-        wait_effective(r, bool(text))
+        wait_effective(r, before)
     return told
 
 
@@ -1492,6 +1502,37 @@ def shot_path(pid):
     return "/tmp/bare_app.ppm"
 
 
+def ppm_png(data, width):
+    """bare_app's PPM (P6, 8 bits) as PNG bytes, by zlib alone: Pillow would
+    keep ~8 MB more in this server for good. width: at most that wide, taken
+    down by a whole step (every 2nd pixel and row of 854 for 480)"""
+    m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
+    if not m:
+        raise ValueError("not a PPM of 8 bits")
+    w, h = int(m.group(1)), int(m.group(2))
+    px = memoryview(data)[m.end():]
+    if len(px) < w * h * 3:
+        raise ValueError("a PPM cut short")
+    step = max(1, -(-w // width)) if width else 1
+    ow, oh = -(-w // step), -(-h // step)
+    rows = bytearray()
+    for y in range(0, h, step):
+        row = px[y * w * 3:(y + 1) * w * 3]
+        rows.append(0)	# filter: none
+        if step == 1:
+            rows += row
+        else:
+            out = bytearray(ow * 3)
+            for c in range(3):
+                out[c::3] = row[c::3][::step]
+            rows += out
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", ow, oh, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(bytes(rows), 1)) + chunk(b"IEND", b""))
+
+
 def take_shot(width):
     """the screen now (bare_app's layers, SIGUSR1) as PNG bytes; width: at
     most that wide"""
@@ -1523,16 +1564,9 @@ def take_shot(width):
         except OSError:
             pass
     try:
-        from PIL import Image
-        im = Image.open(io.BytesIO(data))
-        im.load()
-        if width and width < im.width:
-            im = im.resize((width, max(1, round(im.height * width / im.width))), Image.BILINEAR)
-        out = io.BytesIO()
-        im.save(out, "PNG", compress_level=1)
-    except Exception as e:	# a broken file, no Pillow
+        return ppm_png(data, width)
+    except ValueError as e:
         raise Refused(500, "Снимок не читается: %s" % e)
-    return out.getvalue()
 
 
 PRESSED = {}	# button: the press's number (released on its own after PRESS_MAX)

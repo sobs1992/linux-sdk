@@ -814,6 +814,11 @@ class FakeBareApp:
 
     def react(self, line):
         cmd, _, arg = line.partition(" ")
+        if cmd == "reload":	# games.json written anew, as bare_app does
+            time.sleep(0.01)
+            gj = os.path.join(ENV["BARE_WEB_RUN"], "games.json")
+            if os.path.exists(gj):
+                os.utime(gj)
         if cmd == "reload" and arg in self.games:
             base, layer, eff = self.games[arg]
             if os.path.exists(layer):
@@ -1180,9 +1185,13 @@ class CheckTest(unittest.TestCase):
                 from PIL import Image
                 im = Image.open(io.BytesIO(d))
                 self.assertEqual(im.size, (64, 32))
+                want = bytes((x * 4, y * 8, 128)[c] for y in range(32) for x in range(64) for c in range(3))
+                self.assertEqual(im.convert("RGB").tobytes(), want)	# every pixel as bare_app wrote it
                 self.assertFalse(os.path.exists(path))	# not left in /run
                 s, h, d = req("GET", "/api/shot.png?w=32")
-                self.assertEqual(Image.open(io.BytesIO(d)).size, (32, 16))
+                small = Image.open(io.BytesIO(d))
+                self.assertEqual(small.size, (32, 16))	# every 2nd pixel and row
+                self.assertEqual(small.convert("RGB").getpixel((5, 3)), (40, 48, 128))
                 # at the same time: one after another, each its own picture
                 res = []
                 ts = [threading.Thread(target=lambda: res.append(req("GET", "/api/shot.png")[0])) for _ in range(3)]
