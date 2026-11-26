@@ -1534,6 +1534,40 @@ bare_app.conf как до (md5 48ccbba…, `stream=1`, `web=auto`), режим �
 сохранения pirates по md5 не менялись, /data/backups/.stamp-pirates тот же; тестовых файлов в /tmp нет
 (tone10, cpu10.py, deploy10.tar удалены). Игра закрыта. OGU2 не тронута.
 
+#### Этап 10, дополнение: подсказка о звуке (2026-11-26, builder, ветка `web`, не слито, не запушено)
+
+Решение пользователя: звук игр не трогать, на «Проверке» объяснять, почему в потоке нет звука. bare_app
+375ef8e: state.json `stream` получил `sound` (игра запущена, пока работал route, и играет в петлю:
+`route_game && !sound_direct`) и `sound_direct` (новый флаг `game_def.sound_direct`, у Windows-игр: winealsa
+играет в ALSA «default», то есть прямо в устройство); без игры оба false. SDK 46a31fa (app.js): в режиме
+«Поток» при идущей игре и `sound === false` под видео строка, кнопка звука неактивна с тем же текстом в title:
+«Звука нет: игра запущена до включения потока. Перезапустите игру; чтобы звук был в потоке сразу, включите на
+приставке настройку «Трансляция (RTSP)» (Настройки → Интернет).» (так называется настройка `stream`, S_STREAM,
+она в категории «Интернет», а не в «Система»), для `sound_direct` — «Звука нет: игры Windows играют прямо в
+динамик приставки, мимо потока.»
+
+Отклонение от задания и поправка к абзацу выше: «с включённой настройкой `stream` звук есть всегда» неверно
+для Windows-игр. На OGU1 при `stream=1` Pirates! держит /dev/snd/pcmC0D0p (не петлю pcmC1D0p, как Doom), в
+потоке −91 дБ; `route_game` у неё true, поэтому `sound` без `sound_direct` врал бы. Проверка в задании
+«stream=1, pirates → sound true» заменена: Doom → true (в потоке звук −22,8 дБ), Pirates → false +
+sound_direct. Звук Windows-игр в потоке — отдельное решение пользователя (например, winealsa в петлю).
+
+Проверено: ctest на ПК (test_core test_ctl_state_sound, game_state; мутаций 9, поймано 8; не ловится на ПК
+`sound = route_game` без `!sound_direct`: на ПК нет петли, проверено на OGU1); headless Chrome на тестовом
+сервере test-bare-web.py (поддельный TS-поток): ok / late / direct / нет поля / нет игры, «Снимок» и обратно,
+late → ok на открытой странице, ошибок JS нет. OGU1 (bare_app e8155f22…, app.js 26319d89…): `stream=1`
+Doom sound true, Pirates sound false + sound_direct true, страница — строка про Windows; `stream=0`, Doom,
+FIFO `stream on` → sound false, в потоке −91 дБ, страница — строка «запущена до включения»; Doom заново во
+время сессии → sound true, −23,8 дБ, строки нет. Резервная копия: /media/D/OdroidLab/backups/ogu/
+web-stage1-2026-11-25/stage10b-before/ (files.tar, pirates-data.tar, doom-data.tar, md5-and-state.txt).
+После: bare_app.conf md5 48ccbba… (`stream=1`), журналы pirates/doom и реестр Wine из копии, сохранения
+pirates по md5 те же, карта ro, writers 0. Возврат файлов tar-архивом с ПК на минуты сменил владельца
+(uid 1000) и права /data, /data/logs, /data/wine, /data/wine/prefix и возвращённых файлов; исправлено (root:root,
+755/700/700/700 — как в data.tar от 2026-11-25).
+
+Замечено: test_stream (этап 10) нестабилен на ПК — `wait_viewers(3, 1000)` в строке 487 падает и без этой
+правки (4 из 10 прогонов на коммите 36248e2, 2 из 10 с правкой); не исправлялся.
+
 ## Риски
 
 - Память: Python-сервер ~10–15 МБ при играх у предела памяти → запуск по кабелю.
