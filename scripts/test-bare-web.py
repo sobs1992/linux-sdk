@@ -1293,6 +1293,17 @@ class PinTest(unittest.TestCase):
             self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
         self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 429)
 
+    def test_forwarded_for_not_counted(self):
+        """the address counted is the connection's: X-Forwarded-For (or any
+        header) does not give another one"""
+        for i in range(5):
+            s, h, d = freq("POST", "/api/pin", {"pin": "000000"},
+                           headers={"X-Forwarded-For": "10.9.9.%d" % i, "X-Real-IP": "10.9.8.%d" % i})
+            self.assertEqual(s, 403 if i < 4 else 429, (i, d))
+        self.assertEqual(list(bw.PIN_STATE), [FOREIGN])
+        s, h, d = freq("POST", "/api/pin", {"pin": "123456"}, headers={"X-Forwarded-For": "10.9.9.99"})
+        self.assertEqual(s, 429)	# paused for FOREIGN whatever the header says
+
     def test_wrong_pins_addresses_kept(self):
         """at most PIN_ADDRS addresses: the one longest untouched dropped, the others
         keep their counts"""
@@ -1701,7 +1712,7 @@ class RecipeTest(unittest.TestCase):
         s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
             "": {"mode": "1024x768", "modes": ["1280x960", "640x480"]}, "keys": {"select": "esc"}}})
         self.assertEqual(s, 200, r)
-        self.assertEqual(pirates()["layer_keys"], 4)	# mode, two modes lines, select
+        self.assertEqual(pirates()["layer_keys"], 3)	# mode, modes (two lines: one key), select
         with open(os.path.join(ENV["BARE_WEB_RUN"], "state.json"), "w") as f:
             json.dump({"running": "pirates", "pid": 1, "time": int(time.time())}, f)
         self.assertTrue(pirates()["running"])
@@ -1709,6 +1720,12 @@ class RecipeTest(unittest.TestCase):
         with open(self.layer(), "a") as f:
             f.write("not a line of an ini\n")
         self.assertIsNone(pirates()["layer_keys"])
+        with open(self.layer(), "w") as f:	# an empty file: no changes
+            f.write("")
+        self.assertEqual(pirates()["layer_keys"], 0)
+        with open(self.layer(), "w") as f:	# comments only: none either
+            f.write("; nothing\n\n")
+        self.assertEqual(pirates()["layer_keys"], 0)
         self.assertEqual({g["id"]: g for g in jreq("GET", "/api/games")[1]["games"]}["fake"]["layer_keys"], 0)
 
     def test_empty_value_drops(self):
@@ -2418,6 +2435,7 @@ class DeleteTest(unittest.TestCase):
         self.layer = os.path.join(GAMES, "recipes", "deltest", "wine.ini")
         os.makedirs(os.path.dirname(self.layer), exist_ok=True)
         touch(self.layer, b"mode = 640x480\n")
+        self.mark = os.path.join(ENV["BARE_WEB_RUN"], "deleting", "deltest")
         self.saves = os.path.join(DATA, "saves-deltest", "slot1.sav")
         os.makedirs(os.path.dirname(self.saves), exist_ok=True)
         touch(self.saves, b"save")
@@ -2484,6 +2502,8 @@ class DeleteTest(unittest.TestCase):
         self.assertEqual(jreq("POST", "/api/game/deltest/delete")[0], 409)
         self.assertTrue(os.path.isfile(os.path.join(self.top, "wine.ini")))
         self.assertEqual(len(card_rw_calls()), self.rw)
+        self.assertFalse(os.path.lexists(self.mark))	# the refusal takes its mark back
+        self.assertTrue(self.install_lock_free())
 
     def test_refused_while_installing(self):
         # game-install holds its lock (an install, a removal, a heal of the device's)
@@ -2539,6 +2559,9 @@ class DeleteTest(unittest.TestCase):
             p = subprocess.run([sys.executable, GAME_INSTALL, "remove", os.path.join(GAMES, "install", "x")],
                                capture_output=True, text=True, timeout=60)
             self.assertIn("fail busy", p.stdout, (p.stdout, p.stderr))
+            # bare_app's mark: this game is being deleted, by the server's pid
+            with open(self.mark) as f:
+                self.assertEqual(f.read(), "%d\n" % os.getpid())
             self.assertEqual(jreq("POST", "/api/game/deltest/delete")[0], 409)	# one at a time
         finally:
             go.set()
@@ -2546,6 +2569,34 @@ class DeleteTest(unittest.TestCase):
         self.assertEqual(events(r["job"])[-1]["type"], "done")
         self.assertFalse(os.path.lexists(self.top))
         self.assertTrue(self.install_lock_free())
+        self.assertFalse(os.path.lexists(self.mark))	# gone with the job
+
+    def test_other_file_system(self):
+        """a folder inside of another file system (its st_dev differs from the
+        game's folder's): refused before anything is deleted"""
+        real = os.lstat
+        top = self.top
+
+        def lstat(p, *a, **k):
+            st = real(p, *a, **k)
+            if os.fspath(p) == top:
+                v = list(st)
+                v[2] = st.st_dev + 1	# st_dev
+                return os.stat_result(v)
+            return st
+        os.lstat = lstat
+        try:
+            s, r = jreq("POST", "/api/game/deltest/delete")
+            self.assertEqual(s, 200, r)
+            ev = events(r["job"])
+        finally:
+            os.lstat = real
+        self.assertEqual(ev[-1]["type"], "fail", ev)
+        self.assertIn("другая файловая система", ev[-1]["text"])
+        self.assertEqual(len(os.listdir(os.path.join(self.top, "data"))), 32)	# nothing deleted
+        self.assertEqual(len(card_rw_calls()), self.rw)	# the card not made writable
+        self.assertTrue(self.install_lock_free())
+        self.assertFalse(os.path.lexists(self.mark))
 
     def test_only_its_own_folder(self):
         # a link in /games to a game elsewhere: not deleted, nor what it points at

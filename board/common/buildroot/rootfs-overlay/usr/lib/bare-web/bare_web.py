@@ -82,7 +82,9 @@ password (Wi-Fi is later, with a PIN on the screen).
                                    recipes) and saved games (/data) stay; 409
                                    while it runs, a job runs, game-install or
                                    bare-backup holds its lock (the delete holds
-                                   game-install's while it runs)
+                                   game-install's while it runs, and marks
+                                   <run>/deleting/FOLDER with its pid: bare_app
+                                   does not start the game meanwhile)
   GET  /api/shot.png[?w=W]         the screen now (SIGUSR1, bare_app's PPM)
   POST /api/pad                    {button, down}: FIFO press/release
   POST /api/stick                  {stick, x, y, ms}: the stick held there
@@ -702,7 +704,9 @@ def games():
 
 def layer_keys(g):
     """the keys of a game's layer (/games/recipes/FOLDER/wine.ini or game.ini),
-    for the workshop's list: 0 none, None a layer that does not read"""
+    for the workshop's list: each (section, key) once (a repeated one, reg or
+    writable, is one key); 0 none (no file, an empty one), None a layer that
+    does not read"""
     ini = {"wine.ini": "wine.ini", "game.ini": "game.ini"}.get(g["kind"])
     if not ini or not g["folder"]:
         return 0
@@ -710,7 +714,7 @@ def layer_keys(g):
     if os.path.islink(p) or not os.path.isfile(p):
         return 0
     try:
-        return len(ini_parse(read(p, 1 << 20) or "", strict=True))
+        return len({(e[0], e[1]) for e in ini_parse(read(p, 1 << 20) or "", strict=True)})
     except IniError:
         return None
 
@@ -2379,6 +2383,32 @@ def game_folder(folder):
 DELETE_STEP = 0.5	# s between the delete's progress lines
 
 
+def deleting_path(folder):
+    """the mark of a game being deleted, for bare_app (it does not start that
+    game while the mark's pid lives): <run>/deleting/FOLDER, None without a run
+    directory"""
+    return os.path.join(RUN, "deleting", folder) if RUN else None
+
+
+def deleting_mark(folder):
+    p = deleting_path(folder)
+    if not p:
+        return
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".new", "w") as f:
+        f.write("%d\n" % os.getpid())
+    os.replace(p + ".new", p)
+
+
+def deleting_unmark(folder):
+    p = deleting_path(folder)
+    try:
+        if p:
+            os.remove(p)
+    except FileNotFoundError:
+        pass
+
+
 def delete_work(folder, top, name, lock_fd):
     def work(job):
         try:
@@ -2415,6 +2445,7 @@ def delete_work(folder, top, name, lock_fd):
         except CardError as e:
             job.emit("fail", code="card", arg=str(e), text="Игра не удалена: %s" % e)
         finally:
+            deleting_unmark(folder)
             os.close(lock_fd)
             with SIZES_LOCK:
                 SIZES.pop(folder, None)
@@ -3398,8 +3429,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.fail(503, why)
         try:
             top, name = game_folder(folder)
-            if running_game() == folder:
-                raise Refused(409, "Игра «%s» идёт: сначала выйдите из неё." % name)
             inside = mounts_in(os.path.realpath(top))
             if inside:
                 raise Refused(409, "В папке игры смонтирован другой диск (%s): не удаляю." % inside[0])
@@ -3421,8 +3450,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError as e:
             os.close(lock_fd)
             return self.fail(500, "Замок копий не открывается: %s" % e)
+        # the mark first, then whether it runs: bare_app does not start it after
+        # the mark, a start before it is seen running
+        try:
+            deleting_mark(folder)
+        except OSError as e:
+            os.close(lock_fd)
+            return self.fail(500, "Метка удаления не пишется: %s" % e)
+        if running_game() == folder:
+            deleting_unmark(folder)
+            os.close(lock_fd)
+            return self.fail(409, "Игра «%s» идёт: сначала выйдите из неё." % name)
         job = Jobs.start("delete", name, delete_work(folder, top, name, lock_fd))
         if not job:
+            deleting_unmark(folder)
             os.close(lock_fd)
             return self.fail(409, "Уже идёт другое задание (установка, обновление или удаление), дождитесь его.",
                              code="busy")
