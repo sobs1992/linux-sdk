@@ -941,6 +941,11 @@ function stickButton(stick, x, y, label) {
 // the picture of the check: the stream (mpegts.js, MSE) or a snapshot a second
 const STREAM_OK = () => !!(window.mpegts && mpegts.isSupported());
 const STREAM_NO_FRAME_MS = 8000;	// no picture in that time: back to snapshots
+// why the stream has none of the game's sound (state.json stream.sound false):
+// a game takes the sound's way when it starts (bare_app audio/route.h)
+const SOUND_LATE = "Звука нет: игра запущена до включения потока. Перезапустите игру; чтобы звук был в потоке " +
+  "сразу, включите на приставке настройку «Трансляция (RTSP)» (Настройки → Интернет).";
+const SOUND_DIRECT = "Звука нет: игры Windows играют прямо в динамик приставки, мимо потока.";
 
 function checkTab() {
   const img = h("img", { class: "shot", alt: "экран приставки" });
@@ -948,13 +953,23 @@ function checkTab() {
   video.muted = true;	// autoplay with sound is cut by browsers: sound by the button
   const shotNote = h("div", { class: "small" });
   const soundBtn = h("button", { class: "secondary", type: "button" }, "Включить звук");
+  const soundNote = h("div", { class: "small bad", hidden: "" });
   const modeStream = h("input", { type: "radio", name: "check-mode", value: "stream" });
   const modeShot = h("input", { type: "radio", name: "check-mode", value: "shot" });
   const view = h("div", { class: "view" });
   const st = h("div", { class: "cards" });
   const logPre = h("pre", { class: "live" });
   const f = encodeURIComponent(W.folder);
-  let player = null, mode = null, noFrame = null, ended = false;
+  let player = null, mode = null, noFrame = null, ended = false, noAudio = false, soundWhy = null;
+  // the button and the line under the picture as the stream's sound is
+  const soundShow = () => {
+    soundNote.hidden = !(mode === "stream" && soundWhy);
+    soundNote.textContent = soundWhy || "";
+    soundBtn.disabled = noAudio || !!soundWhy;
+    soundBtn.title = soundWhy || "";
+    if (noAudio) soundBtn.textContent = "Без звука";
+    else soundBtn.textContent = video.muted ? "Включить звук" : "Выключить звук";
+  };
   const lag = () => video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : null;
   const streamStop = askOff => {
     clearTimeout(noFrame);
@@ -971,6 +986,7 @@ function checkTab() {
     modeShot.checked = true;
     view.replaceChildren(img);
     soundBtn.hidden = true;
+    soundShow();
     shotNote.textContent = why || "Снимок экрана обновляется раз в секунду, пока открыта эта вкладка.";
     if (why) shotNote.classList.add("bad"); else shotNote.classList.remove("bad");
   };
@@ -984,8 +1000,8 @@ function checkTab() {
     shotNote.textContent = "Поток запускается…";
     view.replaceChildren(video);
     soundBtn.hidden = false;
-    soundBtn.disabled = false;
-    soundBtn.textContent = video.muted ? "Включить звук" : "Выключить звук";
+    noAudio = false;
+    soundShow();
     try { await api("POST", "/api/stream", { on: true }); }
     catch (e) { return showShots("Поток не запустился (" + e.message + "): снимки раз в секунду."); }
     if (mode !== "stream" || W.tab !== "check") return;
@@ -1006,7 +1022,7 @@ function checkTab() {
     });
     p.on(mpegts.Events.MEDIA_INFO, mi => {
       if (p !== player || !mi) return;
-      if (mi.hasAudio === false) { soundBtn.disabled = true; soundBtn.textContent = "Без звука"; }
+      if (mi.hasAudio === false) { noAudio = true; soundShow(); }
     });
     p.attachMediaElement(video);
     p.load();
@@ -1020,7 +1036,7 @@ function checkTab() {
   soundBtn.onclick = () => {
     video.muted = !video.muted;
     if (!video.muted) video.play().catch(() => {});
-    soundBtn.textContent = video.muted ? "Включить звук" : "Выключить звук";
+    soundShow();
   };
   modeStream.onchange = () => { if (modeStream.checked) { localStorage.setItem("checkMode", "stream"); showStream(); } };
   modeShot.onchange = () => { if (modeShot.checked) { localStorage.setItem("checkMode", "shot"); showShots(); } };
@@ -1036,6 +1052,10 @@ function checkTab() {
         card("GPU", run && s.gpu_pct !== null ? s.gpu_pct + " %" + (s.gpu_mhz ? ", " + s.gpu_mhz + " МГц" : "") : "—"),
         card("Память игры", run && s.mem_mb !== null ? s.mem_mb + " МБ" : "—"),
         card("Поток", sm.running ? "зрителей " + sm.viewers + ", " + sm.kbps + " кбит/с" : "не идёт"));
+      // a game runs, the stream too, and its sound is not in it (an older
+      // bare_app says nothing of it: no line)
+      soundWhy = run && sm.running && sm.sound === false ? (sm.sound_direct ? SOUND_DIRECT : SOUND_LATE) : null;
+      soundShow();
     } catch (e) { /* the next second */ }
     if (mode === "stream" && player) {
       const l = lag();
@@ -1088,7 +1108,7 @@ function checkTab() {
       h("div", null,
         h("div", { class: "actions mode" },
           h("label", null, modeStream, " Поток"), h("label", null, modeShot, " Снимок раз в секунду"), soundBtn),
-        view, shotNote),
+        view, soundNote, shotNote),
       h("div", { class: "gamepad" },
         h("div", { class: "row" }, padButton("l2", "L2"), padButton("l1", "L1"), padButton("r1", "R1"), padButton("r2", "R2")),
         h("div", { class: "row" },
