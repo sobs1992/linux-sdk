@@ -48,7 +48,20 @@ remote:
    with Authentication Failure, hci_disconnect() and hci_conn_drop() as
    hci_encrypt_change_evt() did.
 Encryption Key Refresh Complete 0x23 on an ACL link (ignored on BR/EDR
-before) clears HCI_CONN_ENCRYPT_PEND and is logged. 0 = upstream.
+before) clears HCI_CONN_ENCRYPT_PEND (logged at debug level).
+0 = upstream.
+
+Seen on the board with this: the reconnected Pro Controller (Central)
+turns the encryption off for some 65 ms every 1.09 s for as long as it
+is connected, each time Encryption Change disabled, then enabled. So
+only the first stop on a connection is logged at info level; the stops
+after it, the resumes and the collisions at debug level; the outcomes
+"still off, asking for it" (warning) and "still off, disconnecting"
+(error) stay loud. An Encryption Change enabled still reads the key
+size each time (one HCI command a second): a stop and a start of the
+encryption negotiates the key size anew (LMP), and the read is the
+check against a shortened key. A Key Refresh Complete (pause and resume)
+keeps the size and reads nothing.
 
 The work never sleeps on hdev->lock (trylock, requeue in 10 ms):
 hci_conn_del() disables it synchronously with hdev->lock held. The new
@@ -73,7 +86,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  
 --- a/include/net/bluetooth/hci_core.h
 +++ b/include/net/bluetooth/hci_core.h
-@@ -784,8 +784,27 @@ struct hci_conn {
+@@ -784,8 +784,28 @@ struct hci_conn {
  	void (*disconn_cfm_cb)	(struct hci_conn *conn, u8 reason);
  
  	void (*cleanup)(struct hci_conn *conn);
@@ -84,6 +97,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
 +	struct delayed_work enc_grace_work;
 +	__u8		enc_grace;	/* HCI_ENC_GRACE_*, under hdev->lock */
 +	bool		enc_grace_aes;	/* AES-CCM before the remote stopped */
++	bool		enc_grace_seen;	/* logged once per connection */
  };
  
 +/* hci_conn.enc_grace: the remote turned the encryption of an ACL link off */
@@ -111,7 +125,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  #include <linux/debugfs.h>
  #include <linux/errqueue.h>
  
-@@ -697,6 +698,110 @@ static void hci_conn_auto_accept(struct
+@@ -697,6 +698,119 @@ static void hci_conn_auto_accept(struct
  		     &conn->dst);
  }
  
@@ -152,9 +166,18 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
 +	if (!ms || conn->type != ACL_LINK || conn->state != BT_CONNECTED)
 +		return false;
 +
-+	bt_dev_warn(conn->hdev,
-+		    "%pMR turned the encryption off, %u ms to turn it on",
-+		    &conn->dst, ms);
++	/* A Nintendo pad that is Central pauses the encryption for some 65 ms
++	 * every 1.1 s for as long as it is connected: say it once.
++	 */
++	if (!conn->enc_grace_seen)
++		bt_dev_info(conn->hdev,
++			    "%pMR turned the encryption off, %u ms to turn it on (logged once per connection)",
++			    &conn->dst, ms);
++	else
++		bt_dev_dbg(conn->hdev,
++			   "%pMR turned the encryption off, %u ms to turn it on",
++			   &conn->dst, ms);
++	conn->enc_grace_seen = true;
 +
 +	conn->enc_grace = HCI_ENC_GRACE_REMOTE;
 +	hci_conn_enc_grace_queue(conn, ms);
@@ -222,7 +245,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  static void le_disable_advertising(struct hci_dev *hdev)
  {
  	if (ext_adv_capable(hdev)) {
-@@ -1145,6 +1250,7 @@ static struct hci_conn *__hci_conn_add(s
+@@ -1145,6 +1259,7 @@ static struct hci_conn *__hci_conn_add(s
  	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
  	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
  	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
@@ -230,7 +253,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  
  	spin_lock_init(&conn->proto_lock);
  
-@@ -1269,6 +1375,7 @@ void hci_conn_del(struct hci_conn *conn)
+@@ -1269,6 +1384,7 @@ void hci_conn_del(struct hci_conn *conn)
  	disable_delayed_work_sync(&conn->disc_work);
  	disable_delayed_work_sync(&conn->auto_accept_work);
  	disable_delayed_work_sync(&conn->idle_work);
@@ -259,7 +282,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  
  	bt_dev_dbg(hdev, "status 0x%2.2x", ev->status);
  
-@@ -3594,6 +3597,31 @@ static void hci_encrypt_change_evt(struc
+@@ -3594,6 +3597,33 @@ static void hci_encrypt_change_evt(struc
  	if (!conn)
  		goto unlock;
  
@@ -272,17 +295,19 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
 +
 +		if (ev->status == HCI_ERROR_LMP_TRANSACTION_COLLISION ||
 +		    ev->status == HCI_ERROR_DIFF_TRANSACTION_COLLISION) {
-+			bt_dev_info(hdev, "%pMR: encryption collided (0x%2.2x), waiting",
-+				    &conn->dst, ev->status);
++			bt_dev_dbg(hdev, "%pMR: encryption collided (0x%2.2x), waiting",
++				   &conn->dst, ev->status);
 +			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
 +			goto unlock;
 +		}
 +
-+		/* On: the usual way below; an error: dropped as before */
++		/* On: the usual way below, the key size read included (a
++		 * restart negotiates it anew); an error: dropped as before
++		 */
 +		hci_conn_enc_grace_stop(conn);
 +		if (!ev->status)
-+			bt_dev_info(hdev, "%pMR turned the encryption on again",
-+				    &conn->dst);
++			bt_dev_dbg(hdev, "%pMR turned the encryption on again",
++				   &conn->dst);
 +	}
 +
 +	was_encrypted = test_bit(HCI_CONN_ENCRYPT, &conn->flags);
@@ -291,7 +316,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  	if (!ev->status) {
  		if (ev->encrypt) {
  			/* Encryption implies authentication */
-@@ -3629,6 +3657,19 @@ static void hci_encrypt_change_evt(struc
+@@ -3629,6 +3659,19 @@ static void hci_encrypt_change_evt(struc
  		ev->status = HCI_ERROR_AUTH_FAILURE;
  
  	if (ev->status && conn->state == BT_CONNECTED) {
@@ -311,7 +336,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
  			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
  
-@@ -5200,8 +5241,33 @@ static void hci_key_refresh_complete_evt
+@@ -5200,8 +5243,34 @@ static void hci_key_refresh_complete_evt
  	/* For BR/EDR the necessary steps are taken through the
  	 * auth_complete event.
  	 */
@@ -321,19 +346,20 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
 +			goto unlock;
 +
 +		if (ev->status == HCI_ERROR_LMP_TRANSACTION_COLLISION) {
-+			bt_dev_info(hdev, "%pMR: key refresh collided, link kept",
-+				    &conn->dst);
++			bt_dev_dbg(hdev, "%pMR: key refresh collided, link kept",
++				   &conn->dst);
 +			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
 +			goto unlock;
 +		}
 +
 +		/* A key refresh ends a pause of the encryption: it is on
-+		 * again after the remote turned it off.
++		 * again after the remote turned it off. A pause and resume
++		 * keeps the key size, so it is not read again.
 +		 */
 +		if (!ev->status && conn->enc_grace) {
 +			hci_conn_enc_grace_stop(conn);
-+			bt_dev_info(hdev, "%pMR refreshed the key, encryption on again",
-+				    &conn->dst);
++			bt_dev_dbg(hdev, "%pMR refreshed the key, encryption on again",
++				   &conn->dst);
 +			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
 +			set_bit(HCI_CONN_AUTH, &conn->flags);
 +			set_bit(HCI_CONN_ENCRYPT, &conn->flags);
