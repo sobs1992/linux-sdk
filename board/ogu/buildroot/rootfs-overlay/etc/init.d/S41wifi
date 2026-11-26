@@ -41,6 +41,9 @@ up() {
 			[ $n -le 10 ] || exit 0
 			sleep 1
 		done
+		# strict reverse path: a packet on Wi-Fi from an address of the USB
+		# cable's network (bare-web lets those in without the PIN) is dropped
+		echo 1 >/proc/sys/net/ipv4/conf/$IFACE/rp_filter
 		wpa_supplicant -B -i $IFACE -c $CONF -P $WPA_PID 9>&-
 		# wpa_cli runs the action script on every connection, which starts
 		# or renews the DHCP client. Joining a network takes a scan
