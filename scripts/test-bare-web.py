@@ -128,6 +128,16 @@ ENV = {
     "BARE_WEB_BACKUP_LOCK": os.path.join(TOP, "run", "bare-backup.lock"),
     "BARE_WEB_MOUNTS": os.path.join(TOP, "mounts"),
 }
+
+
+def free_port():
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        return so.getsockname()[1]
+
+
+# bare_app's stream: a stand-in server of this test on that port (StreamTest)
+ENV["BARE_WEB_STREAM"] = str(free_port())
 # bare_app_wine of the PC's build (a copy) for --actions and --defaults
 HOST_WINE = os.path.join(SDK, "apps", "bare_app", "build-host-ut", "bare_app_wine")
 
@@ -2646,6 +2656,177 @@ class DeleteTest(unittest.TestCase):
         time.sleep(0.1)
         self.assertEqual(BARE_APP.lines, ["reload deltest"])
         self.untouched()
+
+
+class FakeStream:
+    """bare_app's stream (stream.c) for GET /live.ts on 127.0.0.1: the head,
+    then numbered TS packets every 10 ms until the other side closes
+    (closed_at) or its count is sent (then it closes itself); refuse: 403"""
+
+    def __init__(self, port):
+        self.port = port
+        self.listener = None
+        self.requests = []
+        self.closed_at = None
+        self.mode = "ok"
+        self.packets = 1000
+
+    def listen(self):
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", self.port))
+        self.listener.listen(4)
+        threading.Thread(target=self.serve, args=(self.listener,), daemon=True).start()
+
+    def shut(self):
+        if self.listener:
+            try:
+                self.listener.shutdown(socket.SHUT_RDWR)	# its accept() ends: the port is free
+            except OSError:
+                pass
+            self.listener.close()
+            self.listener = None
+
+    def serve(self, ls):
+        while True:
+            try:
+                c, _ = ls.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.one, args=(c,), daemon=True).start()
+
+    @staticmethod
+    def packet(n):
+        return bytes([0x47, 0x01, 0x00, 0x10]) + n.to_bytes(4, "big") + bytes(180)
+
+    def one(self, c):
+        head = b""
+        while b"\r\n\r\n" not in head:
+            d = c.recv(4096)
+            if not d:
+                return c.close()
+            head += d
+        self.requests.append(head.split(b"\r\n")[0].decode())
+        if self.mode == "refuse":
+            c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return c.close()
+        try:
+            # the head and the first packets in one piece, as they may come
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n" +
+                      b"".join(self.packet(n) for n in range(10)))
+            for n in range(10, self.packets):
+                c.sendall(self.packet(n))
+                time.sleep(0.01)
+        except OSError:
+            self.closed_at = time.monotonic()
+        c.close()
+
+
+STREAM = FakeStream(int(ENV["BARE_WEB_STREAM"]))
+
+
+class StreamTest(unittest.TestCase):
+    """the check's stream: GET /api/stream.ts passes bare_app's /live.ts on,
+    POST /api/stream is FIFO "stream on|off"; neither for Wi-Fi without the PIN"""
+
+    def setUp(self):
+        del BARE_APP.lines[:]
+        del STREAM.requests[:]
+        STREAM.closed_at = None
+        STREAM.mode = "ok"
+        STREAM.packets = 1000
+        STREAM.shut()
+        STREAM.listen()
+
+    def tearDown(self):
+        STREAM.shut()
+        bw.STREAM_WAIT = 4.0
+
+    def open_stream(self, source=None, timeout=10):
+        c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=timeout,
+                                       source_address=(source, 0) if source else None)
+        c.request("GET", "/api/stream.ts")
+        return c, c.getresponse()
+
+    def test_passed_on(self):
+        c, r = self.open_stream()
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.getheader("Content-Type"), "video/mp2t")
+        self.assertIsNone(r.getheader("Content-Length"))
+        data = r.read(188 * 40)
+        self.assertEqual(data, b"".join(FakeStream.packet(n) for n in range(40)))	# as it came, in order
+        self.assertEqual(STREAM.requests, ["GET /live.ts HTTP/1.1"])
+        # the browser goes: bare_app's side closed soon after
+        t = time.monotonic()
+        c.close()
+        r.close()
+        for _ in range(100):
+            if STREAM.closed_at:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(STREAM.closed_at, "the stream to bare_app was not closed")
+        self.assertLess(STREAM.closed_at - t, 3)
+
+    def test_bare_app_ends(self):
+        """bare_app's end (the stream stopped): the answer ends"""
+        STREAM.packets = 30
+        c, r = self.open_stream()
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.read(), b"".join(FakeStream.packet(n) for n in range(30)))
+        c.close()
+
+    def test_refused_or_not_running(self):
+        STREAM.mode = "refuse"
+        s, h, d = req("GET", "/api/stream.ts")
+        self.assertEqual(s, 503)
+        self.assertIn("отказал", json.loads(d)["error"])
+        STREAM.shut()
+        bw.STREAM_WAIT = 0.6
+        t = time.monotonic()
+        s, h, d = req("GET", "/api/stream.ts")
+        self.assertEqual(s, 503)
+        self.assertIn("не запущен", json.loads(d)["error"])
+        self.assertGreaterEqual(time.monotonic() - t, 0.6)
+
+    def test_waits_for_its_start(self):
+        """a stream just asked for: its port opens a moment later"""
+        STREAM.shut()
+        threading.Timer(0.7, STREAM.listen).start()
+        c, r = self.open_stream()
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.read(188 * 5), b"".join(FakeStream.packet(n) for n in range(5)))
+        c.close()
+
+    def test_on_off(self):
+        self.assertEqual(jreq("POST", "/api/stream", {"on": True}), (200, {"ok": True}))
+        self.assertEqual(jreq("POST", "/api/stream", {"on": False}), (200, {"ok": True}))
+        self.assertEqual(jreq("POST", "/api/stream", {"on": "yes"})[0], 400)
+        self.assertEqual(jreq("POST", "/api/stream", {})[0], 400)
+        self.assertEqual(req("POST", "/api/stream", b"on=1", {"Content-Type": "application/x-www-form-urlencoded"})[0], 400)
+        self.assertEqual(req("GET", "/api/stream")[0], 404)
+        time.sleep(0.1)
+        self.assertEqual(BARE_APP.lines, ["stream on", "stream off"])
+        # a form of another site cannot ask for it
+        self.assertEqual(req("POST", "/api/stream", b"{}", {"Content-Type": "text/plain"}, page=False)[0], 403)
+        BARE_APP.stop()
+        try:
+            self.assertEqual(jreq("POST", "/api/stream", {"on": True})[0], 503)
+        finally:
+            BARE_APP.start()
+
+    def test_wifi_without_pin(self):
+        """Wi-Fi without a session: 401 for both, bare_app not asked"""
+        with open(os.path.join(DATA, "bare-web.pin"), "w") as f:
+            f.write("123456\n")
+        try:
+            s, h, d = freq("GET", "/api/stream.ts")
+            self.assertEqual(s, 401)
+            s, h, d = freq("POST", "/api/stream", {"on": True})
+            self.assertEqual(s, 401)
+        finally:
+            os.unlink(os.path.join(DATA, "bare-web.pin"))
+        time.sleep(0.1)
+        self.assertEqual((STREAM.requests, BARE_APP.lines), ([], []))
 
 
 if __name__ == "__main__":

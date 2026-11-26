@@ -88,6 +88,15 @@ password (Wi-Fi is later, with a PIN on the screen).
   GET  /api/shot.png[?w=W]         the screen now (SIGUSR1, bare_app's PPM)
   POST /api/pad                    {button, down}: FIFO press/release
   POST /api/stick                  {stick, x, y, ms}: the stick held there
+  POST /api/stream                 {on: true|false}: FIFO "stream on|off" (bare_app's
+                                   stream for a while: it stops a minute after its
+                                   last player, or once nobody plays after off)
+  GET  /api/stream.ts              the stream as MPEG-TS (H.264, Layer II sound):
+                                   bare_app's http://127.0.0.1:8554/live.ts passed
+                                   on as it comes (bare_app answers that GET from
+                                   127.0.0.1 only, so the PIN is not passed by);
+                                   waits up to 4 s for a stream just asked for,
+                                   else 503; ends when either side closes
   GET  /api/logs/GAME/live         1.log as it grows (text/event-stream)
   GET  /api/job                    the job running or the last one
   GET  /api/job/ID/events          its lines (text/event-stream)
@@ -131,7 +140,8 @@ BARE_WEB_BIND, BARE_WEB_CARD_RW (card-rw), BARE_WEB_IP (ip); of bare_app BARE_WE
 BARE_WEB_CTL (its FIFO), BARE_WEB_WINE (bare_app_wine), BARE_WEB_SHOT, BARE_WEB_NATIVE_DIRS,
 BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks), BARE_WEB_ERRORS (errors.ini),
 BARE_WEB_INSTALL_LOCK and BARE_WEB_BACKUP_LOCK (game-install's and bare-backup's locks),
-BARE_WEB_MOUNTS (/proc/mounts). A test names all of them (but PORT,
+BARE_WEB_MOUNTS (/proc/mounts), BARE_WEB_STREAM (the port of bare_app's stream on
+127.0.0.1). A test names all of them (but PORT,
 BIND, NET) or none: one of them set and not all is refused at the start, never the device's
 own place for the rest.
 """
@@ -143,6 +153,7 @@ import json
 import os
 import re
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -163,7 +174,8 @@ HOOKS = ("BARE_WEB_GAMES", "BARE_WEB_DATA", "BARE_WEB_LOGS", "BARE_WEB_STATIC", 
          "BARE_WEB_REBOOT", "BARE_WEB_BARE_BACKUP", "BARE_WEB_UPDATE_LOCK", "BARE_WEB_RUN",
          "BARE_WEB_CONF", "BARE_WEB_CTL", "BARE_WEB_WINE", "BARE_WEB_SHOT", "BARE_WEB_SYS_INPUT",
          "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP",
-         "BARE_WEB_ERRORS", "BARE_WEB_INSTALL_LOCK", "BARE_WEB_BACKUP_LOCK", "BARE_WEB_MOUNTS")
+         "BARE_WEB_ERRORS", "BARE_WEB_INSTALL_LOCK", "BARE_WEB_BACKUP_LOCK", "BARE_WEB_MOUNTS",
+         "BARE_WEB_STREAM")
 NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET", "BARE_WEB_THP", "BARE_WEB_LIB")
 TEST = any(k.startswith("BARE_WEB_") and k not in NOT_HOOKS for k in os.environ)
 if TEST:
@@ -854,6 +866,11 @@ SYS_INPUT = hook("BARE_WEB_SYS_INPUT", "/sys/class/input")
 DEV_INPUT = hook("BARE_WEB_DEV_INPUT", "/dev/input")
 ERRORS = hook("BARE_WEB_ERRORS", "/usr/share/bare_app/errors.ini")	# bare_app's rules of a log
 NATIVE_DIRS = (hook("BARE_WEB_NATIVE_DIRS", "/games /usr/share/bare_app/games") or "").split()
+# bare_app's stream (stream.c): its port, always on 127.0.0.1 (it answers
+# GET /live.ts from there only)
+STREAM_PORT = hook("BARE_WEB_STREAM", "8554")
+STREAM_WAIT = 4.0	# s: a stream "stream on" has just asked for starts in the view's thread
+STREAM_QUIET = 10	# s without a byte from bare_app (or room at the browser): it is over
 RECIPES = os.path.join(GAMES, "recipes")
 SCHEMA = os.path.join(STATIC, "schema.json")
 STATE_STALE = 3		# s: state.json older than this is no game running
@@ -2609,7 +2626,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.static(segs)
             return self.fail(405, "?")
         name = "_".join([m.lower()] + [s.replace(".", "_") for s in segs[1:3]
-                                       if re.fullmatch(r"[a-z]+(\.png)?", s or "")])
+                                       if re.fullmatch(r"[a-z]+(\.png|\.ts)?", s or "")])
         for n in (name, "_".join(name.split("_")[:2])):
             h = getattr(self, "api_" + n, None)
             if h:
@@ -3506,6 +3523,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Refused as e:
             return self.refused(e)
         self.json({"ok": True})
+
+    def api_post_stream(self, segs, q):
+        b = self.body_json()
+        if b is None or not isinstance(b.get("on"), bool):
+            return self.fail(400, "Нужно {on: true|false}.")
+        if not ctl("stream on" if b["on"] else "stream off"):
+            return self.fail(503, NO_CTL)
+        self.json({"ok": True})
+
+    def stream_dial(self):
+        """the socket of bare_app's /live.ts, its head read: (sock, the
+        bytes after the head) or (None, why)"""
+        end = time.monotonic() + STREAM_WAIT
+        while True:
+            try:
+                sock = socket.create_connection(("127.0.0.1", int(STREAM_PORT)), timeout=STREAM_QUIET)
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    return None, "Поток приставки не запущен (bare_app не открыл порт %s)." % STREAM_PORT
+                time.sleep(0.2)
+        try:
+            sock.sendall(b"GET /live.ts HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: bare-web\r\n\r\n")
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 4096:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                head += data
+        except OSError as e:
+            sock.close()
+            return None, "Поток приставки не ответил: %s" % e
+        head, _, rest = head.partition(b"\r\n\r\n")
+        status = head.split(b"\r\n", 1)[0]
+        if not _ or not status.startswith(b"HTTP/1.1 200"):
+            sock.close()
+            return None, "Поток приставки отказал: %s" % status.decode("latin-1")[:80]
+        return sock, rest
+
+    def api_get_stream_ts(self, segs, q):
+        """bare_app's stream passed on as it comes (each chunk as it is
+        read: no buffer of its own); a browser that takes nothing for
+        STREAM_QUIET s, bare_app gone, a new PIN: it ends"""
+        if not STREAM_PORT:
+            return self.fail(503, "Потока нет.")
+        sock, rest = self.stream_dial()
+        if not sock:
+            return self.fail(503, rest)
+        self.close_connection = True
+        try:
+            self.connection.settimeout(STREAM_QUIET)
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            if rest:
+                self.wfile.write(rest)
+            check = time.monotonic() + SSE_RECHECK
+            while True:
+                data = sock.recv(1 << 16)
+                if not data:
+                    return	# bare_app's end
+                self.wfile.write(data)
+                if time.monotonic() >= check:
+                    if not self.still_in():
+                        return	# a new PIN: this session is over
+                    check = time.monotonic() + SSE_RECHECK
+        except OSError:
+            return	# the page went away, or bare_app's side is quiet
+        finally:
+            sock.close()
 
     def log_live(self, game):
         """the launch log 1.log as it grows (text/event-stream): its last
