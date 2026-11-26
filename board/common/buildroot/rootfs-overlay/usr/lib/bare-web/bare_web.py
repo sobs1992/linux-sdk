@@ -87,13 +87,24 @@ while anyone writes on it by /usr/sbin/card-rw (one count of all its
 writers: this server, game-install, bare-report, bare-backup), read-only
 again after the last one, unless it was writable before.
 
-Who is answered: the USB computer and the device itself; a Host that is
-one of the device's addresses (ip -o -4 addr, <net>.2, 127.0.0.1), else
-421 (a name of another site resolving here); an Origin, if sent, of the
-same Host; a request other than GET or HEAD without Origin only with
-"X-Requested-With: bare-web" (app.js sends it) or as application/json,
-else 403 (a form or an image of another site). No GET changes anything;
-a JSON body is read only when sent as application/json.
+Who is answered: a Host that is one of the device's addresses (ip -o -4
+addr, <net>.2, 127.0.0.1), else 421 (a name of another site resolving here);
+an Origin, if sent, of the same Host; a request other than GET or HEAD
+without Origin only with "X-Requested-With: bare-web" (app.js sends it) or
+as application/json, else 403 (a form or an image of another site). No GET
+changes anything; a JSON body is read only when sent as application/json.
+The USB computer (<net>.*) and the device itself (127.0.0.1) as they are;
+any other address (Wi-Fi) only with a session of the PIN: until then a
+page (GET not under /api) is the page asking for the PIN (401), POST
+/api/pin {pin} the only request, anything else 401. The PIN is six digits
+in /data/bare-web.pin, written by bare_app (Settings, System, "The device
+in a browser"), read at every check: a new PIN ends every session of the
+old one. A right PIN gives a random cookie (HttpOnly, SameSite=Strict) for
+24 h (the sessions are this process's: a restart asks again); after 5
+wrong ones in a row no PIN is taken for 60 s (all addresses together).
+
+  POST /api/pin                    {pin}: the session cookie; 403 wrong, 429 a
+                                   pause, 503 no PIN yet
 
 Tests (scripts/test-bare-web.py) name other places: BARE_WEB_GAMES (then
 the card is that directory as it is: no mount test),
@@ -2089,6 +2100,140 @@ def host_port(text, port):
     return m.group(1), int(m.group(2)) if m.group(2) else port
 
 
+# the PIN of the addresses other than the USB computer's (Wi-Fi): bare_app
+# writes it, this reads it at every check
+PIN_FILE = os.path.join(DATA, "bare-web.pin")
+PIN_RE = re.compile(r"\d{6}")
+PIN_TRIES = 5		# wrong PINs in a row, then...
+PIN_PAUSE = 60.0	# ...s none taken
+SESSION_AGE = 86400	# s a session lasts
+SESSION_COOKIE = "bare_web_session"
+SESSIONS_MAX = 64	# the oldest dropped beyond
+SESSIONS = {}		# token: (until (monotonic), the PIN it was given for)
+PIN_STATE = {"wrong": 0, "until": 0.0}	# wrong ones in a row, no PIN before (monotonic)
+PIN_LOCK = threading.Lock()
+
+
+def current_pin():
+    """the PIN in its file, None: none (no file, not six digits, a link)"""
+    try:
+        fd = os.open(PIN_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        text = os.read(fd, 64).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return text if PIN_RE.fullmatch(text) else None
+
+
+def same_text(a, b):
+    """a == b in the same time whatever differs"""
+    if len(a) != len(b):
+        return False
+    d = 0
+    for x, y in zip(a.encode(), b.encode()):
+        d |= x ^ y
+    return d == 0
+
+
+def session_ok(cookie_header):
+    """the request's session cookie is one this gave, not over, for the PIN
+    there is now"""
+    token = None
+    for part in (cookie_header or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == SESSION_COOKIE:
+            token = v
+    if not token:
+        return False
+    pin = current_pin()
+    now = time.monotonic()
+    with PIN_LOCK:
+        s = SESSIONS.get(token)
+        if not s:
+            return False
+        if now >= s[0] or pin is None or not same_text(pin, s[1]):
+            del SESSIONS[token]
+            return False
+    return True
+
+
+def pin_try(given):
+    """(status, answer, token or None) of a PIN given"""
+    pin = current_pin()
+    now = time.monotonic()
+    with PIN_LOCK:
+        if now < PIN_STATE["until"]:
+            wait = int(PIN_STATE["until"] - now + 0.999)
+            return 429, {"error": "Слишком много неверных PIN. Подождите %d с." % wait, "wait": wait}, None
+        if pin is None:
+            return 503, {"error": "PIN ещё не задан: откройте на приставке Настройки → Система → "
+                                  "«Приставка в браузере»."}, None
+        if not isinstance(given, str) or not same_text(pin, given.strip()):
+            PIN_STATE["wrong"] += 1
+            if PIN_STATE["wrong"] >= PIN_TRIES:
+                PIN_STATE["wrong"] = 0
+                PIN_STATE["until"] = now + PIN_PAUSE
+                wait = int(PIN_PAUSE)
+                return 429, {"error": "Неверный PIN. Слишком много попыток: подождите %d с." % wait,
+                             "wait": wait}, None
+            left = PIN_TRIES - PIN_STATE["wrong"]
+            return 403, {"error": "Неверный PIN. Осталось попыток: %d." % left, "left": left}, None
+        PIN_STATE["wrong"] = 0
+        for t in [t for t, s in SESSIONS.items() if now >= s[0]]:
+            del SESSIONS[t]
+        while len(SESSIONS) >= SESSIONS_MAX:
+            del SESSIONS[min(SESSIONS, key=lambda t: SESSIONS[t][0])]
+        token = os.urandom(24).hex()
+        SESSIONS[token] = (now + SESSION_AGE, pin)
+    log.info("PIN: a session given")
+    return 200, {"ok": True}, token
+
+
+PIN_PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Приставка: PIN</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#16181d;color:#e8e8e8;display:flex;
+justify-content:center;margin:0;padding-top:12vh}
+main{max-width:26em;padding:1.5em}
+h1{font-size:1.4em}
+input{font-size:2em;width:7ch;letter-spacing:.2em;text-align:center;padding:.2em}
+button{font-size:1.2em;margin-left:.5em;padding:.4em 1em}
+#msg{min-height:1.5em;color:#f0a050}
+p{line-height:1.4}
+</style></head><body><main>
+<h1>Приставка в браузере по Wi-Fi</h1>
+<p>Введите PIN из шести цифр. Он на экране приставки:
+Настройки → Система → «Приставка в браузере».</p>
+<form id="f"><input id="pin" inputmode="numeric" autocomplete="off" maxlength="6"
+pattern="[0-9]{6}" autofocus><button>Войти</button></form>
+<p id="msg"></p>
+<p>По кабелю USB PIN не нужен.</p>
+</main><script>
+document.getElementById("f").onsubmit = async e => {
+  e.preventDefault();
+  const msg = document.getElementById("msg");
+  msg.textContent = "";
+  try {
+    const r = await fetch("/api/pin", {method: "POST", headers: {"Content-Type": "application/json",
+      "X-Requested-With": "bare-web"}, body: JSON.stringify({pin: document.getElementById("pin").value})});
+    let j = null;
+    try { j = await r.json(); } catch (x) {}
+    if (r.ok) { location.reload(); return; }
+    msg.textContent = (j && j.error) || ("Ошибка " + r.status);
+  } catch (x) {
+    msg.textContent = "Приставка не отвечает.";
+  }
+};
+</script></body></html>
+"""
+
+
 NET = None
 UPLOADS = set()	# (place, name) being uploaded: one at a time each
 UPLOADS_LOCK = threading.Lock()
@@ -2101,6 +2246,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "bare-web"
     timeout = 120	# a computer that went away mid-upload: the request ends
+    pin_only = False	# gate(): no session of the PIN, only its page and POST /api/pin
 
     def log_message(self, fmt, *args):
         if not self.path.startswith(("/api/status", "/api/job", "/api/state", "/api/shot.png")):
@@ -2179,8 +2325,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.headers.get("Content-Length") is None:
                 return 411, "Нужен Content-Length: тело частями (chunked) не принимается."
             return 400, "Transfer-Encoding вместе с Content-Length: отказано."
-        if not self.allowed():
-            return 403, "Доступ только с компьютера на кабеле USB."
         port = self.server.server_address[1]
         hosts = self.headers.get_all("Host") or []
         h = host_port(hosts[0], 80) if len(hosts) == 1 else None
@@ -2194,7 +2338,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.command not in ("GET", "HEAD"):
             if self.headers.get("X-Requested-With") != "bare-web" and self.ctype() != "application/json":
                 return 403, "Запрос не со страницы приставки: отказано."
-        return None
+        # an address other than the USB computer's and the device's: the PIN
+        if self.allowed() or session_ok(self.headers.get("Cookie")):
+            return None
+        path = urllib.parse.urlsplit(self.path).path
+        if (self.command in ("GET", "HEAD") and path != "/api" and not path.startswith("/api/")) or \
+                (self.command == "POST" and path == "/api/pin"):
+            self.pin_only = True
+            return None
+        return 401, "Нужен PIN: откройте http://%s/ и введите PIN с экрана приставки." % hosts[0]
 
     def parts(self):
         u = urllib.parse.urlsplit(self.path)
@@ -2210,6 +2362,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # a body not read (a PUT's until its handler reads it): the answer
         # closes the connection, what is left of it is no next request
         self.unread = n != 0
+        self.pin_only = False
         no = self.gate()
         if no:
             self.close_connection = True
@@ -2222,6 +2375,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.fail(413, "?")
             self.body = self.rfile.read(n)
             self.unread = False
+        if self.pin_only:	# no session of the PIN: its page, or the PIN given
+            if m == "POST":
+                return self.api_post_pin(segs[1:], q)
+            return self.send(401, PIN_PAGE, "text/html; charset=utf-8")
         if not segs or segs[0] != "api":
             if m in ("GET", "HEAD"):
                 return self.static(segs)
@@ -2278,6 +2435,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not os.path.isfile(p):
             p = os.path.join(STATIC, "index.html") if "." not in name else p
         self.file(p, TYPES.get(os.path.splitext(p)[1], "application/octet-stream"))
+
+    # ---- the PIN (an address other than the USB computer's)
+    def api_post_pin(self, segs, q):
+        d = self.body_json()
+        if d is None:
+            return self.fail(400, "Нужен JSON {pin}.")
+        code, answer, token = pin_try(d.get("pin"))
+        h = ()
+        if token:
+            h = (("Set-Cookie", "%s=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Strict" %
+                  (SESSION_COOKIE, token, SESSION_AGE)),)
+        self.send(code, json.dumps(answer, ensure_ascii=False), headers=h)
 
     # ---- status
     def api_get_status(self, segs, q):

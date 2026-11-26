@@ -1027,6 +1027,212 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+
+FOREIGN = "127.0.0.9"	# a client of another address than the USB computer's (Wi-Fi)
+
+
+def freq(method, path, body=None, headers=None, cookie=None, page=True):
+    """a request from FOREIGN (its own source address: the server sees it as is)"""
+    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30, source_address=(FOREIGN, 0))
+    h = dict(headers or {})
+    if page:
+        h.setdefault("X-Requested-With", "bare-web")
+    if cookie:
+        h["Cookie"] = cookie
+    if isinstance(body, (dict, list)):
+        body = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+    c.request(method, path, body=body, headers=h)
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r.status, dict((k.lower(), v) for k, v in r.getheaders()), data
+
+
+class PinTest(unittest.TestCase):
+    """an address other than the USB computer's: nothing but the PIN's page and
+    POST /api/pin without a session; the session a cookie of the right PIN"""
+    PIN = os.path.join(DATA, "bare-web.pin")
+
+    def setUp(self):
+        with bw.PIN_LOCK:
+            bw.PIN_STATE.update(wrong=0, until=0.0)
+            bw.SESSIONS.clear()
+        self.set_pin("123456")
+
+    def tearDown(self):
+        if os.path.lexists(self.PIN):
+            os.unlink(self.PIN)
+        with bw.PIN_LOCK:
+            bw.PIN_STATE.update(wrong=0, until=0.0)
+
+    def set_pin(self, pin):
+        if os.path.lexists(self.PIN):
+            os.unlink(self.PIN)
+        if pin is not None:
+            with open(self.PIN, "w") as f:
+                f.write(pin + "\n")
+
+    def login(self, pin="123456"):
+        s, h, d = freq("POST", "/api/pin", {"pin": pin})
+        self.assertEqual(s, 200, d)
+        c = h["set-cookie"]
+        self.assertIn("HttpOnly", c)
+        self.assertIn("SameSite=Strict", c)
+        self.assertIn("Max-Age=86400", c)
+        self.assertIn("Path=/", c)
+        return c.split(";")[0]
+
+    def assert_closed(self, cookie=None):
+        """nothing but the PIN's page: no static file, no API"""
+        app = open(os.path.join(STATIC, "app.js"), "rb").read()
+        for path in ("/", "/index.html", "/app.js", "/app.css", "/x", "/API/status"):
+            for m in ("GET", "HEAD"):
+                s, h, d = freq(m, path, cookie=cookie)
+                self.assertEqual(s, 401, (m, path))
+                if m == "GET":
+                    self.assertIn("PIN".encode(), d, path)
+                    self.assertNotIn(app[:200], d)
+                    self.assertTrue(h["content-type"].startswith("text/html"), (path, h, d[:200]))
+        for m, path in (("GET", "/api/status"), ("GET", "/api/games"), ("GET", "/api"), ("GET", "/api/job"),
+                        ("GET", "/api/job/1/events"), ("GET", "/api/shot.png"), ("GET", "/api/saves"),
+                        ("POST", "/api/report"), ("POST", "/api/reboot"), ("DELETE", "/api/files/updates/x.upd"),
+                        ("GET", "/api/pin"), ("GET", "//api/status")):
+            k = len(calls())
+            s, h, d = freq(m, path, b"" if m != "GET" else None, cookie=cookie)
+            self.assertEqual(s, 401, (m, path, d))
+            self.assertIn("PIN", json.loads(d)["error"])
+            self.assertEqual(calls()[k:], [], path)
+        # an upload: refused before its body (Expect: 100-continue)
+        c = socket.create_connection(("127.0.0.1", PORT), source_address=(FOREIGN, 0))
+        c.settimeout(10)
+        c.sendall(b"PUT /api/upload/updates/p.upd HTTP/1.1\r\n" + HOSTB + b"Content-Length: 4\r\n" +
+                  (b"Cookie: %s\r\n" % cookie.encode() if cookie else b"") + b"Expect: 100-continue\r\n\r\n")
+        self.assertIn(b" 401 ", c.recv(4096).split(b"\r\n")[0])
+        c.close()
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "updates", "p.upd")))
+
+    def test_rules(self):
+        self.assertEqual((bw.PIN_TRIES, bw.PIN_PAUSE, bw.SESSION_AGE), (5, 60.0, 86400))
+        self.assertEqual(bw.PIN_FILE, os.path.join(DATA, "bare-web.pin"))
+
+    def test_closed_without_session(self):
+        self.assert_closed()
+        self.assert_closed(cookie="bare_web_session=" + "0" * 48)
+        self.assert_closed(cookie="other=1")
+
+    def test_usb_and_device_as_before(self):
+        """the USB computer and the device itself: no PIN, no cookie"""
+        self.set_pin(None)
+        for path in ("/", "/app.js", "/api/status"):
+            self.assertEqual(req("GET", path)[0], 200, path)
+        class H:
+            allowed = bw.Handler.allowed
+        for ip, ok in (("192.168.7.1", True), ("192.168.7.200", True), ("127.0.0.1", True),
+                       ("10.1.2.50", False), ("127.0.0.9", False), ("192.168.70.1", False)):
+            h = H()
+            h.client_address = (ip, 1)
+            self.assertEqual(h.allowed(), ok, ip)
+
+    def test_pin_opens(self):
+        cookie = self.login()
+        app = open(os.path.join(STATIC, "app.js"), "rb").read()
+        s, h, d = freq("GET", "/app.js", cookie=cookie)
+        self.assertEqual((s, d), (200, app))
+        s, h, d = freq("GET", "/", cookie=cookie)
+        self.assertEqual(s, 200)
+        self.assertNotIn(b"/api/pin", d)
+        s, h, d = freq("GET", "/api/status", cookie=cookie)
+        self.assertEqual(s, 200)
+        self.assertIn("release", json.loads(d))
+        s, h, d = freq("PUT", "/api/upload/updates/p.upd", b"data", cookie=cookie)
+        self.assertEqual(s, 200, d)
+        self.assertEqual(freq("DELETE", "/api/files/updates/p.upd", cookie=cookie)[0], 200)
+        # the cookie among others
+        self.assertEqual(freq("GET", "/api/status", cookie="a=1; " + cookie + "; b=2")[0], 200)
+        # the Host and Origin rules still hold
+        self.assertEqual(freq("GET", "/api/status", cookie=cookie, headers={"Host": "evil.example"})[0], 421)
+        self.assertEqual(freq("POST", "/api/report", b"", cookie=cookie, page=False,
+                              headers={"Origin": "http://evil.example"})[0], 403)
+
+    def test_session_ends(self):
+        cookie = self.login()
+        self.assertEqual(freq("GET", "/api/status", cookie=cookie)[0], 200)
+        # a new PIN: every session of the old one over
+        self.set_pin("654321")
+        self.assert_closed(cookie)
+        self.set_pin("123456")
+        self.assertEqual(freq("GET", "/api/status", cookie=cookie)[0], 401)	# dropped, not back
+        # no PIN at all
+        cookie = self.login()
+        self.set_pin(None)
+        self.assertEqual(freq("GET", "/api/status", cookie=cookie)[0], 401)
+        # 24 h over
+        self.set_pin("123456")
+        cookie = self.login()
+        token = cookie.split("=", 1)[1]
+        with bw.PIN_LOCK:
+            until, pin = bw.SESSIONS[token]
+            bw.SESSIONS[token] = (time.monotonic() - 0.01, pin)
+        self.assertEqual(freq("GET", "/api/status", cookie=cookie)[0], 401)
+        # two sessions side by side, each its own
+        a, b = self.login(), self.login()
+        self.assertNotEqual(a, b)
+        self.assertEqual(freq("GET", "/api/status", cookie=a)[0], 200)
+        self.assertEqual(freq("GET", "/api/status", cookie=b)[0], 200)
+
+    def test_no_pin_yet(self):
+        for text in (None, "12345", "1234567", "abcdef", "12 456", ""):
+            self.set_pin(text)
+            s, h, d = freq("POST", "/api/pin", {"pin": text or "123456"})
+            self.assertEqual(s, 503, text)
+            self.assertIn("Приставка в браузере", json.loads(d)["error"])
+            self.assertNotIn("set-cookie", h)
+        # a link is no PIN file
+        other = os.path.join(TOP, "pin-elsewhere")
+        with open(other, "w") as f:
+            f.write("123456\n")
+        self.set_pin(None)
+        os.symlink(other, self.PIN)
+        self.assertEqual(freq("POST", "/api/pin", {"pin": "123456"})[0], 503)
+        os.unlink(other)
+
+    def test_wrong_pins_pause(self):
+        for i, pin in enumerate(("000000", "12345", "1234567", 123456)):
+            s, h, d = freq("POST", "/api/pin", {"pin": pin})
+            self.assertEqual(s, 403, pin)
+            self.assertEqual(json.loads(d)["left"], 4 - i)
+            self.assertNotIn("set-cookie", h)
+        s, h, d = freq("POST", "/api/pin", {"pin": "999999"})	# the 5th
+        self.assertEqual(s, 429)
+        self.assertEqual(json.loads(d)["wait"], 60)
+        # paused: the right one too, from any address
+        s, h, d = freq("POST", "/api/pin", {"pin": "123456"})
+        self.assertEqual(s, 429)
+        self.assertNotIn("set-cookie", h)
+        self.assertGreater(json.loads(d)["wait"], 50)
+        # the pause over (made short): five more
+        with bw.PIN_LOCK:
+            bw.PIN_STATE["until"] = time.monotonic() + 0.3
+        time.sleep(0.4)
+        for i in range(4):
+            self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
+        self.login()	# a right one: the count starts again
+        for i in range(4):
+            self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
+        self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 429)
+
+    def test_pin_request_rules(self):
+        # a form of another site: refused as every other change
+        s, h, d = freq("POST", "/api/pin", b"pin=123456", page=False,
+                       headers={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(s, 403)
+        s, h, d = freq("POST", "/api/pin", {"pin": "123456"}, headers={"Origin": "http://evil.example"})
+        self.assertEqual(s, 403)
+        s, h, d = freq("POST", "/api/pin", b"123456", headers={"Content-Type": "text/plain"})
+        self.assertEqual(s, 400)
+        self.assertEqual(bw.PIN_STATE["wrong"], 0)
+
 def tearDownModule():
     SERVER.shutdown()
     # nothing is mounted in it: a directory tree of this test's own

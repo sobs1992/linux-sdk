@@ -35,8 +35,11 @@ async function api(method, url, body) {
   try {
     r = await fetch(url, opt);
   } catch (e) {
-    throw new Error("Приставка не отвечает. Проверьте кабель USB.");
+    throw new Error("Приставка не отвечает. Проверьте кабель USB или Wi-Fi.");
   }
+  // over Wi-Fi: the session of the PIN is over (a new PIN, 24 h, a restart):
+  // the page asks for it again
+  if (r.status === 401) location.reload();
   let j = null;
   try { j = await r.json(); } catch (e) { /* not JSON */ }
   if (!r.ok) throw new Error((j && j.error) || ("Ошибка " + r.status));
