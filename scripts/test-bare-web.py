@@ -1222,6 +1222,28 @@ class PinTest(unittest.TestCase):
             self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
         self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 429)
 
+    def test_wifi_address_changes(self):
+        """DHCP gives Wi-Fi another address: the new one is the device's (its Host
+        answered) once the addresses are read again (HOSTS_AGE), the old one not"""
+        ip = os.path.join(BIN, "ip")
+        old = open(ip).read()
+        cookie = self.login()
+        try:
+            with open(ip, "w") as f:
+                f.write(old.replace("10.1.2.3/24", "10.1.2.77/24"))
+            self.assertEqual(bw.HOSTS_AGE, 5.0)
+            with bw.HOSTS_LOCK:
+                bw.HOSTS["at"] = time.monotonic() - bw.HOSTS_AGE - 0.1	# as 5 s later
+            port = ":%d" % PORT
+            self.assertEqual(freq("GET", "/api/status", cookie=cookie, headers={"Host": "10.1.2.77" + port})[0], 200)
+            self.assertEqual(freq("GET", "/api/status", cookie=cookie, headers={"Host": "10.1.2.3" + port})[0], 421)
+            self.assertEqual(freq("GET", "/", headers={"Host": "10.1.2.77" + port})[0], 401)	# the PIN's page
+        finally:
+            with open(ip, "w") as f:
+                f.write(old)
+            with bw.HOSTS_LOCK:
+                bw.HOSTS["at"] = 0.0
+
     def test_pin_request_rules(self):
         # a form of another site: refused as every other change
         s, h, d = freq("POST", "/api/pin", b"pin=123456", page=False,
