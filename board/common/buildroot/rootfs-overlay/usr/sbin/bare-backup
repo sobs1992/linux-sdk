@@ -30,13 +30,15 @@ failure puts the old ones back. The settings go to bare_app through its FIFO
 (import-settings: only bare_app writes its settings file), the layer to the card,
 then "reload".
 
-The card is read-only: remounted rw only while this writes, ro again if it was ro.
+The card is read-only: writable while this writes through card-rw (one count of all
+the card's writers: read-only again after the last one, unless it was writable before).
 Exit status: 0 done, 1 failed (the reason on stderr, in Russian: the pages show it),
 2 wrong use, 3 the game runs, 4 busy (another copy is being made).
 
 Tests (scripts/test-bare-backup.py) name every place: BARE_BACKUP_DATA, BARE_BACKUP_GAMES
-(the card: a directory as it is, no remount), BARE_BACKUP_RUN (games.json, the lock,
-the import files), BARE_BACKUP_CONF, BARE_BACKUP_CTL, BARE_BACKUP_RELEASE; optional
+(the card: a directory as it is), BARE_BACKUP_RUN (games.json, the lock, the import
+files), BARE_BACKUP_CONF, BARE_BACKUP_CTL, BARE_BACKUP_RELEASE, BARE_BACKUP_CARD_RW
+(card-rw); optional
 BARE_BACKUP_UNIT, BARE_BACKUP_USB_DISK (programs), BARE_BACKUP_SWAP_FAIL (the move of
 the N-th directory fails: the old ones must come back). Setting one of them and not all the
 required ones is refused: a test never falls back to the device's real places.
@@ -54,7 +56,7 @@ import zipfile
 
 E = os.environ.get
 HOOKS = ("BARE_BACKUP_DATA", "BARE_BACKUP_GAMES", "BARE_BACKUP_RUN", "BARE_BACKUP_CONF",
-         "BARE_BACKUP_CTL", "BARE_BACKUP_RELEASE")
+         "BARE_BACKUP_CTL", "BARE_BACKUP_RELEASE", "BARE_BACKUP_CARD_RW")
 TEST = any(k in os.environ for k in HOOKS + ("BARE_BACKUP_UNIT", "BARE_BACKUP_USB_DISK"))
 if TEST:
     missing = [k for k in HOOKS if not E(k)]
@@ -67,6 +69,7 @@ RUN = os.path.normpath(E("BARE_BACKUP_RUN", "/run/bare_app"))
 CONF = E("BARE_BACKUP_CONF", "/etc/bare_app.conf")
 CTL = E("BARE_BACKUP_CTL", "/tmp/bare_app.ctl")
 RELEASE = E("BARE_BACKUP_RELEASE", "/etc/sdk-release")
+CARD_RW = E("BARE_BACKUP_CARD_RW", "/usr/sbin/card-rw")
 UNIT = E("BARE_BACKUP_UNIT", "" if TEST else "/usr/sbin/unit")
 USB_DISK = E("BARE_BACKUP_USB_DISK", "" if TEST else "/usr/sbin/usb-disk")
 LOCK = os.path.join(RUN, "bare-backup.lock") if TEST else "/run/bare-backup.lock"
@@ -226,26 +229,23 @@ def card_there():
 
 
 class CardWriting:
-    """with CardWriting(): the card writable inside, read-only again after if it was"""
+    """with CardWriting(): the card writable inside (card-rw begin), its end after,
+    an exception inside too"""
     def __enter__(self):
-        self.ro = False
-        if not TEST:
-            opts = card_opts()
-            if opts is None:
-                raise Fail("Карты игр нет в приставке.")
-            if "ro" in opts:
-                rc, _ = run(["mount", "-o", "remount,rw", GAMES])
-                if rc:
-                    raise Fail("Карту игр не удалось сделать доступной для записи.")
-                self.ro = True
+        if not TEST and card_opts() is None:
+            raise Fail("Карты игр нет в приставке.")
+        rc, _ = run([CARD_RW, "begin", str(os.getpid())], timeout=60)
+        if rc == 3:
+            raise Fail("Карты игр нет в приставке.")
+        if rc:
+            raise Fail("Карту игр не удалось сделать доступной для записи.")
         return self
 
     def __exit__(self, *exc):
         os.sync()
-        if self.ro:
-            rc, _ = run(["mount", "-o", "remount,ro", GAMES])
-            if rc:
-                say("%s stays writable (busy)" % GAMES)
+        rc, _ = run([CARD_RW, "end", str(os.getpid())], timeout=60)
+        if rc:
+            say("card-rw end: exit %d" % rc)
         return False
 
 
@@ -603,6 +603,45 @@ def bad_name(n):
             any(p in ("..", ".") for p in n.rstrip("/").split("/")) or "//" in n.rstrip("/"))
 
 
+# a game this device does not have: the places its data may go to
+WINE_GAMES = os.path.join(DATA, "wine", "games")	# /data/wine/games/<folder>
+WINE_USERS = os.path.join(DATA, "wine", "prefix", "drive_c", "users")	# <user>/<its saves>
+# directories of a Wine profile that hold many games' (a game's saves are below them)
+PROFILE_SHARED = {"appdata", "appdata/local", "appdata/roaming", "appdata/locallow", "documents",
+                  "documents/my games", "saved games", "application data", "local settings",
+                  "local settings/application data", "my documents", "temp", "desktop", "downloads"}
+# the system's own directories of /data: never a game's
+DATA_SYSTEM = {"logs", "backups", "wine", "reports", "updates", "lost+found", "sdk-backup", "recipes"}
+
+
+def foreign_dir_ok(target, folder, kind, state):
+    """target may hold the data of game folder (kind of the copy's manifest) that
+    bare_app does not know here: not over, around or inside any known game's data;
+    then its own /data/wine/games/<folder>, a directory of its own in the Wine
+    profile (a Windows game's saves), or what another game of its kind has with that
+    game's folder in it (/data/doom3 -> /data/<folder>)"""
+    known = [d for g in state["by_folder"].values() for d in game_dirs(g)[0]]
+    if any(inside(target, d) or inside(d, target) for d in known):
+        return False
+    if inside(target, os.path.join(WINE_GAMES, folder)):
+        return True
+    if kind == "wine" and inside(target, WINE_USERS):
+        parts = os.path.relpath(target, WINE_USERS).split("/")
+        if len(parts) >= 3 and "/".join(parts[1:]).lower() not in PROFILE_SHARED:
+            return True
+    if os.path.relpath(target, DATA).split("/")[0] in DATA_SYSTEM:
+        return False
+    for g in state["by_folder"].values():
+        if g.get("kind") != kind:
+            continue
+        for d in game_dirs(g)[0]:
+            parts = d.split("/")
+            if g["folder"] in parts and \
+                    "/".join(folder if x == g["folder"] else x for x in parts) == target:
+                return True
+    return False
+
+
 def check_copy(z, state, only):
     """the manifest and every name of z; the games to restore"""
     try:
@@ -633,6 +672,9 @@ def check_copy(z, state, only):
                 raise Fail("Каталог копии %s вне /data: не восстанавливаю." % p)
             if allowed is not None and target not in allowed:
                 raise Fail("Каталог %s не относится к игре %s на этой приставке." % (p, f))
+            if allowed is None and not foreign_dir_ok(target, f, g.get("kind"), state):
+                raise Fail("Каталог %s не относится к игре %s: её нет на этой приставке, а "
+                           "каталог не её собственный (чужие данные или общий каталог)." % (p, f))
             dl.append(dict(d, target=target))
         games[f] = g
         dirs_of[f] = dl
@@ -688,11 +730,11 @@ def unpack(z, arc_top, dest):
         os.utime(out, (t, t))
 
 
-def swap_in(pairs):
+def swap_in(pairs, hook="BARE_BACKUP_SWAP_FAIL"):
     """each (stage, target): target to target.bak, stage to target; all of them or,
     on a failure, the old ones back"""
     done = []	# [stage, target, it was there, the stage moved in]
-    fail_at = int(E("BARE_BACKUP_SWAP_FAIL", "-1")) if TEST else -1
+    fail_at = int(E(hook, "-1")) if TEST else -1
     try:
         for i, (stage_dir, target) in enumerate(pairs):
             if i == fail_at:
@@ -705,13 +747,45 @@ def swap_in(pairs):
             os.rename(stage_dir, target)
             step[3] = True
     except BaseException:
-        for stage_dir, target, had, moved in reversed(done):
-            if moved:
-                os.rename(target, stage_dir)
-            if had:
-                os.rename(target + ".bak", target)
+        swap_back([(st, t, had) for st, t, had, moved in done if moved] +
+                  [(None, t, had) for st, t, had, moved in done if not moved])
         raise
     return [(st, t, had) for st, t, had, _ in done]
+
+
+def swap_back(done):
+    """what swap_in did undone: each target back to its stage (None: it was not moved
+    in), its .bak (if it had one) back in place"""
+    for stage_dir, target, had in reversed(done):
+        if stage_dir is not None:
+            os.rename(target, stage_dir)
+        if had:
+            os.rename(target + ".bak", target)
+
+
+def stage_tree(z, arc, target, md5=None):
+    """the members under arc/ unpacked beside target (target.new-restore); checked
+    against md5 if given"""
+    if os.path.islink(target) or os.path.islink(os.path.dirname(target)):
+        raise Fail("%s — ссылка: не восстанавливаю." % target)
+    if os.path.lexists(target + ".bak"):
+        raise Fail("Осталась %s.bak от прерванного восстановления: разберитесь с ней и "
+                   "повторите." % target)
+    stage_dir = target + STAGE
+    if os.path.lexists(stage_dir):
+        rmtree(stage_dir)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    try:
+        unpack(z, arc, stage_dir)
+        if md5 is not None:
+            s, _, _ = tree_sum(stage_dir)
+            if s["md5"] != md5:
+                raise Fail("Распакованное в %s не совпало с копией (md5): ничего не изменено." % target)
+    except BaseException:
+        if os.path.lexists(stage_dir):
+            rmtree(stage_dir)
+        raise
+    return stage_dir
 
 
 def restore(path, only):
@@ -728,39 +802,49 @@ def restore(path, only):
         for f in targets:
             if running(state, f):
                 raise Fail("Игра %s сейчас запущена: закройте её и повторите." % f, 3)
-        # every directory unpacked beside its place first
-        pairs, done = [], []
-        try:
-            for f in targets:
-                for d in dirs_of[f]:
-                    if not d.get("exists"):
-                        continue
-                    target = d["target"]
-                    if os.path.lexists(target + ".bak"):
-                        raise Fail("Осталась %s.bak от прерванного восстановления: "
-                                   "разберитесь с ней и повторите." % target)
-                    stage_dir = target + STAGE
+        report = {"restored": list(targets), "settings": [], "recipes": []}
+        # the recipes' layers: onto the card
+        layers = []
+        for f in targets:
+            arc = "games/%s/recipe" % f if games[f].get("prefix") else "recipe"
+            if any(n.startswith(arc + "/") for n in z.namelist()):
+                layers.append((f, arc))
+        if manifest.get("kind") == "all":
+            for f in manifest.get("recipes") or []:
+                if (not only or f == only) and all(f != x for x, _ in layers):
+                    layers.append((f, "recipes/" + f))
+        if layers and not card_there():
+            say("no card: the recipes' layers not restored")
+            layers = []
+        # every directory and every layer unpacked beside its place first, then all
+        # of them moved in, or none: a failure anywhere puts every old one back
+        with CardWriting() if layers else NoWriting():
+            pairs, lpairs, done = [], [], []
+            try:
+                for f in targets:
+                    for d in dirs_of[f]:
+                        if d.get("exists"):
+                            pairs.append((stage_tree(z, "data/" + d["rel"], d["target"], d.get("md5")),
+                                          d["target"]))
+                for f, arc in layers:
+                    target = os.path.join(RECIPES, f)
+                    lpairs.append((stage_tree(z, arc, target), target))
+                done = swap_in(pairs)
+                try:
+                    done += swap_in(lpairs, "BARE_BACKUP_LAYER_FAIL")
+                except BaseException:
+                    swap_back(done)
+                    done = []
+                    raise
+            except BaseException:
+                for stage_dir, _ in pairs + lpairs:
                     if os.path.lexists(stage_dir):
                         rmtree(stage_dir)
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    unpack(z, "data/" + d["rel"], stage_dir)
-                    pairs.append((stage_dir, target))
-                    s, _, _ = tree_sum(stage_dir)
-                    if s["md5"] != d.get("md5"):
-                        raise Fail("Распакованное в %s не совпало с копией (md5): ничего не "
-                                   "изменено." % target)
-            done = swap_in(pairs)
-        except BaseException:
-            for stage_dir, _ in pairs:
-                if os.path.lexists(stage_dir):
-                    rmtree(stage_dir)
-            raise
-        for _, target, had in done:
-            if had:
-                rmtree(target + ".bak")
-        report = {"restored": [], "settings": [], "recipes": []}
-        for f in targets:
-            report["restored"].append(f)
+                raise
+            for _, target, had in done:
+                if had:
+                    rmtree(target + ".bak")
+            report["recipes"] = [f for f, _ in layers]
         # the settings: through bare_app
         for f in targets:
             name = games[f].get("prefix", "") + "settings.ini"
@@ -774,37 +858,6 @@ def restore(path, only):
                 report["settings"].append(f)
             else:
                 say("bare_app does not read %s: the settings of %s not restored" % (CTL, f))
-        # the recipes' layers: onto the card
-        layers = []
-        for f in targets:
-            arc = "games/%s/recipe" % f if games[f].get("prefix") else "recipe"
-            if any(n.startswith(arc + "/") for n in z.namelist()):
-                layers.append((f, arc))
-        if manifest.get("kind") == "all":
-            for f in manifest.get("recipes") or []:
-                if (not only or f == only) and all(f != x for x, _ in layers):
-                    layers.append((f, "recipes/" + f))
-        if layers:
-            if not card_there():
-                say("no card: the recipes' layers not restored")
-            else:
-                with CardWriting():
-                    for f, arc in layers:
-                        target = os.path.join(RECIPES, f)
-                        stage_dir = target + STAGE
-                        if os.path.lexists(stage_dir):
-                            rmtree(stage_dir)
-                        os.makedirs(RECIPES, exist_ok=True)
-                        unpack(z, arc, stage_dir)
-                        had = os.path.lexists(target)
-                        if had:
-                            if os.path.lexists(target + ".bak"):
-                                rmtree(target + ".bak")
-                            os.rename(target, target + ".bak")
-                        os.rename(stage_dir, target)
-                        if had:
-                            rmtree(target + ".bak")
-                        report["recipes"].append(f)
         # the layers read again (the settings need not: bare_app took them in)
         for f in report["recipes"]:
             ctl("reload " + f)

@@ -107,12 +107,32 @@ class Test(unittest.TestCase):
         put(os.path.join(self.h3[0], "Saves", "1.vsgm1"), os.urandom(5000))
         put(os.path.join(self.h3[1], "settings.json"), "{}")
         self.running = None
+        self.without = ()
         self.write_state()
+        # card-rw of the test: each begin and end written down; $T/no-card-rw fails a begin
+        self.card_rw = os.path.join(t, "card-rw")
+        put(self.card_rw, '#!/bin/sh\n[ "$1" = begin ] && [ -e "%s/no-card-rw" ] && exit 1\n'
+                          'echo "$1 $2" >> "%s/card-rw.log"\n' % (t, t))
+        os.chmod(self.card_rw, 0o755)
         self.env = dict(os.environ, BARE_BACKUP_DATA=self.data, BARE_BACKUP_GAMES=self.games,
                         BARE_BACKUP_RUN=self.run_dir, BARE_BACKUP_CONF=self.conf,
-                        BARE_BACKUP_CTL=self.fifo.path, BARE_BACKUP_RELEASE=self.release)
+                        BARE_BACKUP_CTL=self.fifo.path, BARE_BACKUP_RELEASE=self.release,
+                        BARE_BACKUP_CARD_RW=self.card_rw)
+
+    def rw_calls(self):
+        try:
+            with open(os.path.join(self.top, "card-rw.log")) as f:
+                return [line.split() for line in f]
+        except FileNotFoundError:
+            return []
 
     def tearDown(self):
+        # every begin of card-rw had its end, by the same process, in order
+        depth = {}
+        for cmd, pid in self.rw_calls():
+            depth[pid] = depth.get(pid, 0) + (1 if cmd == "begin" else -1)
+            self.assertGreaterEqual(depth[pid], 0, self.rw_calls())
+        self.assertEqual(set(depth.values()) - {0}, set(), self.rw_calls())
         self.fifo.close()
         # our own tree only: no mount in it
         with open("/proc/mounts") as f:
@@ -130,7 +150,12 @@ class Test(unittest.TestCase):
              "dir": os.path.join(self.games, "heroes3"), "storage": self.h3, "available": True},
             {"folder": "evil", "name": "Evil", "kind": "wine", "key": "33333333",
              "dir": os.path.join(self.games, "evil"), "storage": ["/etc", self.data, "../x"]},
+            {"folder": "ssam1", "name": "Serious Sam", "kind": "native", "key": "44444444",
+             "dir": os.path.join(self.games, "ssam1"), "storage": [os.path.join(self.data, "ssam1")]},
+            {"folder": "ssam2", "name": "Serious Sam 2", "kind": "native", "key": "55555555",
+             "dir": os.path.join(self.games, "ssam2"), "storage": [os.path.join(self.data, "ssam2")]},
         ]
+        games = [g for g in games if g["folder"] not in self.without]
         state = {"version": 1, "pid": pid or os.getpid(), "running": self.running, "games": games}
         put(os.path.join(self.run_dir, "games.json"), json.dumps(state))
 
@@ -434,7 +459,7 @@ class Test(unittest.TestCase):
         self.assertIn("games/pirates/settings.ini", names)
         self.assertIn("games/homm3/settings.ini", names)
         self.assertIn("recipes/worms/wine.ini", names)
-        self.assertEqual(sorted(g["folder"] for g in m["games"]), ["evil", "homm3", "pirates"])
+        self.assertEqual(sorted(g["folder"] for g in m["games"]), ["evil", "homm3", "pirates", "ssam1", "ssam2"])
         self.assertEqual(m["recipes"], ["pirates", "worms"])
         # one game of it back
         before = tree_md5(self.h3[0])
@@ -452,6 +477,121 @@ class Test(unittest.TestCase):
             self.assertEqual(f.read(), "mode = 640x480\n")
         with open(os.path.join(self.pir_saves, "Config.ini")) as f:
             self.assertEqual(f.read(), "[a]\nb=1\n")
+
+    # ---- card-rw: one begin, one end ----
+
+    def test_card_rw_pairs(self):
+        self.backup()					# onto the card: one pair
+        self.assertEqual([c for c, _ in self.rw_calls()], ["begin", "end"])
+        self.backup("pirates", os.path.join(self.data, "elsewhere"))	# into /data: none
+        self.assertEqual(len(self.rw_calls()), 2)
+        # an exception while writing on the card: its end still comes
+        os.makedirs(os.path.join(self.games, "backups"), exist_ok=True)
+        os.chmod(os.path.join(self.games, "backups"), 0o555)
+        try:
+            r = self.bb("backup", "pirates", ok=False)
+        finally:
+            os.chmod(os.path.join(self.games, "backups"), 0o755)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual([c for c, _ in self.rw_calls()], ["begin", "end"] * 2)
+        # card-rw refuses: nothing written, no end of a begin that failed
+        open(os.path.join(self.top, "no-card-rw"), "w").close()
+        r = self.bb("backup", "pirates", ok=False)
+        self.assertIn("не удалось сделать доступной для записи", r.stderr)
+        self.assertEqual(len(self.rw_calls()), 4)
+        os.unlink(os.path.join(self.top, "no-card-rw"))
+        # a restore with a layer: one pair; without one: none
+        put(os.path.join(self.games, "recipes", "pirates", "wine.ini"), "mode = 1024x768\n")
+        path = self.backup()
+        n = len(self.rw_calls())
+        self.bb("restore", path)
+        self.assertEqual([c for c, _ in self.rw_calls()[n:]], ["begin", "end"])
+        path = self.backup("homm3")
+        n = len(self.rw_calls())
+        self.bb("restore", path)
+        self.assertEqual(len(self.rw_calls()), n)
+
+    # ---- the layers of a copy of all: all of them or none ----
+
+    def test_layers_all_or_none(self):
+        for f in ("pirates", "worms"):
+            put(os.path.join(self.games, "recipes", f, "wine.ini"), "mode = 1x1 %s\n" % f)
+        path = self.backup("all")
+        for f in ("pirates", "worms"):
+            put(os.path.join(self.games, "recipes", f, "wine.ini"), "mine %s\n" % f)
+        put(os.path.join(self.pir_saves, "Config.ini"), "kept")
+        before = (tree_md5(os.path.join(self.games, "recipes")), tree_md5(self.data))
+        # the second layer cannot be moved in: the first one back, the data too
+        r = self.bb("restore", path, ok=False, env=dict(self.env, BARE_BACKUP_LAYER_FAIL="1"))
+        self.assertIn("the move of", r.stderr)
+        self.assertEqual((tree_md5(os.path.join(self.games, "recipes")), tree_md5(self.data)), before)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.games, "recipes"))), ["pirates", "worms"])
+        # and then all of it
+        self.bb("restore", path)
+        for f in ("pirates", "worms"):
+            with open(os.path.join(self.games, "recipes", f, "wine.ini")) as fh:
+                self.assertEqual(fh.read(), "mode = 1x1 %s\n" % f)
+
+    # ---- a game this device does not have ----
+
+    def forged(self, folder, kind, dirs):
+        """a copy of folder naming dirs (paths under /data), one file in each"""
+        out = os.path.join(self.top, "forged-%s.zip" % folder)
+        m = {"format": 1, "kind": "game", "games": [{"folder": folder, "kind": kind, "prefix": "", "dirs": [
+            {"path": d, "rel": os.path.relpath(d, self.data), "exists": True, "md5": "x"} for d in dirs]}]}
+        with zipfile.ZipFile(out, "w") as z:
+            z.writestr("manifest.json", json.dumps(m))
+            for d in dirs:
+                z.writestr("data/%s/f" % os.path.relpath(d, self.data), "theirs")
+        return out
+
+    def test_unknown_game_own_dirs(self):
+        # a copy of pirates and of ssam2 restored where they are not installed
+        path = self.backup("pirates")
+        put(os.path.join(self.data, "ssam2", "save1"), "s")
+        path2 = self.backup("ssam2")
+        want = tree_md5(self.pir_saves), tree_md5(os.path.join(self.data, "ssam2"))
+        shutil.rmtree(self.pir_saves)
+        shutil.rmtree(os.path.join(self.data, "ssam2"))
+        self.without = ("pirates", "ssam2")
+        self.write_state()
+        self.bb("restore", path)
+        self.bb("restore", path2)
+        self.assertEqual((tree_md5(self.pir_saves), tree_md5(os.path.join(self.data, "ssam2"))), want)
+
+    def test_unknown_game_foreign_dirs_refused(self):
+        # "ghost" and "logs" are not on this device; pirates is (its saves in the profile)
+        wine = os.path.join(self.data, "wine")
+        users = os.path.join(wine, "prefix", "drive_c", "users", "root")
+        before = tree_md5(self.data)
+        for folder, kind, d in (
+                ("ghost", "wine", wine),					# all of Wine
+                ("ghost", "wine", os.path.join(wine, "prefix")),
+                ("ghost", "wine", os.path.join(users, "Documents")),	# the profile's shared ones
+                ("ghost", "wine", os.path.join(users, "Documents", "My Games")),
+                ("ghost", "wine", os.path.join(users, "AppData", "Local")),
+                ("ghost", "wine", os.path.join(wine, "games", "other")),	# another game's folder
+                ("ghost", "wine", self.h3[0]),					# a known game's
+                ("ghost", "wine", self.pir_saves),				# its saves in the profile
+                ("ghost", "wine", os.path.join(self.pir_saves, "sub")),		# inside them
+                ("ghost", "native", os.path.join(self.data, "ssam1")),
+                ("ghost", "native", os.path.join(self.data, "ssam1", "x")),	# inside one
+                ("logs", "native", os.path.join(self.data, "logs")),		# the system's
+                ("ghost", "native", os.path.join(self.data, "other")),		# not its folder
+                ("ghost", "homm3", os.path.join(self.data, "ghost"))):		# no game of that kind
+            r = self.bb("restore", self.forged(folder, kind, [d]), ok=False)
+            self.assertEqual(r.returncode, 1, d)
+            self.assertIn("не относится к игре %s" % folder, r.stderr, d)
+        self.assertEqual(tree_md5(self.data), before)
+        # its own ones pass the check (then md5 "x" fails: nothing changed either)
+        for folder, kind, d in (("ghost", "wine", os.path.join(wine, "games", "ghost")),
+                                ("ghost", "wine", os.path.join(users, "Documents", "Ghost Saves")),
+                                ("ghost", "native", os.path.join(self.data, "ghost"))):
+            r = self.bb("restore", self.forged(folder, kind, [d]), ok=False)
+            self.assertIn("не совпало с копией (md5)", r.stderr, d)
+        # (their parent directories may be made: no file of anyone's changed)
+        files = lambda t: {k: v for k, v in t.items() if not k.startswith("D ")}
+        self.assertEqual(files(tree_md5(self.data)), files(before))
 
     def test_list_info(self):
         path = self.backup()
