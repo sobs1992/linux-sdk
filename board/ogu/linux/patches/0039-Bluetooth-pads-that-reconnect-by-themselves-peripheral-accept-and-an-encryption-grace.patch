@@ -1,0 +1,360 @@
+From: OdroidLinux SDK
+Subject: [PATCH] Bluetooth: pads that reconnect by themselves: peripheral accept and an encryption grace
+
+A Nintendo pad (Switch Pro Controller, Joy-Con) paired with the GO Ultra
+over a TP-Link TX10UB Nano (Realtek RTL8851BU, btusb/btrtl) works while we
+connected it, and never comes up when it reconnects by itself (a button
+after sleep, after a host disconnect or a reboot). HCI captures:
+
+1. The pad pages us. hci_conn_request_evt() accepts as Central (role
+   0x00): l2cap_connect_ind() ORs HCI_LM_MASTER of every listening socket
+   (bluetoothd's A2DP and AVCTP set it) into the mask of any incoming
+   connection. After the Role Change the link goes deaf at the baseband
+   (no L2CAP answer, "Encryption Key Refresh Complete: LMP Response
+   Timeout", supervision timeout).
+
+2. Accepted as Peripheral with role switch out of the link policy, the pad
+   opens HID control and interrupt and hid-nintendo binds. About 1 s in the
+   pad (Central now) has a key refresh collide (Encryption Key Refresh
+   Complete 0x23 LMP Error Transaction Collision, then Success), leaves
+   sniff and sends "Encryption Change: Disabled" with status Success.
+   hci_encrypt_change_evt() finds hci_conn_check_link_mode() false and
+   disconnects with Authentication Failure at once; the pad pages again
+   3 s later, the same loop.
+
+Two module parameters of bluetooth.ko, both writable at run time:
+
+accept_peripheral (default 1): an incoming BR/EDR ACL connection is
+accepted as Peripheral whatever the listeners and HCISETLINKMODE ask, and
+hci_setup_link_policy_sync() leaves HCI_LP_RSWITCH out of the default
+link policy, so the remote cannot switch the roles either. The link policy
+is written at controller init: a change of the parameter takes effect at
+the next power on of the adapter (HCISETLINKPOL still sets the policy
+directly). 0 = upstream.
+
+enc_refresh_grace_ms (default 2000): when the remote turns the encryption
+of an encrypted, connected ACL link off and the link mode check fails (the
+case that disconnected at once before), HCI_CONN_ENCRYPT (and AES-CCM) is
+cleared, the upper layers are not told (no hci_encrypt_cfm() with encrypt
+0, so L2CAP keeps its secure channels) and a delayed work waits for the
+remote:
+ - Encryption Change enabled or Encryption Key Refresh Complete success
+   ends the wait: the usual handling of an enabled encryption (key size
+   read, hci_encrypt_cfm() success);
+ - an Encryption Change with a collision status (0x23, 0x2a) keeps
+   waiting, with another error status the link is dropped as before;
+ - when the time is out the host asks for the encryption once (Set
+   Connection Encryption) and waits as long again; then hci_encrypt_cfm()
+   with Authentication Failure, hci_disconnect() and hci_conn_drop() as
+   hci_encrypt_change_evt() did.
+Encryption Key Refresh Complete 0x23 on an ACL link (ignored on BR/EDR
+before) clears HCI_CONN_ENCRYPT_PEND and is logged. 0 = upstream.
+
+The work never sleeps on hdev->lock (trylock, requeue in 10 ms):
+hci_conn_del() disables it synchronously with hdev->lock held. The new
+hci_conn fields are at the end of the struct.
+
+Security: for up to twice enc_refresh_grace_ms the link carries data
+unencrypted (the remote chose to turn the encryption off). New L2CAP
+channels opened meanwhile (all but SDP) wait for the encryption:
+hci_conn_security() sees the link unencrypted. Acceptable for a game
+console's pads; set enc_refresh_grace_ms=0 where it is not.
+---
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -719,6 +719,8 @@ enum {
+ #define HCI_ERROR_UNSUPPORTED_REMOTE_FEATURE	0x1a
+ #define HCI_ERROR_INVALID_LL_PARAMS	0x1e
+ #define HCI_ERROR_UNSPECIFIED		0x1f
++#define HCI_ERROR_LMP_TRANSACTION_COLLISION	0x23
++#define HCI_ERROR_DIFF_TRANSACTION_COLLISION	0x2a
+ #define HCI_ERROR_ADVERTISING_TIMEOUT	0x3c
+ #define HCI_ERROR_CANCELLED_BY_HOST	0x44
+ 
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -784,8 +784,27 @@ struct hci_conn {
+ 	void (*disconn_cfm_cb)	(struct hci_conn *conn, u8 reason);
+ 
+ 	void (*cleanup)(struct hci_conn *conn);
++
++	/* Kept at the end: the modules built against the old layout still
++	 * find every other field where it was.
++	 */
++	struct delayed_work enc_grace_work;
++	__u8		enc_grace;	/* HCI_ENC_GRACE_*, under hdev->lock */
++	bool		enc_grace_aes;	/* AES-CCM before the remote stopped */
+ };
+ 
++/* hci_conn.enc_grace: the remote turned the encryption of an ACL link off */
++#define HCI_ENC_GRACE_NONE	0	/* not waiting */
++#define HCI_ENC_GRACE_REMOTE	1	/* waiting for the remote to resume */
++#define HCI_ENC_GRACE_ASKED	2	/* Set Connection Encryption sent */
++
++/* bluetooth.ko parameters (hci_conn.c) */
++extern bool bt_accept_peripheral;
++extern unsigned int bt_enc_refresh_grace_ms;
++
++bool hci_conn_enc_grace_start(struct hci_conn *conn);
++void hci_conn_enc_grace_stop(struct hci_conn *conn);
++
+ struct hci_link {
+ 	struct list_head list;
+ 	struct hci_conn *conn;
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -23,6 +23,7 @@
+ /* Bluetooth HCI connection handling. */
+ 
+ #include <linux/export.h>
++#include <linux/moduleparam.h>
+ #include <linux/debugfs.h>
+ #include <linux/errqueue.h>
+ 
+@@ -697,6 +698,110 @@ static void hci_conn_auto_accept(struct
+ 		     &conn->dst);
+ }
+ 
++/* Accept an incoming BR/EDR connection as Peripheral, whatever the listening
++ * sockets ask (HCI_LM_MASTER), and keep role switch out of the default link
++ * policy: a role switch on a link the remote opened kills it with some
++ * controllers (Realtek RTL8851BU with Nintendo pads).
++ */
++bool bt_accept_peripheral = true;
++module_param_named(accept_peripheral, bt_accept_peripheral, bool, 0644);
++MODULE_PARM_DESC(accept_peripheral,
++		 "Accept incoming BR/EDR connections as Peripheral, no role switch in the default link policy");
++
++/* How long a remote that turned the encryption of an ACL link off gets to
++ * turn it back on before the link is dropped; 0 drops it at once.
++ */
++unsigned int bt_enc_refresh_grace_ms = 2000;
++module_param_named(enc_refresh_grace_ms, bt_enc_refresh_grace_ms, uint, 0644);
++MODULE_PARM_DESC(enc_refresh_grace_ms,
++		 "Time in ms for the remote to turn the encryption back on (0 = disconnect at once)");
++
++static void hci_conn_enc_grace_queue(struct hci_conn *conn, unsigned int ms)
++{
++	queue_delayed_work(conn->hdev->workqueue, &conn->enc_grace_work,
++			   msecs_to_jiffies(ms));
++}
++
++/* Device _must_ be locked. The remote turned the encryption of an encrypted,
++ * connected ACL link off. Instead of dropping the link, give it
++ * bt_enc_refresh_grace_ms to turn it on again; the upper layers are not told
++ * meanwhile. HCI_CONN_ENCRYPT is already clear: whatever asks for security
++ * on the link sees it unencrypted.
++ */
++bool hci_conn_enc_grace_start(struct hci_conn *conn)
++{
++	unsigned int ms = READ_ONCE(bt_enc_refresh_grace_ms);
++
++	if (!ms || conn->type != ACL_LINK || conn->state != BT_CONNECTED)
++		return false;
++
++	bt_dev_warn(conn->hdev,
++		    "%pMR turned the encryption off, %u ms to turn it on",
++		    &conn->dst, ms);
++
++	conn->enc_grace = HCI_ENC_GRACE_REMOTE;
++	hci_conn_enc_grace_queue(conn, ms);
++	return true;
++}
++
++/* Device _must_ be locked. The encryption is back or the wait is over. */
++void hci_conn_enc_grace_stop(struct hci_conn *conn)
++{
++	conn->enc_grace = HCI_ENC_GRACE_NONE;
++	/* A run that is already past its timer sees HCI_ENC_GRACE_NONE */
++	cancel_delayed_work(&conn->enc_grace_work);
++}
++
++static void hci_conn_enc_grace_work(struct work_struct *work)
++{
++	struct hci_conn *conn = container_of(work, struct hci_conn,
++					     enc_grace_work.work);
++	struct hci_dev *hdev = conn->hdev;
++	struct hci_cp_set_conn_encrypt cp;
++
++	/* hci_conn_del() waits for this work holding hdev->lock: never sleep
++	 * on the lock here. A requeue after hci_conn_del() has disabled the
++	 * work does nothing.
++	 */
++	if (!mutex_trylock(&hdev->lock)) {
++		hci_conn_enc_grace_queue(conn, 10);
++		return;
++	}
++
++	if (conn->enc_grace == HCI_ENC_GRACE_NONE ||
++	    test_bit(HCI_CONN_ENCRYPT, &conn->flags) ||
++	    conn->state != BT_CONNECTED) {
++		conn->enc_grace = HCI_ENC_GRACE_NONE;
++		goto unlock;
++	}
++
++	if (conn->enc_grace == HCI_ENC_GRACE_REMOTE) {
++		bt_dev_warn(hdev, "%pMR: encryption still off, asking for it",
++			    &conn->dst);
++
++		conn->enc_grace = HCI_ENC_GRACE_ASKED;
++		set_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
++		cp.handle = cpu_to_le16(conn->handle);
++		cp.encrypt = 0x01;
++		hci_send_cmd(hdev, HCI_OP_SET_CONN_ENCRYPT, sizeof(cp), &cp);
++		hci_conn_enc_grace_queue(conn,
++					 READ_ONCE(bt_enc_refresh_grace_ms));
++		goto unlock;
++	}
++
++	/* What hci_encrypt_change_evt() does without the grace */
++	bt_dev_err(hdev, "%pMR: encryption still off, disconnecting",
++		   &conn->dst);
++
++	conn->enc_grace = HCI_ENC_GRACE_NONE;
++	hci_encrypt_cfm(conn, HCI_ERROR_AUTH_FAILURE);
++	hci_disconnect(conn, HCI_ERROR_AUTH_FAILURE);
++	hci_conn_drop(conn);
++
++unlock:
++	hci_dev_unlock(hdev);
++}
++
+ static void le_disable_advertising(struct hci_dev *hdev)
+ {
+ 	if (ext_adv_capable(hdev)) {
+@@ -1145,6 +1250,7 @@ static struct hci_conn *__hci_conn_add(s
+ 	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
+ 	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
+ 	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
++	INIT_DELAYED_WORK(&conn->enc_grace_work, hci_conn_enc_grace_work);
+ 
+ 	spin_lock_init(&conn->proto_lock);
+ 
+@@ -1269,6 +1375,7 @@ void hci_conn_del(struct hci_conn *conn)
+ 	disable_delayed_work_sync(&conn->disc_work);
+ 	disable_delayed_work_sync(&conn->auto_accept_work);
+ 	disable_delayed_work_sync(&conn->idle_work);
++	disable_delayed_work_sync(&conn->enc_grace_work);
+ 
+ 	/* Remove the connection from the list so unacked logic can detect when
+ 	 * a certain pool is not being utilized.
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -3353,7 +3353,8 @@ static void hci_conn_request_evt(struct
+ 
+ 		bacpy(&cp.bdaddr, &ev->bdaddr);
+ 
+-		if (lmp_rswitch_capable(hdev) && (mask & HCI_LM_MASTER))
++		if (!READ_ONCE(bt_accept_peripheral) &&
++		    lmp_rswitch_capable(hdev) && (mask & HCI_LM_MASTER))
+ 			cp.role = 0x00; /* Become central */
+ 		else
+ 			cp.role = 0x01; /* Remain peripheral */
+@@ -3585,6 +3586,8 @@ static void hci_encrypt_change_evt(struc
+ {
+ 	struct hci_ev_encrypt_change *ev = data;
+ 	struct hci_conn *conn;
++	bool was_encrypted, was_aes;
++	u8 status = ev->status;
+ 
+ 	bt_dev_dbg(hdev, "status 0x%2.2x", ev->status);
+ 
+@@ -3594,6 +3597,31 @@ static void hci_encrypt_change_evt(struc
+ 	if (!conn)
+ 		goto unlock;
+ 
++	/* The remote turned the encryption off a while ago (see below) */
++	if (conn->enc_grace) {
++		if (!ev->status && !ev->encrypt) {
++			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
++			goto unlock;
++		}
++
++		if (ev->status == HCI_ERROR_LMP_TRANSACTION_COLLISION ||
++		    ev->status == HCI_ERROR_DIFF_TRANSACTION_COLLISION) {
++			bt_dev_info(hdev, "%pMR: encryption collided (0x%2.2x), waiting",
++				    &conn->dst, ev->status);
++			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
++			goto unlock;
++		}
++
++		/* On: the usual way below; an error: dropped as before */
++		hci_conn_enc_grace_stop(conn);
++		if (!ev->status)
++			bt_dev_info(hdev, "%pMR turned the encryption on again",
++				    &conn->dst);
++	}
++
++	was_encrypted = test_bit(HCI_CONN_ENCRYPT, &conn->flags);
++	was_aes = test_bit(HCI_CONN_AES_CCM, &conn->flags);
++
+ 	if (!ev->status) {
+ 		if (ev->encrypt) {
+ 			/* Encryption implies authentication */
+@@ -3629,6 +3657,19 @@ static void hci_encrypt_change_evt(struc
+ 		ev->status = HCI_ERROR_AUTH_FAILURE;
+ 
+ 	if (ev->status && conn->state == BT_CONNECTED) {
++		/* The remote turned the encryption of the link off. A Nintendo
++		 * pad that is Central of a link it paged does it about 1 s in,
++		 * after its key refresh collided: wait for it to turn it on
++		 * again instead of dropping the link, the upper layers told
++		 * nothing meanwhile.
++		 */
++		if (!status && !ev->encrypt && was_encrypted &&
++		    conn->type == ACL_LINK) {
++			conn->enc_grace_aes = was_aes;
++			if (hci_conn_enc_grace_start(conn))
++				goto unlock;
++		}
++
+ 		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
+ 			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
+ 
+@@ -5200,8 +5241,33 @@ static void hci_key_refresh_complete_evt
+ 	/* For BR/EDR the necessary steps are taken through the
+ 	 * auth_complete event.
+ 	 */
+-	if (conn->type != LE_LINK)
++	if (conn->type != LE_LINK) {
++		if (conn->type != ACL_LINK || !READ_ONCE(bt_enc_refresh_grace_ms))
++			goto unlock;
++
++		if (ev->status == HCI_ERROR_LMP_TRANSACTION_COLLISION) {
++			bt_dev_info(hdev, "%pMR: key refresh collided, link kept",
++				    &conn->dst);
++			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
++			goto unlock;
++		}
++
++		/* A key refresh ends a pause of the encryption: it is on
++		 * again after the remote turned it off.
++		 */
++		if (!ev->status && conn->enc_grace) {
++			hci_conn_enc_grace_stop(conn);
++			bt_dev_info(hdev, "%pMR refreshed the key, encryption on again",
++				    &conn->dst);
++			clear_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
++			set_bit(HCI_CONN_AUTH, &conn->flags);
++			set_bit(HCI_CONN_ENCRYPT, &conn->flags);
++			if (conn->enc_grace_aes)
++				set_bit(HCI_CONN_AES_CCM, &conn->flags);
++			hci_encrypt_cfm(conn, 0);
++		}
+ 		goto unlock;
++	}
+ 
+ 	if (!ev->status)
+ 		conn->sec_level = conn->pending_sec_level;
+--- a/net/bluetooth/hci_sync.c
++++ b/net/bluetooth/hci_sync.c
+@@ -4343,7 +4343,8 @@ static int hci_setup_link_policy_sync(st
+ 
+ 	memset(&cp, 0, sizeof(cp));
+ 
+-	if (lmp_rswitch_capable(hdev))
++	/* bt_accept_peripheral: the remote may not switch the roles either */
++	if (lmp_rswitch_capable(hdev) && !READ_ONCE(bt_accept_peripheral))
+ 		link_policy |= HCI_LP_RSWITCH;
+ 	if (lmp_hold_capable(hdev))
+ 		link_policy |= HCI_LP_HOLD;
