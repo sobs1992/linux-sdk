@@ -1307,6 +1307,71 @@ bare_app) — поведение было и до этапа.
 /games/recipes нет, /data/bare-web.pin не тронут, в /run/bare_app осталась пустая папка deleting/
 (сервер создаёт её при удалении). OGU2 не тронута.
 
+### OGU2 обновлена 2026-11-26
+
+Builder, master SDK 9f86570 / bare_app c1358fe, полная дельта по [[unit-update-full-delta]].
+
+Эталон: `make FW=ogu rootfs-make BR="bare-app-rebuild ddr-tools-rebuild"`, затем `make FW=ogu
+rootfs` (bare-app и ddr-tools собираются из локальных исходников, `SITE_METHOD = local`: без
+`-rebuild` Buildroot не берёт новый bare_app) → rootfs.tar 2026-11-26 09:31, sdk-release `SDK=9f86570
+BARE_APP=c1358fe`. Ядро не менялось: Image fd4ea9ca (#77) и dtb 904f4c2f на обеих приставках равны
+output/ogu/linux-install; модули равны, кроме updates/meson-venc.ko (отличается только GNU build-id,
+код тот же) — заменён на обеих.
+
+OGU2 (192.168.8.2, слот b). Резервная копия до работ: /media/D/OdroidLab/backups/ogu2/web-2026-11-26/
+(etc.tar — /etc целиком, data-conf-pirates.tar — /data/*.conf* и сохранения pirates,
+rootfs-md5-before.txt, после работ rootfs-md5-after.txt). Дельта 31 файл: bare_app, bare_app_wine,
+game-install, bare-web (/usr/sbin/bare-web, /usr/lib/bare-web, /usr/share/bare-web), card-rw,
+bare-backup, bare-report, S41wifi, S43web, S90bare-app, errors.ini, ddr-calibrate/eyescan/phyreg,
+user-guide.html, game-recipes (ports/wine/wine.ini, README, neighbours dllpatch/relayout, pop
+poplaunch.exe), sdk-release, meson-venc.ko; прежние версии в /data/sdk-backup/sync-2026-11-26/ на
+приставке (+ delta.tar). Свои файлы приставки не тронуты: fstab (строка /mnt/boot), wpa_supplicant.conf,
+bare_app.conf, bare_app_sticks.conf, ключ dropbear (/etc/dropbear — каталог, в эталоне ссылка на
+/var/run/dropbear), .xash_id, seedrng, extlinux.conf (resume_offset), data-partition. Карта (card-rw
+begin/end, прежние файлы в /data/sdk-backup/sync-2026-11-26/games/): из 45 файлов наложений манифеста
+отличался один — /games/pirates/wine.ini (новый комментарий о слое рецепта, bare_app bbced63); памятки
+install/redist и Руководство.html обновил `game-install prepare-card` (повтор ничего не пишет). Памятка
+не берёт адрес из `unit net`: текст один для обеих приставок — «http://192.168.7.2 (вторая приставка:
+http://192.168.8.2)». После `reboot` ssh через ~10 с; bare-web поднят bare_app в режиме «Автоматически»
+(/data/bare-web.mode = auto, кабель — `configured`), /api/status: SDK 9f86570, unit ogu2; /api/games — 33
+игры; GPU 800 МГц из /data/gpu-max-mhz сохранилась. Смоук через FIFO: homm3, pirates, doom — running
+через 2 с, quit-game; pirates и doom — `exit status 0`, homm3 — `signal 15` (vcmiclient не ловит
+SIGTERM; так же на OGU1 2026-11-23). Автокопии bare-backup после этих выходов остались на карте OGU2
+(/games/backups, 4 шт. вместе с автокопией после запуска pirates ниже) и метки /data/backups/.stamp-*.
+
+Перенос сохранений: OGU1 `POST /api/saves/backup {game: pirates}` → saves-pirates-2026-11-26_09-37-59.zip
+(274905 Б, md5 на ПК = на карте OGU1) → `GET /api/saves/copy/card/…` → OGU2 `PUT /api/saves/upload/…` →
+`POST /api/saves/info` → `POST /api/saves/restore {where: data, game: pirates}` → restored pirates,
+settings pirates (в settings.ini только `game=`, bare_app.conf OGU2 не изменился). md5 7 файлов
+`My Games/pirates` на OGU2 = OGU1. `.bak` после успешного восстановления удаляется (так задумано);
+прежние данные OGU2 (Config.ini 3c69b0b9…, KeyMap.ini) лежат в автокопии
+saves-pirates-2026-11-26_09-37-40-auto.zip (проверено по md5) и в резервной копии на ПК. pirates после
+восстановления: running, 28 fps, exit status 0; err: в 1.log те же, что у OGU1, плюс `getaddrinfo Failed to
+resolve your host name` (имя ogu2). Копия на карте OGU1 удалена через DELETE; на OGU2 остался загруженный
+zip в /data/backups.
+
+OGU1 (192.168.7.2): остаток дельты 12 файлов — bare_app, bare_app_wine (стояли сборки build-ogu-ut),
+__pycache__ bare_web, ddr-calibrate/eyescan/phyreg, user-guide.html, game-recipes (wine.ini, README,
+poplaunch.exe), sdk-release (было 9989870-dirty), meson-venc.ko; на карте /games/pirates/wine.ini и
+Руководство.html. Прежние файлы — на ПК: /media/D/OdroidLab/backups/ogu/sync-2026-11-26/
+(rootfs-old-files.tar, card/, delta.tar, rootfs-md5-before/after.txt); /data OGU1 не менялся (кроме
+своих battery.raw/hist), /data/bare-web.pin и режим auto те же. bare_app перезапущен (S90bare-app
+restart), bare-web — `S43web stop`, поднят bare_app. Игра на OGU1 после обновления не запускалась
+(автокопия и метка писали бы в /data).
+
+Итог: rootfs обеих приставок = эталону, кроме своих файлов приставки и
+`/usr/lib/bare-web/__pycache__/bare_web.cpython-314.pyc`; между собой отличаются .xash_id (2),
+extlinux.conf, bare_app.conf, bare_app_sticks.conf, ключ dropbear, seedrng и этот pyc. Только на OGU1:
+/root/.local/share (иконки и mime от winemenubuilder, запуск Wine с HOME=/root ночью), /root/.config/menus,
+pyc game_pictures. На обеих, не из эталона (оставлены): /usr/bin/bare_app.old и bare_app_wine.old
+(2026-11-24, из создания слота), /crond.reboot, /.local и /.config от Wine, pyc gamerecipe.
+
+Замечено: pyc bare_web в эталоне устаревший — в Buildroot target/usr/lib/bare-web/__pycache__ лежит
+pyc от 09:07 из исходника 149737 Б (нынешний 151158 Б), post-build.sh чистит __pycache__ только у
+game-recipes; /usr/sbin/bare-web сверяет заголовок и перекомпилирует при первом старте, а в заголовок
+входит mtime исходника, поэтому pyc у приставок разные при одном bare_web.py. В образ так попадает
+лишний устаревший файл.
+
 ## Этап 10. Поток H.264 в браузере (бывший 5.5; решение пользователя 2026-11-26: вместо проверки на OGA)
 
 Что есть: src/stream (RTSP на 8554, H.264 с аппаратного кодера meson-venc или x264, ts.c —
