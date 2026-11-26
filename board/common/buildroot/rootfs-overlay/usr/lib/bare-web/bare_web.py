@@ -113,14 +113,15 @@ import zlib
 
 E = os.environ.get
 # a test names every place and program (all of them or none: a test never falls
-# back to the device's own); PORT, BIND, NET are no places
+# back to the device's own); PORT, BIND, NET are no places, THP and LIB the
+# launcher's (/usr/sbin/bare-web)
 HOOKS = ("BARE_WEB_GAMES", "BARE_WEB_DATA", "BARE_WEB_LOGS", "BARE_WEB_STATIC", "BARE_WEB_LOG",
          "BARE_WEB_POWER", "BARE_WEB_RELEASE", "BARE_WEB_GAME_INSTALL", "BARE_WEB_BARE_REPORT",
          "BARE_WEB_SYSTEM_UPDATE", "BARE_WEB_AB_STATE", "BARE_WEB_USB_DISK", "BARE_WEB_UNIT",
          "BARE_WEB_REBOOT", "BARE_WEB_BARE_BACKUP", "BARE_WEB_UPDATE_LOCK", "BARE_WEB_RUN",
          "BARE_WEB_CONF", "BARE_WEB_CTL", "BARE_WEB_WINE", "BARE_WEB_SHOT", "BARE_WEB_SYS_INPUT",
          "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP")
-NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET")
+NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET", "BARE_WEB_THP", "BARE_WEB_LIB")
 TEST = any(k.startswith("BARE_WEB_") and k not in NOT_HOOKS for k in os.environ)
 if TEST:
     _missing = [k for k in HOOKS if not E(k)]

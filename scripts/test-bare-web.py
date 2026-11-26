@@ -919,6 +919,10 @@ class GateTest(unittest.TestCase):
         env = dict(base, **{k: v for k, v in ENV.items() if k.startswith("BARE_WEB_")})
         r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "started", r.stderr)
+        # what /usr/sbin/bare-web sets on the device is no test hook
+        env = dict(base, BARE_WEB_THP="off", BARE_WEB_LIB="/usr/lib/bare-web")
+        r = subprocess.run([sys.executable, "-c", code + "print(m.TEST)\n"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.split(), ["started", "False"], r.stderr)
         # game-install: the lock and card-rw too, never /run's
         gi = {k: v for k, v in ENV.items() if k.startswith("GAME_INSTALL_")}
         for drop in ("GAME_INSTALL_LOCK", "GAME_INSTALL_CARD_RW", "GAME_INSTALL_GAMES"):
