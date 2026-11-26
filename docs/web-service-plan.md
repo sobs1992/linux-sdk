@@ -1645,6 +1645,34 @@ CMakeLists.txt, как errors.ini.
 После: игра закрыта, bare_app.conf md5 48ccbba… (`stream=1`, `web=auto`), режим auto, карта ro, writers 0,
 тестовых файлов в /tmp нет (shim, atest, pcmwatch, конфиги удалены). OGU2 не тронута.
 
+## Этап 10 на OGU2: полная дельта (2026-11-26 вечер, builder, ничего не коммитилось)
+
+Эталон: `make FW=ogu rootfs-make BR=bare-app-rebuild`, затем `make FW=ogu rootfs` (master SDK 694ec79, bare_app
+9e5cd25). В rootfs.tar есть usr/share/bare_app/wine-alsa.conf (CMake `install(FILES …)` в полном образе работает,
+правка не понадобилась), libavcodec со строкой mp2fixed и `--enable-encoder=mp2fixed` в конфигурации, нет
+usr/lib/bare-web/__pycache__. Ядро #77 (Image fd4ea9ca, dtb 904f4c2f) и 938 модулей на обеих приставках совпадают
+с output/ogu/linux-install — не менялись.
+
+OGU2 (слот b): дельта 17 файлов — sdk-release, bare_app, bare_web.py, libavcodec/libavfilter/libavformat/libavutil/
+libswresample/libswscale, bare-web app.css/app.js/index.html/mpegts.js/mpegts.js.LICENSE, wine-alsa.conf,
+user-guide.html, poplaunch.exe (последний пересобирается post-build при каждой сборке); старый
+bare_web.cpython-314.pyc убран (сервер собрал свой при старте). Оверлеи карты: 45 из 48 совпадают, 3 — ut2004
+(игры нет, как и раньше), карта не писалась. После тёплой перезагрузки rootfs совпадает с эталоном, кроме
+per-unit файлов (fstab, wpa_supplicant.conf, ключ dropbear, bare_app.conf, bare_app_sticks.conf, .xash_id, seed,
+extlinux.conf) и прежних остатков (bare_app.old, bare_app_wine.old, __pycache__ сервера и gamerecipe).
+Копии: lab/backups/ogu2/web-2026-11-26/stage10-before/ и /data/sdk-backup/stage10-2026-11-26/ на приставке.
+
+Проверка (сайт по кабелю, режим auto): страница 200, /api/status — SDK 694ec79, BARE_APP 9e5cd25; mpegts.js 200 с ETag,
+с If-None-Match — 304 0 Б. Heroes III: поток H.264 854x600 + MP2 48 кГц стерео 192 кбит/с, 8 с = 939 КБ (~940 кбит/с
+по факту, в state.json kbps 3000 — заданная), viewers 1, sound true, громкость в потоке −17,5 дБ (пик −1,3),
+card0 30 с: 1 запуск, 0 XRUN, задержка не меньше 634 кадров. Pirates!: ALSA_CARD=1, ALSA_CONFIG_PATH=
+/usr/share/bare_app/wine-alsa.conf, держит pcmC1D0p 480/1920, поток H.264 800x600 + MP2, −30,8 дБ (пик −13,5),
+card0 30 с: 1 запуск, 0 XRUN, задержка не меньше 866; «ALSA lib» и underrun в журналах нет, выход 0. Поток
+останавливается через 60 с после ухода зрителя (в журнале bare_app 321,5 → 381,6 с и 467,4 → 527,6 с).
+Heroes III, как и раньше, кончается сигналом 15. OGU1 не менялась (только чтение md5): отличие от эталона —
+9 файлов (sdk-release 9f86570, bare_app той же версии другой сборки, режим 0700, libavcodec с mp2fixed uid 1000,
+остальные libav старые, user-guide.html, poplaunch.exe).
+
 ## Риски
 
 - Память: Python-сервер ~10–15 МБ при играх у предела памяти → запуск по кабелю.
