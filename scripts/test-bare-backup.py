@@ -458,6 +458,26 @@ class Test(unittest.TestCase):
         for bad in ((), ("../x",), ("a/b",), ("pirates", "homm3")):
             self.assertEqual(self.bb("copies", *bad, ok=False).returncode, 2, bad)
 
+    def test_copies_links(self):
+        """copies: a link named as a copy (to a file, to a folder) is none; a backups
+        folder that is a link is not read"""
+        card, data = os.path.join(self.games, "backups"), os.path.join(self.data, "backups")
+        elsewhere = os.path.join(self.top, "elsewhere")
+        put(os.path.join(elsewhere, "saves-pirates-2026-11-21_10-00-00.zip"), "z" * 10)
+        os.makedirs(os.path.join(elsewhere, "dir"))
+        put(os.path.join(card, "saves-pirates-2026-11-20_10-00-00.zip"), "z" * 10)
+        os.symlink(os.path.join(elsewhere, "saves-pirates-2026-11-21_10-00-00.zip"),
+                   os.path.join(card, "saves-pirates-2026-11-22_10-00-00.zip"))
+        os.symlink(os.path.join(elsewhere, "dir"), os.path.join(card, "saves-pirates-2026-11-23_10-00-00.zip"))
+        os.symlink(elsewhere, data)	# /data/backups itself a link
+        want = [["card", os.path.join(card, "saves-pirates-2026-11-20_10-00-00.zip"), "10", "2026-11-20_10-00-00", "-"]]
+        lines = self.bb("copies", "pirates").stdout.splitlines()
+        self.assertEqual([l.split("\t") for l in lines], want)
+        # the site's list (bare-backup list): none of them either
+        listed = json.loads(self.bb("list").stdout)
+        names = [c["name"] for c in (listed if isinstance(listed, list) else listed.get("copies", []))]
+        self.assertEqual(names, ["saves-pirates-2026-11-20_10-00-00.zip"])
+
     def test_auto_nothing(self):
         shutil.rmtree(self.pir_saves)
         self.assertEqual(self.bb("auto", "pirates").stdout.strip(), "nothing")

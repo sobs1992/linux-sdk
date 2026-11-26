@@ -560,19 +560,26 @@ def make_copy(state, folders, dest, auto=False):
 # ---- the copies there ------------------------------------------------------------
 
 def copies(dirs):
+    """the copies in dirs: files of their own, no links (neither a copy that is
+    one nor a backups folder that is one: what they point at is not ours)"""
     out = []
     for where, d in dirs:
         try:
-            names = os.listdir(d)
+            if not stat.S_ISDIR(os.lstat(d).st_mode):
+                continue
+            with os.scandir(d) as it:
+                entries = sorted(it, key=lambda e: e.name)
         except OSError:
             continue
-        for n in sorted(names):
-            m = NAME_RE.match(n)
-            p = os.path.join(d, n)
-            if not m or not os.path.isfile(p):
+        for e in entries:
+            m = NAME_RE.match(e.name)
+            try:
+                if not m or not e.is_file(follow_symlinks=False):
+                    continue
+                st = e.stat(follow_symlinks=False)
+            except OSError:
                 continue
-            st = os.stat(p)
-            out.append({"where": where, "dir": d, "name": n, "folder": m.group(1), "size": st.st_size,
+            out.append({"where": where, "dir": d, "name": e.name, "folder": m.group(1), "size": st.st_size,
                         "date": m.group(2), "auto": bool(m.group(4)), "mtime": int(st.st_mtime)})
     return out
 
