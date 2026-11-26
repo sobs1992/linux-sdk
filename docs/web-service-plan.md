@@ -395,6 +395,75 @@ applied; launch:pirates → у bare_app_wine BARE_APP_WINE_INI=/run/bare_app/ini
 3.5 Игры своих движков (homm3, halflife, doom): только Опции, Журналы, Проверка; у
     game.ini-игр ключи по их game.ini.
 
+### Этап 4: сделано 2026-11-26 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты bare_app: 5af2fbb (`bare_app_wine --actions` и `--defaults`: одна таблица
+употреблений стиков и кнопок геймпада для разбора и печати, тест wine_actions), 0d474aa
+(`kp+` в [keys]: «+» входит в имя клавиши; раньше разбор резал по каждому «+», и kp+ не
+читался; 75 разных действий [keys] всех рецептов разбираются как прежде). SDK: 18ce749
+(API Мастерской и Проверки, schema.json, 15 тестов), b4be984 (страница игры), 2b2d3e0
+(PNG без Pillow, ответ после games.json), плюс коммит с этим разделом (и указатель
+apps/bare_app).
+
+`/usr/share/bare-web/schema.json`: ключи wine.ini (109 записей: секция, ключ, тип enum/int/
+float/bool/list/text/keys/stick, допустимые значения, min/max, pattern, `repeat` у reg/modes/
+saves, вкладка, подсказка по-русски из комментариев ports/wine/wine.ini) и game.ini (63, по
+apps/bare_app/docs/game.ini), строки таблицы управления (подписи «Л. стик», «F5 сворачивает»…,
+start/select помечены `device`), 7 заготовок env из games/*/overlay/wine.ini (Box64
+BIGBLOCK/CALLRET, WINE_D3D_CONFIG HeapMaps/SysmemMaps/GLStateCache, WINE_FAST_MUTEX,
+PAN_MMAP_WINDOW, WINE_D3D9_SHOW_LOST_SCENE, шрифты +25%, WINEBARE_FPS). Умолчания: [keys] и
+экран — `bare_app_wine --defaults` (печатает cfg после set_defaults()), ключи bare_app
+(fps_limit none, minimize f5, gpu auto, cover.png…) — поле `default` схемы. Сервер читает
+`--actions`/`--defaults` один раз (поток при старте) и держит в памяти.
+
+API (папка FOLDER = `folder` из games.json; имя проверяется safe_name, иначе 400; нет игры 404):
+
+| Запрос | Что делает |
+|---|---|
+| GET /api/schema | schema.json + `actions` (--actions), `wine_defaults`, `start_select` (FIRMWARE не ogu) |
+| GET /api/recipe/FOLDER | kind (wine, native, built-in), editable, base / layer (или null) / effective по секциям `{"": {...}, "keys": {...}}` (повторяемые ключи — списки), `effective_source` (bare_app — файл /run/bare_app/ini, если он не старше слоя; server — слияние здесь по правилам ini_layer.c; base — слоя нет), defaults, `player_controls` (controls.<key> как есть + пары), `player_options`, layer_state/layer_error из games.json |
+| PUT /api/recipe/FOLDER/layer | тело `{"sections": {...}}` или текст ini (не JSON); слой = только отличия от base: скаляр, отличающийся; список целиком, если отличается; `""` у ключа базы — строка `key =`; совпадающее с base не пишется; нет отличий — файла нет (каталог и пустой /games/recipes удаляются rmdir); проверка по схеме (400 с перечнем; неизвестный ключ — предупреждение, пишется как текст; «;»/«#» после пробела, управляющие символы, `kp+ctrl`, >4 клавиш — отказ); CardWriting (remount rw/ro); FIFO `reload FOLDER`; ответ после того, как bare_app переписал действующий файл и games.json (до 2 с) |
+| DELETE /api/recipe/FOLDER/layer | удалить только wine.ini/game.ini слоя (чужие файлы каталога остаются), reload |
+| POST /api/recipe/FOLDER/adopt-controls | пара `A=B` игрока → `[keys] A` = действующее `B` (с умолчаниями bare_app_wine), `[labels]`/`[labels.ru] A` = подпись B (нет — `A =`); `A=-` → `none`; оси, lsens/rsens, gyro и направления крестовины при dpad ≠ arrows остаются у игрока; затем import-settings с `game=<key>`, остатком controls и прежней options; ждёт, пока bare_app запишет bare_app.conf (до 4 с); файл импорта удаляется |
+
+Матрица и инварианты (проверены тестами): только отличия; повторная PUT заменяет весь слой;
+пустое значение удаляет ключ базы, у отсутствующего ключа — ничего; список «saves =»;
+неизвестный ключ; без FIFO (bare_app нет) слой пишется, reloaded false, effective от сервера;
+adopt без FIFO — 503 до записи слоя, при сбое import слой возвращается; adopt при идущей игре
+— 409; game.ini-игра (слой /games/recipes/<id>/game.ini, база dir/game.ini или
+<NATIVE_DIRS>/<id>.ini); homm3/halflife/doom — только kind, PUT 400.
+
+Страница (index.html/app.js, `#game/FOLDER[/TAB]`, ссылка «мастерская»/«проверка» в «Игры и
+журналы»): Управление (таблица: кнопка | действие — select для stick/rstick/dpad из --actions с
+учётом `takes`, для кнопок поле с datalist всех действий «группа: имя» | подпись рус. | подпись
+англ. | перестановка игрока; up/down/left/right только при dpad = arrows, stick_up… при stick =
+arrows; start/select — если они есть у приставки или в рецепте; hint/hint.ru собираются из
+подписей «Л. стик  курсор    A  клик…» + «\n» + F-клавиши и «F5  свернуть    F6 (держать)
+выход», пока подсказку не правили руками; кнопка «Собрать из подписей»), Экран (mode, modes,
+rows, scale, cursor, cursor_speed, fps_limit, gamma), Тонкое (остальные ключи схемы и ключи
+рецепта/слоя, которых схема не знает; заготовки env заменяют одноимённые NAME=), Проверка (этап
+5). У каждого поля «умолч. · рецепт» и поле правки (пусто = как в рецепте; «убрать из рецепта»
+= пустое значение). Проверка на клиенте теми же правилами, по всем правкам, не только видимой
+вкладки. «Сохранить», «Сбросить правки» (подтверждение), «Перенести управление игрока в
+рецепт» (видна, если в перестановке есть кнопки; подтверждение). game.ini-игры: Тонкое и
+Проверка; свои движки: только Проверка.
+
+Проверено: test-bare-web.py 39 тестов (24 прежних + RecipeTest 10 + CheckTest 5; поддельный bare_app на FIFO: reload пишет действующий файл, import-settings правит conf
+как ctl_settings.c); мутации layer_diff, подписей adopt, отправки import-settings, отказа 409
+и удаления снимка ловятся; ctest bare_app 9/9 (wine_actions, game_state новые). Страница в
+headless Chrome через DevTools на тестовом сервере: правка select/метки/mode → «Сохранено», файл
+слоя = 4 строки + подсказка; неверное действие — ошибка у поля и отказ сохранения; сброс; перенос
+кнопок; вкладки Тонкое/Проверка. OGU1: слияние сервера = файлу bare_app (pirates); adopt с
+настоящим bare_app: import-settings `a=b,b=a,x=-,ly=invert` → adopt → слой `a = esc`, `b =
+lbutton`, `x = none`, подписи, в conf осталось `controls.0ecf99f4=ly=invert`, действующий файл
+bare_app с теми же [keys]; затем слой удалён, conf возвращён (md5 938d51ce… как до теста).
+Живой браузер с мышью (не headless) не проверялся.
+
+Отклонения: умолчания ключей bare_app (не bare_app_wine) — в schema.json; game.ini-база ищется
+сервером (в games.json нет пути ini); перенос кнопок при идущей игре — 409 (перестановка игрока
+действует сразу, слой — со следующего запуска); смена name разрешена с предупреждением в
+подсказке (game_key меняется).
+
 ## Этап 5. Проверка в браузере (1 день, поток ещё 0,5–1)
 
 4.1 Состояние: bare_app раз в секунду пишет `/run/bare_app/state` (какая игра идёт,
@@ -405,9 +474,74 @@ applied; launch:pirates → у bare_app_wine BARE_APP_WINE_INI=/run/bare_app/ini
     обновляет картинку раз в секунду, пока открыта.
 4.4 Виртуальный геймпад на странице: кнопки → FIFO `press`/`release`, стики как в
     ogu-ctl.py. Хвост журнала запуска живьём по SSE.
-4.5 Живой поток (отдельно, в конце): mpegts.js в /usr/share/bare-web, MPEG-TS от
+4.5 (ОТЛОЖЕН 2026-11-26, не делался) Живой поток (отдельно, в конце): mpegts.js в /usr/share/bare-web, MPEG-TS от
     stream.c по HTTP (как для VLC/satip). Если не ложится за полдня, остаётся
     скриншот раз в секунду.
+
+### Этап 5: сделано 2026-11-26 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты bare_app: 022cdbe (PPM снимка пишется рядом и переименовывается — читатель не видит
+половину), b8121a5 (state.json: ACT_GAME_STATE раз в секунду от вида, ctl_state добавляет
+sysmon и пишет атомарно; тест game_state через настоящий bare_app и fake_game). SDK: 18ce749
+(API), f8fde95 (bare-app.init: `BARE_APP_SHOT=/run/bare_app/shot.ppm`, mkdir /run/bare_app;
+ogu-ctl берёт путь снимка из окружения bare_app), 7a0d522 (снимок, который bare_app делает при
+выходе, удаляется после stop), b4be984 (вкладка Проверка), 2b2d3e0 (PNG через zlib).
+
+state.json (`<run>/state.json`, пока идёт игра — раз в секунду, и один раз в конце):
+`{running: folder|null, pid, minimized, fps (кадры за последнюю секунду, как строка FPS
+sysmon; 0, если кадра не было секунду, свёрнута или удержана), cpu_pct (процесс-группа игры,
+% одного ядра), cpu_total, gpu_pct (fdinfo игры), gpu_mhz, mem_mb (RSS группы), mem_used_mb,
+time}`. Без игры sysmon не открыт и ничего не читается.
+
+API:
+
+| Запрос | Что делает |
+|---|---|
+| GET /api/state | state.json, если он не старше 3 с; иначе `{running: null, stale: true}` |
+| POST /api/game/FOLDER/launch\|quit\|options | FIFO launch / quit-game (и отпускание всех виртуальных кнопок) / options; launch — 409, если идёт другая игра (state.json или games.json `running`), та же — `{already: true}` без команды; options — 409, пока идёт игра; без FIFO 503 |
+| GET /api/shot.png[?w=W] | один снимок за раз (замок): путь — BARE_APP_SHOT из /proc/<pid>/environ bare_app (pid из games.json, comm = bare_app), иначе /tmp/bare_app.ppm; старый файл удаляется, SIGUSR1, ждём появления (до 2 с, иначе 504), PPM удаляется после чтения; PNG собирается zlib (без Pillow), `w` — шаг через целое число пикселей (854 → 427 при w=480) |
+| POST /api/pad {button, down} | FIFO press/release; кнопки up…f6, select, start; нажатая и не отпущенная страницей отпускается сама через 10 с |
+| POST /api/stick {stick, x, y, ms} | evdev adc-joystick-left/right: оси и их min/max через EVIOCGBIT/EVIOCGABS, значения каждые 2 мс в течение ms (как ogu-hold), в конце середина |
+| GET /api/logs/GAME/live | 1.log по SSE: последние 16 КБ, затем новые строки; новый запуск (другой inode или файл короче) → событие `reset` |
+
+Вкладка Проверка: «Запустить», «Выйти из игры», «Опции игры на приставке»; карточки state;
+снимок 480 px, следующий через 1 с после прихода предыдущего, только пока вкладка открыта
+(уход со страницы/вкладки останавливает и отпускает кнопки); геймпад L2 L1 R1 R2, крестовина,
+X Y A B (как на приставке), F1–F6, Select/Start если есть; стрелки стиков держат стик по 300 мс
+повторами, пока нажаты; журнал запуска живьём (500 строк).
+
+Приёмка на OGU1 (резервная копия перед заменой: /media/D/OdroidLab/backups/ogu/web-stage1-
+2026-11-25/stage45-before/ — files.tar: bare_app, bare_app_wine, S90bare-app, bare_web.py,
+страницы, bare-web, bare_app.conf; pirates-data.tar: сохранения pirates и /data/backups;
+md5-and-state.txt), только через API с ПК:
+- PUT слоя pirates `mode 640x480` + `[keys] select = esc` → 2 строки, layer_state applied,
+  три столбца: mode 800x600 / 800x600 / 640x480 → effective 640x480, select tab / tab / esc;
+  /games снова ro; слияние сервера = файлу bare_app;
+- launch → 200; launch coldfear во время игры → 409; живой журнал — 35 строк за 8 с;
+  state: running pirates, fps 30,1 (27–30 в игре, 117 на загрузке), cpu 55–118 %, gpu 11–34 %,
+  память 211–286 МБ; в 1.log `settings from /run/bare_app/ini/pirates.ini: mode 640x480`;
+- через ~14 с снимок 854x480, яркость: среднее 84,1, σ 52,2 (главное меню игры);
+  0,2 с на снимок, три одновременных — 200 200 200 за 0,29 с;
+- F1 (= Esc) в главном меню ничего не меняет (0 пикселей), поэтому нажатие проверено
+  крестовиной вниз: подсветился пункт меню, изменилось 5371 пикселей; стик вправо 600 мс —
+  курсор сдвинулся (3045 пикселей);
+- quit → state running null; DELETE слоя → /games/recipes нет, ini/ пуст, карта ro;
+- bare_app.conf: запуски меняют только `recent` (bare_app ставит игру первой) — после
+  теста возвращён из копии при остановленном bare_app (md5 938d51ce… как до теста); две
+  автокопии pirates, сделанные bare_app после выходов из игры, удалены вместе с /games/backups
+  (её не было), отметка /data/backups/.stamp-pirates возвращена из копии; сохранения pirates
+  по md5 не менялись.
+
+Память bare-web на OGU1 (VmRSS): 15,7 МБ на этапе 1; с Pillow после снимка 24,3 МБ (и Pillow
+вовсе не находился: сервер запущен с `-S`) → PNG через zlib: 18,0 МБ (HWM 20,3) после
+снимков, полный снимок 0,18 с, 427x240 0,11 с.
+
+5.5 (поток H.264 в браузере) не делался — отложен по заданию.
+
+Отклонения: ширина `?w=` — не ровно W, а целый шаг (≤ W); снимок, который bare_app пишет при
+выходе (BARE_APP_SHOT задан), удаляет init-скрипт; state.json с running null остаётся в
+/run/bare_app (так задумано: «один раз при её конце»); fps считает и кадры загрузки (как
+sysmon); проверка «нажатие меняет снимок» сделана кнопкой «вниз», а не F1.
 
 ## Этап 6. Экспорт рецепта (0,5 дня)
 
