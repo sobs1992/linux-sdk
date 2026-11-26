@@ -120,6 +120,12 @@ class Test(unittest.TestCase):
             {"manifest.section": SECTION},
             {"games/a/overlay/wine.ini": "x", "games/b/overlay/wine.ini": "y"},
         ]
+        # names Windows cannot have, anywhere in the path: nothing written either
+        for bad_name in ("a<b.txt", "a>b", 'a"b', "a|b", "a?b", "a*b", "tab\there", "dot.", "space ",
+                         "CON", "prn.txt", "Aux", "nul.ini", "COM1", "com9.log", "LPT1", "lpt9", "CON .x"):
+            bad.append(dict(GOOD, **{"games/newgame/overlay/" + bad_name: "x"}))
+        bad.append(dict(GOOD, **{"games/newgame/aux/wine.ini": "x"}))
+        bad.append(dict(GOOD, **{"games/newgame/dir./wine.ini": "x"}))
         for files in bad:
             with self.subTest(names=sorted(files)):
                 r = self.run_import(files)
@@ -134,6 +140,13 @@ class Test(unittest.TestCase):
         r = subprocess.run([sys.executable, "-I", str(SCRIPT), str(self.zip), "--sdk", str(Path(self.tmp.name) / "no")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
+
+    def test_windows_names_that_are_fine(self):
+        files = dict(GOOD, **{"games/newgame/overlay/COM10.txt": "x", "games/newgame/overlay/console.ini": "x",
+                             "games/newgame/overlay/.hidden": "x", "games/newgame/overlay/LPT0": "x"})
+        r = self.run_import(files)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.sdk / "games" / "newgame" / "overlay" / "COM10.txt").is_file())
 
     @unittest.skipIf(os.name == "nt", "links")
     def test_no_writing_through_a_link(self):

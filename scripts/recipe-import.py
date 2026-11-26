@@ -25,8 +25,21 @@ FOLDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXTRA = ("manifest.section", "needs.txt", "logs/1.log")
 
 
+# what Windows cannot name a file or a directory: these characters, control
+# characters, a name ending in a dot or a space, the devices (also with an
+# extension: "nul.txt")
+WIN_BAD_CHARS = set('<>:"|?*') | {chr(c) for c in range(32)}
+WIN_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {"%s%d" % (d, n) for d in ("COM", "LPT") for n in range(1, 10)}
+
+
 class Refused(Exception):
     pass
+
+
+def windows_ok(part):
+    """part (one name of a path) can be a file's or a directory's on Windows"""
+    return (not any(c in WIN_BAD_CHARS for c in part) and not part.endswith((".", " ")) and
+            part.split(".", 1)[0].rstrip(" ").upper() not in WIN_DEVICES)
 
 
 def plan(z):
@@ -41,6 +54,8 @@ def plan(z):
         p = PurePosixPath(name)
         if "\\" in name or p.is_absolute() or ":" in name or any(x in ("", ".", "..") for x in name.split("/")):
             raise Refused("a name in the zip that is no file of a recipe: %r" % name)
+        if not all(windows_ok(x) for x in name.split("/")):
+            raise Refused("a name in the zip that Windows cannot have: %r" % name)
         if name in EXTRA:
             extra[name] = z.read(info)
             continue
