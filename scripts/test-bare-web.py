@@ -122,6 +122,11 @@ ENV = {
     "BARE_WEB_CTL": os.path.join(TOP, "ctl"), "BARE_WEB_WINE": os.path.join(BIN, "bare_app_wine"),
     "BARE_WEB_SHOT": os.path.join(TOP, "run", "shot.ppm"), "BARE_WEB_NATIVE_DIRS": GAMES,
     "BARE_WEB_SYS_INPUT": os.path.join(TOP, "sys-input"), "BARE_WEB_DEV_INPUT": os.path.join(TOP, "dev-input"),
+    # the locks a game's delete takes (game-install's, the real one's here) and
+    # looks at (bare-backup's: RUN/bare-backup.lock in its tests), the mounts
+    "BARE_WEB_INSTALL_LOCK": os.path.join(STATE, "gi.lock"),
+    "BARE_WEB_BACKUP_LOCK": os.path.join(TOP, "run", "bare-backup.lock"),
+    "BARE_WEB_MOUNTS": os.path.join(TOP, "mounts"),
 }
 # bare_app_wine of the PC's build (a copy) for --actions and --defaults
 HOST_WINE = os.path.join(SDK, "apps", "bare_app", "build-host-ut", "bare_app_wine")
@@ -168,6 +173,9 @@ def make_world():
     os.makedirs(os.path.join(LOGS, "homm3"))
     with open(os.path.join(LOGS, "homm3", "1.log"), "w") as f:
         f.write("homm3 log\n")
+    os.makedirs(os.path.join(TOP, "run"), exist_ok=True)
+    with open(ENV["BARE_WEB_MOUNTS"], "w") as f:
+        f.write("/dev/root / ext4 ro 0 0\nproc /proc proc rw 0 0\n")
 
 
 os.environ.update(ENV)
@@ -1685,6 +1693,24 @@ class RecipeTest(unittest.TestCase):
         s, r = jreq("GET", "/api/recipe/pirates")
         self.assertEqual((r["effective_source"], r["effective"][""]["gamma"]), ("server", "1.3"))
 
+    def test_games_list_of_the_workshop(self):
+        """GET /api/games: the keys of each layer, the game running"""
+        def pirates():
+            return {g["id"]: g for g in jreq("GET", "/api/games")[1]["games"]}["pirates"]
+        self.assertEqual((pirates()["layer_keys"], pirates()["running"]), (0, False))
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
+            "": {"mode": "1024x768", "modes": ["1280x960", "640x480"]}, "keys": {"select": "esc"}}})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(pirates()["layer_keys"], 4)	# mode, two modes lines, select
+        with open(os.path.join(ENV["BARE_WEB_RUN"], "state.json"), "w") as f:
+            json.dump({"running": "pirates", "pid": 1, "time": int(time.time())}, f)
+        self.assertTrue(pirates()["running"])
+        os.remove(os.path.join(ENV["BARE_WEB_RUN"], "state.json"))
+        with open(self.layer(), "a") as f:
+            f.write("not a line of an ini\n")
+        self.assertIsNone(pirates()["layer_keys"])
+        self.assertEqual({g["id"]: g for g in jreq("GET", "/api/games")[1]["games"]}["fake"]["layer_keys"], 0)
+
     def test_empty_value_drops(self):
         s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
             "": {"dlls": "", "args": "", "saves": [], "modes": ["1280x960", "1600x1200"], "esc_delay": ""},
@@ -2355,6 +2381,220 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(next_events(2), [{"reset": True}, {"line": "new start"}])
         c.close()
         shutil.rmtree(d)
+
+
+
+class DeleteTest(unittest.TestCase):
+    """a game deleted from the card (POST /api/game/FOLDER/delete): only its own
+    folder, as a job, under card-rw, game-install's lock held meanwhile; refused
+    while it runs or anything else works on the games"""
+
+    setUp_state = RecipeTest.state
+
+    def setUp(self):
+        self.pirates = os.path.join(GAMES, "pirates")	# for games.json (RecipeTest.state)
+        os.makedirs(self.pirates, exist_ok=True)
+        self.setUp_state()
+        del BARE_APP.lines[:]
+        for f in ("state.json",):
+            p = os.path.join(ENV["BARE_WEB_RUN"], f)
+            if os.path.exists(p):
+                os.remove(p)
+        # the game: files, folders, a link to a file outside and to a folder outside
+        self.top = os.path.join(GAMES, "deltest")
+        self.outside = os.path.join(TOP, "outside")
+        os.makedirs(os.path.join(self.outside, "dir"), exist_ok=True)
+        touch(os.path.join(self.outside, "keep.txt"), b"keep")
+        touch(os.path.join(self.outside, "dir", "keep2.txt"), b"keep")
+        os.makedirs(os.path.join(self.top, "data", "deep", "er"))
+        with open(os.path.join(self.top, "wine.ini"), "w") as f:
+            f.write("name = Delete Test\nexe = game.exe\n")
+        for i in range(30):
+            touch(os.path.join(self.top, "data", "f%d.bin" % i), b"x" * 100)
+        touch(os.path.join(self.top, "data", "deep", "er", "z.bin"), b"z")
+        os.symlink(os.path.join(self.outside, "keep.txt"), os.path.join(self.top, "link-file"))
+        os.symlink(os.path.join(self.outside, "dir"), os.path.join(self.top, "data", "link-dir"))
+        # its layer and its saved games stay
+        self.layer = os.path.join(GAMES, "recipes", "deltest", "wine.ini")
+        os.makedirs(os.path.dirname(self.layer), exist_ok=True)
+        touch(self.layer, b"mode = 640x480\n")
+        self.saves = os.path.join(DATA, "saves-deltest", "slot1.sav")
+        os.makedirs(os.path.dirname(self.saves), exist_ok=True)
+        touch(self.saves, b"save")
+        self.rw = len(card_rw_calls())
+
+    def tearDown(self):
+        for d in (self.top, self.outside, os.path.dirname(self.layer), os.path.dirname(self.saves)):
+            if os.path.isdir(d) and not os.path.islink(d):
+                for root, dirs, files in os.walk(d):
+                    os.chmod(root, 0o755)
+                shutil.rmtree(d)
+        for p in (os.path.join(GAMES, "dellink"),):
+            if os.path.lexists(p):
+                os.unlink(p)
+        with open(ENV["BARE_WEB_MOUNTS"], "w") as f:
+            f.write("/dev/root / ext4 ro 0 0\n")
+
+    def untouched(self):
+        for p, data in ((os.path.join(self.outside, "keep.txt"), b"keep"),
+                        (os.path.join(self.outside, "dir", "keep2.txt"), b"keep"),
+                        (self.layer, b"mode = 640x480\n"), (self.saves, b"save")):
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), data, p)
+
+    def install_lock_free(self):
+        """game-install can take its lock (none holds it)"""
+        fd = os.open(ENV["GAME_INSTALL_LOCK"], os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+
+    def test_delete(self):
+        s, r = jreq("POST", "/api/game/deltest/delete")
+        self.assertEqual(s, 200, r)
+        ev = events(r["job"])
+        self.assertEqual(ev[-1]["type"], "done", ev)
+        self.assertIn("Delete Test", ev[-1]["text"])
+        self.assertEqual([e["n"] for e in ev if e["type"] == "step"], [1, 2])
+        self.assertFalse(os.path.lexists(self.top))
+        self.untouched()
+        card_rw_balanced(self)
+        self.assertEqual([c[0] for c in card_rw_calls()[self.rw:]], ["begin", "end"])
+        self.assertTrue(self.install_lock_free())
+        time.sleep(0.1)
+        self.assertEqual(BARE_APP.lines, ["reload deltest"])
+        self.assertEqual(jreq("GET", "/api/job")[1]["job"]["kind"], "delete")
+        # gone: 404, nothing written
+        self.assertEqual(jreq("POST", "/api/game/deltest/delete")[0], 404)
+        self.assertEqual(len(card_rw_calls()), self.rw + 2)
+
+    def test_refused_while_it_runs(self):
+        with open(os.path.join(ENV["BARE_WEB_RUN"], "state.json"), "w") as f:
+            json.dump({"running": "deltest", "pid": 1, "time": int(time.time())}, f)
+        s, r = jreq("POST", "/api/game/deltest/delete")
+        self.assertEqual(s, 409, r)
+        self.assertIn("идёт", r["error"])
+        os.remove(os.path.join(ENV["BARE_WEB_RUN"], "state.json"))
+        # games.json says it runs (state.json not there yet)
+        self.setUp_state(running={"folder": "deltest", "key": "1", "pid": os.getpid()})
+        self.assertEqual(jreq("POST", "/api/game/deltest/delete")[0], 409)
+        self.assertTrue(os.path.isfile(os.path.join(self.top, "wine.ini")))
+        self.assertEqual(len(card_rw_calls()), self.rw)
+
+    def test_refused_while_installing(self):
+        # game-install holds its lock (an install, a removal, a heal of the device's)
+        fd = os.open(ENV["GAME_INSTALL_LOCK"], os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            s, r = jreq("POST", "/api/game/deltest/delete")
+            self.assertEqual((s, r.get("code")), (409, "busy"), r)
+            self.assertIn("ставит", r["error"])
+        finally:
+            os.close(fd)
+        # bare-backup makes or restores a copy
+        fd = os.open(ENV["BARE_WEB_BACKUP_LOCK"], os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            s, r = jreq("POST", "/api/game/deltest/delete")
+            self.assertEqual((s, r.get("code")), (409, "busy"), r)
+            self.assertIn("копия", r["error"])
+        finally:
+            os.close(fd)
+        self.assertTrue(self.install_lock_free())	# the refusal let it go
+        # a job of the site runs (an update held)
+        upd = os.path.join(GAMES, "updates", "ogu-hold2.upd")
+        make_upd(upd)
+        touch(os.path.join(STATE, "hold-update"))
+        try:
+            s, r = jreq("POST", "/api/update/run", {"file": upd})
+            self.assertEqual(s, 200)
+            job = r["job"]
+            s, r = jreq("POST", "/api/game/deltest/delete")
+            self.assertEqual((s, r.get("code")), (409, "busy"), r)
+        finally:
+            os.remove(os.path.join(STATE, "hold-update"))
+        self.assertEqual(events(job)[-1]["type"], "done")
+        os.remove(upd)
+        self.assertTrue(os.path.isfile(os.path.join(self.top, "wine.ini")))
+        self.assertTrue(self.install_lock_free())
+
+    def test_holds_install_lock(self):
+        """while it deletes, game-install (the real one) says busy"""
+        go = threading.Event()
+        walk = bw.walk_up
+
+        def slow(top, dev):
+            for x in walk(top, dev):
+                go.wait(10)
+                yield x
+        bw.walk_up = slow
+        try:
+            s, r = jreq("POST", "/api/game/deltest/delete")
+            self.assertEqual(s, 200, r)
+            time.sleep(0.2)
+            p = subprocess.run([sys.executable, GAME_INSTALL, "remove", os.path.join(GAMES, "install", "x")],
+                               capture_output=True, text=True, timeout=60)
+            self.assertIn("fail busy", p.stdout, (p.stdout, p.stderr))
+            self.assertEqual(jreq("POST", "/api/game/deltest/delete")[0], 409)	# one at a time
+        finally:
+            go.set()
+            bw.walk_up = walk
+        self.assertEqual(events(r["job"])[-1]["type"], "done")
+        self.assertFalse(os.path.lexists(self.top))
+        self.assertTrue(self.install_lock_free())
+
+    def test_only_its_own_folder(self):
+        # a link in /games to a game elsewhere: not deleted, nor what it points at
+        other = os.path.join(self.outside, "game")
+        os.makedirs(other)
+        touch(os.path.join(other, "wine.ini"), b"name = Elsewhere\n")
+        os.symlink(other, os.path.join(GAMES, "dellink"))
+        s, r = jreq("POST", "/api/game/dellink/delete")
+        self.assertEqual(s, 400, r)
+        self.assertIn("ссылка", r["error"])
+        self.assertTrue(os.path.isfile(os.path.join(other, "wine.ini")))
+        # no game in it, a built-in one, names that are no folder's
+        self.assertEqual(jreq("POST", "/api/game/install/delete")[0], 404)
+        self.assertEqual(jreq("POST", "/api/game/heroes3/delete")[0], 400)
+        self.assertEqual(jreq("POST", "/api/game/..%2Fdata/delete")[0], 400)
+        self.assertEqual(jreq("POST", "/api/game/nothere/delete")[0], 404)
+        # a GET changes nothing; a form of another site is refused
+        self.assertNotEqual(req("GET", "/api/game/deltest/delete")[0], 200)
+        self.assertEqual(req("POST", "/api/game/deltest/delete", b"", page=False,
+                             headers={"Content-Type": "application/x-www-form-urlencoded"})[0], 403)
+        self.assertTrue(os.path.isfile(os.path.join(self.top, "wine.ini")))
+        self.assertEqual(len(card_rw_calls()), self.rw)
+        self.untouched()
+
+    def test_mount_inside(self):
+        with open(ENV["BARE_WEB_MOUNTS"], "w") as f:
+            f.write("/dev/root / ext4 ro 0 0\n/dev/sdz1 %s vfat rw 0 0\n" %
+                    os.path.join(os.path.realpath(self.top), "data", "deep").replace(" ", "\\040"))
+        s, r = jreq("POST", "/api/game/deltest/delete")
+        self.assertEqual(s, 409, r)
+        self.assertIn("смонтирован", r["error"])
+        self.assertTrue(os.path.isfile(os.path.join(self.top, "data", "deep", "er", "z.bin")))
+        self.assertEqual(len(card_rw_calls()), self.rw)
+
+    def test_fails_midway(self):
+        """a file that cannot be removed: the job fails saying so, the card's
+        writer ends, the lock goes, bare_app reloads what is left"""
+        os.chmod(os.path.join(self.top, "data", "deep"), 0o555)
+        s, r = jreq("POST", "/api/game/deltest/delete")
+        self.assertEqual(s, 200, r)
+        ev = events(r["job"])
+        self.assertEqual(ev[-1]["type"], "fail", ev)
+        self.assertIn("не до конца", ev[-1]["text"])
+        self.assertTrue(os.path.isdir(os.path.join(self.top, "data", "deep", "er")))	# its folder could not go
+        card_rw_balanced(self)
+        self.assertTrue(self.install_lock_free())
+        time.sleep(0.1)
+        self.assertEqual(BARE_APP.lines, ["reload deltest"])
+        self.untouched()
 
 
 if __name__ == "__main__":

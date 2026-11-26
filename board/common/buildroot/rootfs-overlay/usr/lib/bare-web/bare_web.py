@@ -23,7 +23,9 @@ password (Wi-Fi is later, with a PIN on the screen).
                                    game-install install
   POST /api/install/remove         {path}: game-install remove
   GET  /api/games                  the games on the card (wine.ini,
-                                   game.ini) and the built-in ones
+                                   game.ini) and the built-in ones: size,
+                                   last launch, logs, running, the keys of
+                                   their layer (layer_keys: 0 none, null broken)
   GET  /api/logs/GAME/N            /data/logs/GAME/N.log (N 1..3)
   POST /api/report                 {game}: bare-report [GAME]; {where, name} of
                                    the report it wrote (GET /api/reports/... then)
@@ -73,6 +75,14 @@ password (Wi-Fi is later, with a PIN on the screen).
                                    frames a second, CPU, GPU, memory
   POST /api/game/FOLDER/launch|quit|options   FIFO launch, quit-game, options
                                    (launch: 409 while another game runs)
+  POST /api/game/FOLDER/delete     a job: the game's folder /games/FOLDER (a
+                                   folder of its own on the card, not a link,
+                                   with its wine.ini or game.ini) removed, then
+                                   FIFO "reload FOLDER"; its layer (/games/
+                                   recipes) and saved games (/data) stay; 409
+                                   while it runs, a job runs, game-install or
+                                   bare-backup holds its lock (the delete holds
+                                   game-install's while it runs)
   GET  /api/shot.png[?w=W]         the screen now (SIGUSR1, bare_app's PPM)
   POST /api/pad                    {button, down}: FIFO press/release
   POST /api/stick                  {stick, x, y, ms}: the stick held there
@@ -117,16 +127,21 @@ BARE_WEB_AB_STATE, BARE_WEB_USB_DISK, BARE_WEB_UNIT, BARE_WEB_REBOOT,
 BARE_WEB_UPDATE_LOCK, BARE_WEB_BARE_BACKUP, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
 BARE_WEB_BIND, BARE_WEB_CARD_RW (card-rw), BARE_WEB_IP (ip); of bare_app BARE_WEB_RUN (games.json, state.json, ini/), BARE_WEB_CONF,
 BARE_WEB_CTL (its FIFO), BARE_WEB_WINE (bare_app_wine), BARE_WEB_SHOT, BARE_WEB_NATIVE_DIRS,
-BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks), BARE_WEB_ERRORS (errors.ini). A test names all of them (but PORT,
+BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks), BARE_WEB_ERRORS (errors.ini),
+BARE_WEB_INSTALL_LOCK and BARE_WEB_BACKUP_LOCK (game-install's and bare-backup's locks),
+BARE_WEB_MOUNTS (/proc/mounts). A test names all of them (but PORT,
 BIND, NET) or none: one of them set and not all is refused at the start, never the device's
 own place for the rest.
 """
+import errno
+import fcntl
 import http.server
 import io
 import json
 import os
 import re
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -146,7 +161,7 @@ HOOKS = ("BARE_WEB_GAMES", "BARE_WEB_DATA", "BARE_WEB_LOGS", "BARE_WEB_STATIC", 
          "BARE_WEB_REBOOT", "BARE_WEB_BARE_BACKUP", "BARE_WEB_UPDATE_LOCK", "BARE_WEB_RUN",
          "BARE_WEB_CONF", "BARE_WEB_CTL", "BARE_WEB_WINE", "BARE_WEB_SHOT", "BARE_WEB_SYS_INPUT",
          "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP",
-         "BARE_WEB_ERRORS")
+         "BARE_WEB_ERRORS", "BARE_WEB_INSTALL_LOCK", "BARE_WEB_BACKUP_LOCK", "BARE_WEB_MOUNTS")
 NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET", "BARE_WEB_THP", "BARE_WEB_LIB")
 TEST = any(k.startswith("BARE_WEB_") and k not in NOT_HOOKS for k in os.environ)
 if TEST:
@@ -176,6 +191,9 @@ IP = E("BARE_WEB_IP", "/sbin/ip")	# the device's addresses (ip -o -4 addr)
 SAVES_NAME = re.compile(r"^saves-[^/\\]+\.zip$")
 SAVES_MAX = 4 << 30	# a copy uploaded: at most this
 UPDATE_LOCK = E("BARE_WEB_UPDATE_LOCK", "/run/system-update.lock")	# system-update's own
+INSTALL_LOCK = E("BARE_WEB_INSTALL_LOCK", "/run/game-install.lock")	# game-install's own
+BACKUP_LOCK = E("BARE_WEB_BACKUP_LOCK", "/run/bare-backup.lock")	# bare-backup's own
+MOUNTS = E("BARE_WEB_MOUNTS", "/proc/mounts")
 PLACES = ("install", "redist", "updates")
 CHUNK = 1 << 20
 ROOM_LEFT = 16 << 20	# what an upload leaves free on the card
@@ -673,10 +691,28 @@ def games():
     with SIZES_LOCK:
         for g in found.values():
             g["size"] = SIZES.get(g["folder"]) if g["folder"] else None
+    now = running_game()
     for g in found.values():
         g["logs"] = logs_of(g["id"])
         g["last"] = g["logs"][0]["time"] if g["logs"] and g["logs"][0]["n"] == 1 else None
+        g["running"] = bool(now) and now in (g["folder"], g["id"])
+        g["layer_keys"] = layer_keys(g)
     return sorted(found.values(), key=lambda g: (-(g["last"] or 0), g["name"].lower()))
+
+
+def layer_keys(g):
+    """the keys of a game's layer (/games/recipes/FOLDER/wine.ini or game.ini),
+    for the workshop's list: 0 none, None a layer that does not read"""
+    ini = {"wine.ini": "wine.ini", "game.ini": "game.ini"}.get(g["kind"])
+    if not ini or not g["folder"]:
+        return 0
+    p = os.path.join(GAMES, "recipes", g["folder"], ini)
+    if os.path.islink(p) or not os.path.isfile(p):
+        return 0
+    try:
+        return len(ini_parse(read(p, 1 << 20) or "", strict=True))
+    except IniError:
+        return None
 
 
 def scan():
@@ -2258,6 +2294,135 @@ document.getElementById("f").onsubmit = async e => {
 """
 
 
+# ---- a game deleted from the card (POST /api/game/FOLDER/delete) ---------------
+
+class Busy(Exception):
+    pass
+
+
+def lock_now(path):
+    """the flock of another program's lock file taken (its fd), Busy if that
+    program holds it"""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise Busy(path) from None
+    return fd
+
+
+def mounts_in(top):
+    """the mount points at or under top (realpath)"""
+    out = []
+    for line in (read(MOUNTS, 1 << 20) or "").splitlines():
+        f = line.split()
+        if len(f) < 2:
+            continue
+        m = f[1].replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+        if m == top or m.startswith(top + "/"):
+            out.append(m)
+    return out
+
+
+def walk_up(top, dev):
+    """(path, is_dir) of everything under top and top itself, a directory after
+    what is in it; no link followed (a link is an entry of its own), a
+    directory of another file system (dev differs) OSError EXDEV"""
+    stack = [[top, None]]
+    while stack:
+        d = stack[-1]
+        if d[1] is None:
+            with os.scandir(d[0]) as it:
+                d[1] = list(it)
+        if d[1]:
+            e = d[1].pop()
+            if e.is_dir(follow_symlinks=False):
+                if e.stat(follow_symlinks=False).st_dev != dev:
+                    raise OSError(errno.EXDEV, "другая файловая система", e.path)
+                stack.append([e.path, None])
+            else:
+                yield e.path, False
+        else:
+            stack.pop()
+            yield d[0], True
+
+
+def game_folder(folder):
+    """the game's folder on the card to delete: (its path, its name), or
+    Refused: only a folder of its own right under the card (no link, the
+    realpath's parent the card's), with its wine.ini or game.ini, not a
+    built-in game's"""
+    if not safe_name(folder):
+        raise Refused(400, "Имя игры не подходит: %s" % folder)
+    if folder in [b[1] for b in BUILT_IN] or folder in [b[0] for b in BUILT_IN]:
+        raise Refused(400, "Встроенные игры с сайта не удаляются.")
+    top = os.path.join(GAMES, folder)
+    try:
+        st = os.lstat(top)
+    except OSError:
+        raise Refused(404, "Такой игры нет: %s" % folder) from None
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused(400, "/games/%s — ссылка или файл, а не папка игры: не удаляю." % folder)
+    card = os.path.realpath(GAMES)
+    if os.path.dirname(os.path.realpath(top)) != card:
+        raise Refused(400, "/games/%s не на карте игр: не удаляю." % folder)
+    for ini in ("wine.ini", "game.ini"):
+        try:
+            if stat.S_ISREG(os.lstat(os.path.join(top, ini)).st_mode):
+                return top, ini_name(os.path.join(top, ini)) or folder
+        except OSError:
+            pass
+    raise Refused(404, "В /games/%s нет игры (wine.ini или game.ini)." % folder)
+
+
+DELETE_STEP = 0.5	# s between the delete's progress lines
+
+
+def delete_work(folder, top, name, lock_fd):
+    def work(job):
+        try:
+            dev = os.lstat(top).st_dev
+            job.emit("step", n=1, m=2, text="считаю файлы")
+            try:
+                total = sum(1 for _ in walk_up(top, dev))
+            except OSError as e:
+                job.emit("fail", code="error", arg=str(e),
+                         text="Игра не удалена: %s (%s)." % (e.strerror or e, e.filename or top))
+                return
+            job.emit("step", n=2, m=2, text="удаляю %d файлов и папок" % total)
+            done, last, bad = 0, time.monotonic(), None
+            with CardWriting():
+                for path, is_dir in walk_up(top, dev):
+                    try:
+                        (os.rmdir if is_dir else os.unlink)(path)
+                    except OSError as e:
+                        bad = e
+                        break
+                    done += 1
+                    if time.monotonic() - last >= DELETE_STEP:
+                        last = time.monotonic()
+                        job.emit("progress", percent=min(99, done * 100 // max(total, 1)))
+            if bad:
+                log.warning("delete %s: %s", top, bad)
+                job.emit("fail", code="error", arg=str(bad),
+                         text="Игра удалена не до конца: %s (%s)." % (bad.strerror or bad, bad.filename or top))
+                return
+            log.info("delete %s: %d entries removed", top, done)
+            job.emit("done", folder=folder, title=name,
+                     text="Игра «%s» удалена с карты. Сохранения остались в памяти приставки, правки "
+                          "Мастерской — в /games/recipes." % name)
+        except CardError as e:
+            job.emit("fail", code="card", arg=str(e), text="Игра не удалена: %s" % e)
+        finally:
+            os.close(lock_fd)
+            with SIZES_LOCK:
+                SIZES.pop(folder, None)
+            if games_json():
+                ctl("reload " + folder)
+    return work
+
+
 NET = None
 UPLOADS = set()	# (place, name) being uploaded: one at a time each
 UPLOADS_LOCK = threading.Lock()
@@ -3199,6 +3364,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.json(game_state())
 
     def api_post_game(self, segs, q):
+        if len(segs) == 3 and segs[2] == "delete":
+            return self.delete_game(segs[1])
         if len(segs) != 3 or segs[2] not in ("launch", "quit", "options"):
             return self.fail(404, "?")
         st = games_json()
@@ -3224,6 +3391,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not ctl(line):
             return self.fail(503, NO_CTL)
         self.json({"ok": True})
+
+    def delete_game(self, folder):
+        why = card_problem()
+        if why:
+            return self.fail(503, why)
+        try:
+            top, name = game_folder(folder)
+            if running_game() == folder:
+                raise Refused(409, "Игра «%s» идёт: сначала выйдите из неё." % name)
+            inside = mounts_in(os.path.realpath(top))
+            if inside:
+                raise Refused(409, "В папке игры смонтирован другой диск (%s): не удаляю." % inside[0])
+        except Refused as e:
+            return self.refused(e)
+        try:
+            lock_fd = lock_now(INSTALL_LOCK)
+        except Busy:
+            return self.fail(409, "Приставка сейчас ставит, удаляет или исправляет игру: дождитесь, пока это "
+                                  "закончится.", code="busy")
+        except OSError as e:
+            return self.fail(500, "Замок установки не открывается: %s" % e)
+        try:
+            os.close(lock_now(BACKUP_LOCK))	# only that no copy is made or restored now
+        except Busy:
+            os.close(lock_fd)
+            return self.fail(409, "Сейчас делается или восстанавливается копия сохранений: дождитесь, пока это "
+                                  "закончится.", code="busy")
+        except OSError as e:
+            os.close(lock_fd)
+            return self.fail(500, "Замок копий не открывается: %s" % e)
+        job = Jobs.start("delete", name, delete_work(folder, top, name, lock_fd))
+        if not job:
+            os.close(lock_fd)
+            return self.fail(409, "Уже идёт другое задание (установка, обновление или удаление), дождитесь его.",
+                             code="busy")
+        log.info("job %d: delete %s", job.id, top)
+        self.json({"ok": True, "job": job.id})
 
     def api_get_shot_png(self, segs, q):
         try:
