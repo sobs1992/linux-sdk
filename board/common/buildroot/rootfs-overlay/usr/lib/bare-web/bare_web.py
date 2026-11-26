@@ -101,7 +101,9 @@ in /data/bare-web.pin, written by bare_app (Settings, System, "The device
 in a browser"), read at every check: a new PIN ends every session of the
 old one. A right PIN gives a random cookie (HttpOnly, SameSite=Strict) for
 24 h (the sessions are this process's: a restart asks again); after 5
-wrong ones in a row no PIN is taken for 60 s (all addresses together).
+wrong ones in a row from an address no PIN is taken from it for 60 s (counted
+per client address, so no one in the same network keeps the PIN closed for
+the others; at most 64 addresses kept, the longest untouched one dropped).
 
   POST /api/pin                    {pin}: the session cookie; 403 wrong, 429 a
                                    pause, 503 no PIN yet
@@ -2110,7 +2112,11 @@ SESSION_AGE = 86400	# s a session lasts
 SESSION_COOKIE = "bare_web_session"
 SESSIONS_MAX = 64	# the oldest dropped beyond
 SESSIONS = {}		# token: (until (monotonic), the PIN it was given for)
-PIN_STATE = {"wrong": 0, "until": 0.0}	# wrong ones in a row, no PIN before (monotonic)
+# the wrong PINs of each client address: one in the same network cannot keep the
+# PIN closed for everyone; at most PIN_ADDRS of them kept, the one longest
+# untouched dropped beyond
+PIN_ADDRS = 64
+PIN_STATE = {}		# address: {"wrong": in a row, "until": no PIN before (monotonic), "seen": last try}
 PIN_LOCK = threading.Lock()
 
 
@@ -2166,28 +2172,41 @@ def session_ok(cookie_header):
     return True
 
 
-def pin_try(given):
-    """(status, answer, token or None) of a PIN given"""
+def pin_of(addr, now):
+    """the count of wrong PINs of a client address (PIN_LOCK held): made if
+    there is none, the longest untouched one dropped beyond PIN_ADDRS"""
+    a = PIN_STATE.get(addr)
+    if a is None:
+        while len(PIN_STATE) >= PIN_ADDRS:
+            del PIN_STATE[min(PIN_STATE, key=lambda k: PIN_STATE[k]["seen"])]
+        a = PIN_STATE[addr] = {"wrong": 0, "until": 0.0, "seen": now}
+    a["seen"] = now
+    return a
+
+
+def pin_try(given, addr):
+    """(status, answer, token or None) of a PIN given from the client address addr"""
     pin = current_pin()
     now = time.monotonic()
     with PIN_LOCK:
-        if now < PIN_STATE["until"]:
-            wait = int(PIN_STATE["until"] - now + 0.999)
+        st = pin_of(addr, now)
+        if now < st["until"]:
+            wait = int(st["until"] - now + 0.999)
             return 429, {"error": "Слишком много неверных PIN. Подождите %d с." % wait, "wait": wait}, None
         if pin is None:
             return 503, {"error": "PIN ещё не задан: откройте на приставке Настройки → Система → "
                                   "«Приставка в браузере»."}, None
         if not isinstance(given, str) or not same_text(pin, given.strip()):
-            PIN_STATE["wrong"] += 1
-            if PIN_STATE["wrong"] >= PIN_TRIES:
-                PIN_STATE["wrong"] = 0
-                PIN_STATE["until"] = now + PIN_PAUSE
+            st["wrong"] += 1
+            if st["wrong"] >= PIN_TRIES:
+                st["wrong"] = 0
+                st["until"] = now + PIN_PAUSE
                 wait = int(PIN_PAUSE)
                 return 429, {"error": "Неверный PIN. Слишком много попыток: подождите %d с." % wait,
                              "wait": wait}, None
-            left = PIN_TRIES - PIN_STATE["wrong"]
+            left = PIN_TRIES - st["wrong"]
             return 403, {"error": "Неверный PIN. Осталось попыток: %d." % left, "left": left}, None
-        PIN_STATE["wrong"] = 0
+        st["wrong"] = 0
         for t in [t for t, s in SESSIONS.items() if now >= s[0]]:
             del SESSIONS[t]
         while len(SESSIONS) >= SESSIONS_MAX:
@@ -2451,7 +2470,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         d = self.body_json()
         if d is None:
             return self.fail(400, "Нужен JSON {pin}.")
-        code, answer, token = pin_try(d.get("pin"))
+        code, answer, token = pin_try(d.get("pin"), self.client_address[0])
         h = ()
         if token:
             h = (("Set-Cookie", "%s=%s; Max-Age=%d; Path=/; HttpOnly; SameSite=Strict" %

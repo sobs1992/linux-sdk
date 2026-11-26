@@ -1029,11 +1029,12 @@ class GateTest(unittest.TestCase):
 
 
 FOREIGN = "127.0.0.9"	# a client of another address than the USB computer's (Wi-Fi)
+FOREIGN2 = "127.0.0.10"	# another one of the same network
 
 
-def freq(method, path, body=None, headers=None, cookie=None, page=True):
+def freq(method, path, body=None, headers=None, cookie=None, page=True, source=FOREIGN):
     """a request from FOREIGN (its own source address: the server sees it as is)"""
-    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30, source_address=(FOREIGN, 0))
+    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30, source_address=(source, 0))
     h = dict(headers or {})
     if page:
         h.setdefault("X-Requested-With", "bare-web")
@@ -1056,7 +1057,7 @@ class PinTest(unittest.TestCase):
 
     def setUp(self):
         with bw.PIN_LOCK:
-            bw.PIN_STATE.update(wrong=0, until=0.0)
+            bw.PIN_STATE.clear()
             bw.SESSIONS.clear()
         self.set_pin("123456")
 
@@ -1064,7 +1065,7 @@ class PinTest(unittest.TestCase):
         if os.path.lexists(self.PIN):
             os.unlink(self.PIN)
         with bw.PIN_LOCK:
-            bw.PIN_STATE.update(wrong=0, until=0.0)
+            bw.PIN_STATE.clear()
 
     def set_pin(self, pin):
         if os.path.lexists(self.PIN):
@@ -1261,14 +1262,21 @@ class PinTest(unittest.TestCase):
         s, h, d = freq("POST", "/api/pin", {"pin": "999999"})	# the 5th
         self.assertEqual(s, 429)
         self.assertEqual(json.loads(d)["wait"], 60)
-        # paused: the right one too, from any address
+        # paused: the right one too, from this address
         s, h, d = freq("POST", "/api/pin", {"pin": "123456"})
         self.assertEqual(s, 429)
         self.assertNotIn("set-cookie", h)
         self.assertGreater(json.loads(d)["wait"], 50)
+        # another address of the same network is not held by it: its own count
+        s, h, d = freq("POST", "/api/pin", {"pin": "000000"}, source=FOREIGN2)
+        self.assertEqual((s, json.loads(d)["left"]), (403, 4))
+        s, h, d = freq("POST", "/api/pin", {"pin": "123456"}, source=FOREIGN2)
+        self.assertEqual(s, 200, d)
+        self.assertIn("set-cookie", h)
+        self.assertEqual(freq("POST", "/api/pin", {"pin": "123456"})[0], 429)	# the first still paused
         # the pause over (made short): five more
         with bw.PIN_LOCK:
-            bw.PIN_STATE["until"] = time.monotonic() + 0.3
+            bw.PIN_STATE[FOREIGN]["until"] = time.monotonic() + 0.3
         time.sleep(0.4)
         for i in range(4):
             self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
@@ -1276,6 +1284,23 @@ class PinTest(unittest.TestCase):
         for i in range(4):
             self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 403)
         self.assertEqual(freq("POST", "/api/pin", {"pin": "000001"})[0], 429)
+
+    def test_wrong_pins_addresses_kept(self):
+        """at most PIN_ADDRS addresses: the one longest untouched dropped, the others
+        keep their counts"""
+        for i in range(bw.PIN_ADDRS):
+            self.assertEqual(bw.pin_try("000000", "10.0.0.%d" % i)[0], 403)
+        self.assertEqual(len(bw.PIN_STATE), bw.PIN_ADDRS)
+        self.assertEqual(bw.pin_try("000000", "10.0.0.1")[1]["left"], 3)	# touched again
+        self.assertEqual(bw.pin_try("000000", "10.0.1.0")[0], 403)	# one more address
+        self.assertEqual(len(bw.PIN_STATE), bw.PIN_ADDRS)
+        self.assertNotIn("10.0.0.0", bw.PIN_STATE)	# the one longest untouched
+        self.assertEqual(bw.PIN_STATE["10.0.0.1"]["wrong"], 2)
+        self.assertEqual(bw.pin_try("000000", "10.0.0.2")[1]["left"], 3)
+        self.assertEqual(bw.pin_try("000000", "10.0.0.0")[1]["left"], 4)	# counted anew
+        # dropped by when last tried, not by when first: 10.0.0.1 (tried again) stays
+        self.assertIn("10.0.0.1", bw.PIN_STATE)
+        self.assertNotIn("10.0.0.3", bw.PIN_STATE)
 
     def test_wifi_address_changes(self):
         """DHCP gives Wi-Fi another address: the new one is the device's (its Host
@@ -1308,7 +1333,7 @@ class PinTest(unittest.TestCase):
         self.assertEqual(s, 403)
         s, h, d = freq("POST", "/api/pin", b"123456", headers={"Content-Type": "text/plain"})
         self.assertEqual(s, 400)
-        self.assertEqual(bw.PIN_STATE["wrong"], 0)
+        self.assertEqual(bw.PIN_STATE.get(FOREIGN, {"wrong": 0})["wrong"], 0)
 
 def tearDownModule():
     SERVER.shutdown()
