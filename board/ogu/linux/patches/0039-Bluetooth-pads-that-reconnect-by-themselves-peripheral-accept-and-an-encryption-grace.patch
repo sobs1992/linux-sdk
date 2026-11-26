@@ -27,10 +27,21 @@ Two module parameters of bluetooth.ko, both writable at run time:
 accept_peripheral (default 1): an incoming BR/EDR ACL connection is
 accepted as Peripheral whatever the listeners and HCISETLINKMODE ask, and
 hci_setup_link_policy_sync() leaves HCI_LP_RSWITCH out of the default
-link policy, so the remote cannot switch the roles either. The link policy
-is written at controller init: a change of the parameter takes effect at
-the next power on of the adapter (HCISETLINKPOL still sets the policy
-directly). 0 = upstream.
+link policy, so the remote cannot switch the roles either: the pad asks
+for a switch right after the link is up, and the controller refuses it.
+Audio needs the switch the other way: HUAWEI FreeBuds 5 paging us
+terminate the link ("Remote User Terminated") every 0.5 s while they
+cannot become Peripheral, and keep it after a Role Change. So at Connect
+Complete of an incoming ACL link whose major device class (from the
+Connect Request) is not Peripheral (0x05: pads, keyboards, mice; an
+unknown class, all zeros, counts as not Peripheral) the host writes that
+link's policy as the default one plus HCI_LP_RSWITCH (Write Link Policy
+Settings; hci_cc_write_link_policy() keeps it in conn->link_policy).
+Links we open (Central from the start) and Peripheral class links are
+left alone, and nothing is written when the default policy already has
+the switch. The default policy is written at controller init: a change
+of the parameter takes effect at the next power on of the adapter
+(HCISETLINKPOL still sets the policy directly). 0 = upstream.
 
 enc_refresh_grace_ms (default 2000): when the remote turns the encryption
 of an encrypted, connected ACL link off and the link mode check fails (the
@@ -125,14 +136,17 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  #include <linux/debugfs.h>
  #include <linux/errqueue.h>
  
-@@ -697,6 +698,119 @@ static void hci_conn_auto_accept(struct
+@@ -697,6 +698,122 @@ static void hci_conn_auto_accept(struct
  		     &conn->dst);
  }
  
 +/* Accept an incoming BR/EDR connection as Peripheral, whatever the listening
 + * sockets ask (HCI_LM_MASTER), and keep role switch out of the default link
 + * policy: a role switch on a link the remote opened kills it with some
-+ * controllers (Realtek RTL8851BU with Nintendo pads).
++ * controllers (Realtek RTL8851BU with Nintendo pads). An incoming link of a
++ * device whose major class is not Peripheral (audio and the rest) gets role
++ * switch back in its own link policy at Connect Complete: headphones make
++ * themselves Peripheral that way (hci_conn_allow_rswitch()).
 + */
 +bool bt_accept_peripheral = true;
 +module_param_named(accept_peripheral, bt_accept_peripheral, bool, 0644);
@@ -245,7 +259,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  static void le_disable_advertising(struct hci_dev *hdev)
  {
  	if (ext_adv_capable(hdev)) {
-@@ -1145,6 +1259,7 @@ static struct hci_conn *__hci_conn_add(s
+@@ -1145,6 +1262,7 @@ static struct hci_conn *__hci_conn_add(s
  	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
  	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
  	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
@@ -253,7 +267,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  
  	spin_lock_init(&conn->proto_lock);
  
-@@ -1269,6 +1384,7 @@ void hci_conn_del(struct hci_conn *conn)
+@@ -1269,6 +1387,7 @@ void hci_conn_del(struct hci_conn *conn)
  	disable_delayed_work_sync(&conn->disc_work);
  	disable_delayed_work_sync(&conn->auto_accept_work);
  	disable_delayed_work_sync(&conn->idle_work);
@@ -263,7 +277,49 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  	 * a certain pool is not being utilized.
 --- a/net/bluetooth/hci_event.c
 +++ b/net/bluetooth/hci_event.c
-@@ -3353,7 +3353,8 @@ static void hci_conn_request_evt(struct
+@@ -3111,6 +3111,32 @@ static int hci_read_enc_key_size(struct
+ 	return hci_send_cmd(hdev, HCI_OP_READ_ENC_KEY_SIZE, sizeof(cp), &cp);
+ }
+ 
++/* bt_accept_peripheral keeps role switch out of the default link policy: a
++ * Nintendo pad asks for one right after it connected and the link dies of
++ * it. Audio devices want to be Peripheral instead (FreeBuds 5 terminate an
++ * incoming link every 0.5 s they cannot switch): allow role switch on an
++ * incoming link of any major device class but Peripheral (0x05: pads,
++ * keyboards, mice; an unknown class, all zeros, counts as not Peripheral).
++ */
++static void hci_conn_allow_rswitch(struct hci_dev *hdev, struct hci_conn *conn)
++{
++	struct hci_cp_write_link_policy cp;
++
++	if (!READ_ONCE(bt_accept_peripheral) || conn->out ||
++	    !lmp_rswitch_capable(hdev) ||
++	    (hdev->link_policy & HCI_LP_RSWITCH) ||
++	    (conn->dev_class[1] & 0x1f) == 0x05)
++		return;
++
++	bt_dev_dbg(hdev, "%pMR class 0x%2.2x%2.2x%2.2x: role switch allowed",
++		   &conn->dst, conn->dev_class[2], conn->dev_class[1],
++		   conn->dev_class[0]);
++
++	cp.handle = cpu_to_le16(conn->handle);
++	cp.policy = cpu_to_le16(hdev->link_policy | HCI_LP_RSWITCH);
++	hci_send_cmd(hdev, HCI_OP_WRITE_LINK_POLICY, sizeof(cp), &cp);
++}
++
+ static void hci_conn_complete_evt(struct hci_dev *hdev, void *data,
+ 				  struct sk_buff *skb)
+ {
+@@ -3232,6 +3258,8 @@ static void hci_conn_complete_evt(struct
+ 				     sizeof(cp), &cp);
+ 
+ 			hci_update_scan(hdev);
++
++			hci_conn_allow_rswitch(hdev, conn);
+ 		}
+ 
+ 		/* Set packet type for incoming connection */
+@@ -3353,7 +3381,8 @@ static void hci_conn_request_evt(struct
  
  		bacpy(&cp.bdaddr, &ev->bdaddr);
  
@@ -273,7 +329,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  			cp.role = 0x00; /* Become central */
  		else
  			cp.role = 0x01; /* Remain peripheral */
-@@ -3585,6 +3586,8 @@ static void hci_encrypt_change_evt(struc
+@@ -3585,6 +3614,8 @@ static void hci_encrypt_change_evt(struc
  {
  	struct hci_ev_encrypt_change *ev = data;
  	struct hci_conn *conn;
@@ -282,7 +338,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  
  	bt_dev_dbg(hdev, "status 0x%2.2x", ev->status);
  
-@@ -3594,6 +3597,33 @@ static void hci_encrypt_change_evt(struc
+@@ -3594,6 +3625,33 @@ static void hci_encrypt_change_evt(struc
  	if (!conn)
  		goto unlock;
  
@@ -316,7 +372,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  	if (!ev->status) {
  		if (ev->encrypt) {
  			/* Encryption implies authentication */
-@@ -3629,6 +3659,19 @@ static void hci_encrypt_change_evt(struc
+@@ -3629,6 +3687,19 @@ static void hci_encrypt_change_evt(struc
  		ev->status = HCI_ERROR_AUTH_FAILURE;
  
  	if (ev->status && conn->state == BT_CONNECTED) {
@@ -336,7 +392,7 @@ console's pads; set enc_refresh_grace_ms=0 where it is not.
  		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
  			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
  
-@@ -5200,8 +5243,34 @@ static void hci_key_refresh_complete_evt
+@@ -5200,8 +5271,34 @@ static void hci_key_refresh_complete_evt
  	/* For BR/EDR the necessary steps are taken through the
  	 * auth_complete event.
  	 */

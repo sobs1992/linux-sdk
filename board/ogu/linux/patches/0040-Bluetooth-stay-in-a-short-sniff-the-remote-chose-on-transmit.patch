@@ -75,7 +75,7 @@ before.
  			hdev->acl_last_tx = jiffies;
 --- a/net/bluetooth/hci_event.c
 +++ b/net/bluetooth/hci_event.c
-@@ -4612,6 +4612,8 @@ static void hci_mode_change_evt(struct h
+@@ -4640,6 +4640,8 @@ static void hci_mode_change_evt(struct h
  	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
  	if (conn) {
  		conn->mode = ev->mode;
