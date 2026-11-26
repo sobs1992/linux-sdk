@@ -959,7 +959,9 @@ function checkTab() {
   const st = h("div", { class: "cards" });
   const logPre = h("pre", { class: "live" });
   const f = encodeURIComponent(W.folder);
-  let player = null, mode = null, noFrame = null, ended = false, noAudio = false, soundWhy = null;
+  // gen: the showStream() whose player this is; any other start or stop
+  // makes one still waiting for its POST stale
+  let player = null, mode = null, noFrame = null, noAudio = false, soundWhy = null, gen = 0;
   // the button and the line under the picture as the stream's sound is
   const soundShow = () => {
     soundNote.hidden = !(mode === "stream" && soundWhy);
@@ -971,6 +973,7 @@ function checkTab() {
   };
   const lag = () => video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : null;
   const streamStop = askOff => {
+    gen++;
     clearTimeout(noFrame);
     noFrame = null;
     if (player) {
@@ -992,8 +995,8 @@ function checkTab() {
   const showStream = async () => {
     if (!STREAM_OK()) return showShots("Этот браузер не показывает поток (нет Media Source Extensions): снимки.");
     streamStop(false);
+    const mine = ++gen;
     mode = "stream";
-    ended = false;
     modeStream.checked = true;
     shotNote.classList.remove("bad");
     shotNote.textContent = "Поток запускается…";
@@ -1002,8 +1005,16 @@ function checkTab() {
     noAudio = false;
     soundShow();
     try { await api("POST", "/api/stream", { on: true }); }
-    catch (e) { return showShots("Поток не запустился (" + e.message + "): снимки раз в секунду."); }
-    if (mode !== "stream" || W.tab !== "check") return;
+    catch (e) {
+      if (mine === gen) showShots("Поток не запустился (" + e.message + "): снимки раз в секунду.");
+      return;
+    }
+    if (mine !== gen || mode !== "stream" || W.tab !== "check") {
+      // left while it was asked for (snapshots, another tab): it is not
+      // wanted, unless a newer start in this tab wants it
+      if (mode !== "stream" || W.tab !== "check") api("POST", "/api/stream", { on: false }).catch(() => {});
+      return;
+    }
     player = mpegts.createPlayer({ type: "mpegts", isLive: true, url: "/api/stream.ts" }, {
       enableWorker: false, enableStashBuffer: false, lazyLoad: false, autoCleanupSourceBuffer: true,
       liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 1.0, liveBufferLatencyMinRemain: 0.2,
@@ -1016,7 +1027,6 @@ function checkTab() {
     });
     p.on(mpegts.Events.LOADING_COMPLETE, () => {
       if (p !== player) return;
-      ended = true;
       showShots("Поток закончился (приставка его остановила): снимки раз в секунду. «Поток» — снова.");
     });
     p.on(mpegts.Events.MEDIA_INFO, mi => {
