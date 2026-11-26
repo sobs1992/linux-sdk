@@ -89,7 +89,10 @@ table.ctl td { padding: 6px 8px; }
 .bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; border-top: 1px solid var(--line); }
 .preset { margin: 8px 0; }
 .check { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
-img.shot { width: 480px; max-width: 100%; background: #000; border-radius: 6px; display: block; min-height: 270px; }
+img.shot, video.shot { width: 480px; max-width: 100%; background: #000; border-radius: 6px; display: block; min-height: 270px; }
+.check .mode { margin: 0 0 8px; align-items: center; }
+.check .mode label { margin-right: 8px; }
+.small.bad { color: var(--bad); }
 .gamepad .row { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
 .gamepad .cross { display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; }
 button.pad { min-width: 44px; height: 40px; padding: 0 8px; user-select: none; touch-action: none; }

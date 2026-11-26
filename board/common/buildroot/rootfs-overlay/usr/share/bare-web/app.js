@@ -938,29 +938,124 @@ function stickButton(stick, x, y, label) {
   return b;
 }
 
+// the picture of the check: the stream (mpegts.js, MSE) or a snapshot a second
+const STREAM_OK = () => !!(window.mpegts && mpegts.isSupported());
+const STREAM_NO_FRAME_MS = 8000;	// no picture in that time: back to snapshots
+
 function checkTab() {
   const img = h("img", { class: "shot", alt: "экран приставки" });
-  const shotNote = h("div", { class: "small" }, "Снимок экрана обновляется раз в секунду, пока открыта эта вкладка.");
+  const video = h("video", { class: "shot", muted: "", autoplay: "", playsinline: "" });
+  video.muted = true;	// autoplay with sound is cut by browsers: sound by the button
+  const shotNote = h("div", { class: "small" });
+  const soundBtn = h("button", { class: "secondary", type: "button" }, "Включить звук");
+  const modeStream = h("input", { type: "radio", name: "check-mode", value: "stream" });
+  const modeShot = h("input", { type: "radio", name: "check-mode", value: "shot" });
+  const view = h("div", { class: "view" });
   const st = h("div", { class: "cards" });
   const logPre = h("pre", { class: "live" });
   const f = encodeURIComponent(W.folder);
+  let player = null, mode = null, noFrame = null, ended = false;
+  const lag = () => video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : null;
+  const streamStop = askOff => {
+    clearTimeout(noFrame);
+    noFrame = null;
+    if (player) {
+      try { player.pause(); player.unload(); player.detachMediaElement(); player.destroy(); } catch (e) { /* gone */ }
+      player = null;
+      if (askOff) api("POST", "/api/stream", { on: false }).catch(() => {});
+    }
+  };
+  const showShots = why => {
+    streamStop(true);
+    mode = "shot";
+    modeShot.checked = true;
+    view.replaceChildren(img);
+    soundBtn.hidden = true;
+    shotNote.textContent = why || "Снимок экрана обновляется раз в секунду, пока открыта эта вкладка.";
+    if (why) shotNote.classList.add("bad"); else shotNote.classList.remove("bad");
+  };
+  const showStream = async () => {
+    if (!STREAM_OK()) return showShots("Этот браузер не показывает поток (нет Media Source Extensions): снимки.");
+    streamStop(false);
+    mode = "stream";
+    ended = false;
+    modeStream.checked = true;
+    shotNote.classList.remove("bad");
+    shotNote.textContent = "Поток запускается…";
+    view.replaceChildren(video);
+    soundBtn.hidden = false;
+    soundBtn.disabled = false;
+    soundBtn.textContent = video.muted ? "Включить звук" : "Выключить звук";
+    try { await api("POST", "/api/stream", { on: true }); }
+    catch (e) { return showShots("Поток не запустился (" + e.message + "): снимки раз в секунду."); }
+    if (mode !== "stream" || W.tab !== "check") return;
+    player = mpegts.createPlayer({ type: "mpegts", isLive: true, url: "/api/stream.ts" }, {
+      enableWorker: false, enableStashBuffer: false, lazyLoad: false, autoCleanupSourceBuffer: true,
+      liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 1.0, liveBufferLatencyMinRemain: 0.2,
+      liveSync: true, liveSyncMaxLatency: 1.0, liveSyncTargetLatency: 0.4 });
+    const p = player;
+    p.on(mpegts.Events.ERROR, (type, detail, info) => {
+      if (p !== player) return;
+      showShots("Поток прервался (" + [type, detail, info && (info.msg || info.code)].filter(x => x).join(", ") +
+        "): снимки раз в секунду. «Поток» — попробовать снова.");
+    });
+    p.on(mpegts.Events.LOADING_COMPLETE, () => {
+      if (p !== player) return;
+      ended = true;
+      showShots("Поток закончился (приставка его остановила): снимки раз в секунду. «Поток» — снова.");
+    });
+    p.on(mpegts.Events.MEDIA_INFO, mi => {
+      if (p !== player || !mi) return;
+      if (mi.hasAudio === false) { soundBtn.disabled = true; soundBtn.textContent = "Без звука"; }
+    });
+    p.attachMediaElement(video);
+    p.load();
+    const played = video.play();
+    if (played && played.catch) played.catch(() => {});
+    noFrame = setTimeout(() => {
+      if (p === player && !(video.readyState >= 2 && video.currentTime > 0))
+        showShots("Поток не показал ни кадра за " + STREAM_NO_FRAME_MS / 1000 + " с: снимки раз в секунду.");
+    }, STREAM_NO_FRAME_MS);
+  };
+  soundBtn.onclick = () => {
+    video.muted = !video.muted;
+    if (!video.muted) video.play().catch(() => {});
+    soundBtn.textContent = video.muted ? "Включить звук" : "Выключить звук";
+  };
+  modeStream.onchange = () => { if (modeStream.checked) { localStorage.setItem("checkMode", "stream"); showStream(); } };
+  modeShot.onchange = () => { if (modeShot.checked) { localStorage.setItem("checkMode", "shot"); showShots(); } };
+  W.stop.push(() => { mode = null; streamStop(true); });
   const loop = async () => {
     try {
       const s = await api("GET", "/api/state");
-      const run = s.running;
+      const run = s.running, sm = s.stream || {};
       st.replaceChildren(
         card("Игра", run ? (run === W.folder ? "идёт" : "идёт другая: " + run) + (s.minimized ? " (свёрнута)" : "") : "не запущена"),
         card("Кадров в секунду", run && s.fps !== null ? String(s.fps).replace(".", ",") : "—"),
         card("CPU игры", run && s.cpu_pct !== null ? s.cpu_pct + " % одного ядра" : "—"),
         card("GPU", run && s.gpu_pct !== null ? s.gpu_pct + " %" + (s.gpu_mhz ? ", " + s.gpu_mhz + " МГц" : "") : "—"),
-        card("Память игры", run && s.mem_mb !== null ? s.mem_mb + " МБ" : "—"));
+        card("Память игры", run && s.mem_mb !== null ? s.mem_mb + " МБ" : "—"),
+        card("Поток", sm.running ? "зрителей " + sm.viewers + ", " + sm.kbps + " кбит/с" : "не идёт"));
     } catch (e) { /* the next second */ }
-    await new Promise(res => {
-      const next = h("img");
-      next.onload = () => { img.src = next.src; shotNote.textContent = "Снимок: " + new Date().toLocaleTimeString("ru-RU"); res(); };
-      next.onerror = () => { shotNote.textContent = "Снимок не получился (bare_app не отвечает?)."; res(); };
-      next.src = "/api/shot.png?w=480&t=" + Date.now();
-    });
+    if (mode === "stream" && player) {
+      const l = lag();
+      if (video.readyState >= 2 && video.currentTime > 0)
+        shotNote.textContent = "Поток" + (l !== null ? ": в буфере " + l.toFixed(2).replace(".", ",") + " с" : "") +
+          (video.muted ? ", звук выключен" : "") + ".";
+    } else if (mode === "shot") {
+      await new Promise(res => {
+        const next = h("img");
+        next.onload = () => {
+          if (mode === "shot") { img.src = next.src; if (!shotNote.classList.contains("bad")) shotNote.textContent = "Снимок: " + new Date().toLocaleTimeString("ru-RU"); }
+          res();
+        };
+        next.onerror = () => {
+          if (mode === "shot" && !shotNote.classList.contains("bad")) shotNote.textContent = "Снимок не получился (bare_app не отвечает?).";
+          res();
+        };
+        next.src = "/api/shot.png?w=480&t=" + Date.now();
+      });
+    }
     if (W.tab === "check" && location.hash.startsWith("#game/")) checkTimer = setTimeout(loop, 1000);
   };
   const act = what => async () => {
@@ -974,6 +1069,9 @@ function checkTab() {
     else logPre.textContent = (logPre.textContent + e.line + "\n").split("\n").slice(-500).join("\n");
     logPre.scrollTop = logPre.scrollHeight;
   };
+  if (STREAM_OK() && localStorage.getItem("checkMode") !== "shot") showStream();
+  else showShots(STREAM_OK() ? null : "Этот браузер не показывает поток: снимки раз в секунду.");
+  if (!STREAM_OK()) modeStream.disabled = true;
   loop();
   const ss = W.schema.start_select;
   const dirs = (stick) => h("div", { class: "stick" }, h("div", { class: "small" }, stick === "stick" ? "Левый стик" : "Правый стик"),
@@ -987,7 +1085,10 @@ function checkTab() {
       h("button", { class: "secondary", onclick: act("options") }, "Опции игры на приставке")),
     st,
     h("div", { class: "check" },
-      h("div", null, img, shotNote),
+      h("div", null,
+        h("div", { class: "actions mode" },
+          h("label", null, modeStream, " Поток"), h("label", null, modeShot, " Снимок раз в секунду"), soundBtn),
+        view, shotNote),
       h("div", { class: "gamepad" },
         h("div", { class: "row" }, padButton("l2", "L2"), padButton("l1", "L1"), padButton("r1", "R1"), padButton("r2", "R2")),
         h("div", { class: "row" },
