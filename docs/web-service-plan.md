@@ -1565,8 +1565,20 @@ pirates по md5 те же, карта ro, writers 0. Возврат файло�
 (uid 1000) и права /data, /data/logs, /data/wine, /data/wine/prefix и возвращённых файлов; исправлено (root:root,
 755/700/700/700 — как в data.tar от 2026-11-25).
 
+Потом решение пользователя: Windows-игры тоже ведём в петлю, когда маршрут работает (настройка «Трансляция (RTSP)»
+или Bluetooth-наушники), иначе напрямую. bare_app b3299eb: wine.c (`wine_vars`) передаёт игре ALSA_CARD и
+ALSA_PCM_DEVICE узла `game_env.pcm` (alsa.conf на OGU1 берёт из них карту «default» и устройство hw/plughw; «default»
+петли — cards/Loopback.conf, softvol над dmix:1, substream 0); `sound_direct` и строка про Windows убраны (SDK
+8689510), `sound = route_game`. OGU1, `stream=1`: Pirates! держит pcmC1D0p, музыка меню в потоке через сайт
+−32,8 дБ (было −91), sound true, в журнале игры нет «ALSA lib», card0 0 перезапусков за 20 с; `stream=0`:
+pcmC0D0p, ALSA_CARD=0, как раньше. NFSU (меню, ~2 мин): pcmC1D0p, −21,7 дБ, pcmwatch card0 80 с — 0 перезапусков,
+0 XRUN, в очереди не меньше 1033 кадров; underrun в журналах нет; на странице строки нет. ctest 10/10, мутаций 8 —
+все пойманы. Не проверено: на слух и задержка звука в потоке (dmix: период 1024, буфер 16384 кадров), Bluetooth-
+наушники с Windows-игрой, гонка в NFSU (только меню). Копия до замены: stage10c-before/ (files.tar,
+md5-and-state.txt); bare_app.conf вернулся к md5 48ccbba…, карта ro, writers 0.
+
 Замечено: test_stream (этап 10) нестабилен на ПК — `wait_viewers(3, 1000)` в строке 487 падает и без этой
-правки (4 из 10 прогонов на коммите 36248e2, 2 из 10 с правкой); не исправлялся.
+правки (4 из 10 прогонов на коммите 36248e2, 2 из 10 с правкой; полный прогон после b3299eb прошёл 10/10); не исправлялся.
 
 ## Риски
 
