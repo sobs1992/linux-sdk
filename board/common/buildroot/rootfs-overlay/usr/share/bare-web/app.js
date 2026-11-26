@@ -945,7 +945,6 @@ const STREAM_NO_FRAME_MS = 8000;	// no picture in that time: back to snapshots
 // a game takes the sound's way when it starts (bare_app audio/route.h)
 const SOUND_LATE = "Звука нет: игра запущена до включения потока. Перезапустите игру; чтобы звук был в потоке " +
   "сразу, включите на приставке настройку «Трансляция (RTSP)» (Настройки → Интернет).";
-const SOUND_DIRECT = "Звука нет: игры Windows играют прямо в динамик приставки, мимо потока.";
 
 function checkTab() {
   const img = h("img", { class: "shot", alt: "экран приставки" });
@@ -1054,7 +1053,7 @@ function checkTab() {
         card("Поток", sm.running ? "зрителей " + sm.viewers + ", " + sm.kbps + " кбит/с" : "не идёт"));
       // a game runs, the stream too, and its sound is not in it (an older
       // bare_app says nothing of it: no line)
-      soundWhy = run && sm.running && sm.sound === false ? (sm.sound_direct ? SOUND_DIRECT : SOUND_LATE) : null;
+      soundWhy = run && sm.running && sm.sound === false ? SOUND_LATE : null;
       soundShow();
     } catch (e) { /* the next second */ }
     if (mode === "stream" && player) {
