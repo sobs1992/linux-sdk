@@ -475,6 +475,65 @@ class Test(unittest.TestCase):
         shutil.rmtree(game)
         shutil.rmtree(game + "-2")
 
+    def test_install_unknown_gog_registry(self):
+        """a game without a recipe: the registry values of its goggame-*.script into its wine.ini"""
+        d = self.tiny_game("Reg Game")
+        def act(root, sub, name=None, data=None, typ="string", langs=("*",), action="setRegistry", **more):
+            a = {"root": root, "subkey": sub, **more}
+            if name is not None:
+                a.update(valueName=name, valueData=data, valueType=typ)
+            return {"install": {"action": action, "arguments": a}, "languages": list(langs), "name": "r"}
+        script = {"productId": "77", "actions": [
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", deleteSubkeys=True),	# a key deleted: nothing
+            act("HKEY_CURRENT_USER", "SOFTWARE\\Pub\\Game", "Install Path", "{app}\\"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Product_Path", "{app}"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Lang", "25", langs=("ru-RU", "uk-UA")),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Lang", "9", langs=("en-US",)),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Lang", "1", langs=("*",)),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Lang", "7", langs=("de-DE",)),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Release", "Retail EMEA"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game\\1.0", "Only English", "yes", langs=("en-US",)),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", "Count", "1", typ="dword"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", "Docs", "{userdocs}\\Game"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", "a=b", "x"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", "", "default"),
+            act("HKEY_LOCAL_MACHINE", "SOFTWARE\\Pub\\Game", "Comment", "a ;b"),
+            {"install": {"action": "supportData", "arguments": {"source": "{supportDir}\\x", "target": "{app}"}},
+             "languages": ["*"], "name": "copy"},
+        ]}
+        touch(os.path.join(d, "goggame-77.script"), json.dumps(script).encode("utf-8-sig"))
+        try:
+            s, r = jreq("POST", "/api/install/run", {"path": d, "exe": "tiny.exe", "title": "Reg Game"})
+            self.assertEqual(s, 200, r)
+            ev = events(r["job"])
+            self.assertEqual((ev[-1]["type"], ev[-1]["folder"]), ("done", "reg-game"), ev)
+            ini = open(os.path.join(GAMES, "reg-game", "wine.ini"), encoding="utf-8").read()
+            self.assertEqual([l for l in ini.splitlines() if l.startswith("reg")], [
+                "reg = HKCU\\SOFTWARE\\Pub\\Game\\Install Path=D:\\reg-game\\",
+                "reg = HKLM\\SOFTWARE\\Pub\\Game\\1.0\\Product_Path=D:\\reg-game",
+                "reg = HKLM\\SOFTWARE\\Pub\\Game\\1.0\\Lang=25",
+                "reg = HKLM\\SOFTWARE\\Pub\\Game\\1.0\\Release=Retail EMEA",
+                "reg = HKLM\\SOFTWARE\\Pub\\Game\\1.0\\Only English=yes"])
+            # as bare_app reads it (the server's reader: ini.c's rules)
+            regs = bw.ini_sections(bw.ini_parse(ini))[""]["reg"]
+            self.assertEqual(regs[0], "HKCU\\SOFTWARE\\Pub\\Game\\Install Path=D:\\reg-game\\")
+        finally:
+            shutil.rmtree(os.path.join(GAMES, "reg-game"), True)
+        # more than bare_app_wine takes (16): the first 16
+        d = self.tiny_game("Reg Many")
+        many = {"actions": [act("HKEY_CURRENT_USER", "SOFTWARE\\M", "v%02d" % i, str(i)) for i in range(20)]}
+        touch(os.path.join(d, "goggame-78.script"), json.dumps(many).encode())
+        try:
+            s, r = jreq("POST", "/api/install/run", {"path": d, "exe": "tiny.exe", "title": "Reg Many"})
+            ev = events(r["job"])
+            self.assertEqual(ev[-1]["type"], "done", ev)
+            ini = open(os.path.join(GAMES, "reg-many", "wine.ini"), encoding="utf-8").read()
+            regs = [l for l in ini.splitlines() if l.startswith("reg")]
+            self.assertEqual(len(regs), 16)
+            self.assertEqual(regs[-1], "reg = HKCU\\SOFTWARE\\M\\v15=15")
+        finally:
+            shutil.rmtree(os.path.join(GAMES, "reg-many"), True)
+
     def test_fail_words(self):
         """game-install's fail codes in the words of the device's screen"""
         job = bw.Job("install", "x")

@@ -31,8 +31,9 @@ game-install: games copied onto the games card installed on the board
       (scripts/gamerecipe.py, the recipes of the rootfs: what the PC's
       games-image.py does); a game without a recipe with --exe (relative
       to the game's folder; GOG's primary program if not given) as a
-      Windows game: a wine.ini of its own (TITLE, the program), its cover
-      the program's icon. On the card the game is moved into place (no
+      Windows game: a wine.ini of its own (TITLE, the program, the registry
+      values its GOG installer writes: "reg" lines of goggame-*.script's
+      setRegistry actions), its cover the program's icon. On the card the game is moved into place (no
       copy, no room needed); an installer is unpacked next to it first
       (innoextract: room for the game needed), its DirectX cabinets kept
       in /games/redist/DirectX for later games, the installer's files
@@ -391,6 +392,72 @@ def gog_info(root):
                 return d.get("name"), t["path"].replace("\\", "/")
         return d.get("name"), None
     return None, None
+
+
+REG_ROOTS = {"HKEY_LOCAL_MACHINE": "HKLM", "HKEY_CURRENT_USER": "HKCU", "HKEY_CLASSES_ROOT": "HKCR",
+             "HKEY_USERS": "HKU"}
+REG_MAX = 16		# reg lines bare_app_wine takes (MAX_REG)
+REG_LINE_MAX = 511	# their length (char reg[][512])
+
+
+def gog_registry(d, folder):
+    """the "reg" lines of a game without a recipe: the registry values its
+    GOG installer would write (setRegistry actions of goggame-*.script in d,
+    the game's folder on the card): HKCU\\KEY\\NAME=DATA, {app} the game's
+    folder as bare_app_wine shows it (D:\\FOLDER, D: is /games). Only what
+    bare_app_wine can set (strings, a name without "=" and "\\", no other
+    {placeholder}); of one value the Russian language's, else every
+    language's, else the English one's. Returns (lines, left out)."""
+    rank = {}	# (root, subkey, name): (rank, line)
+    order, left = [], []
+    for n in sorted(os.listdir(d)):
+        if not re.match(r"goggame-\d+\.script$", n, re.I):
+            continue
+        try:
+            actions = json.load(open(os.path.join(d, n), encoding="utf-8-sig")).get("actions") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        for a in actions:
+            if not isinstance(a, dict) or not isinstance(a.get("install"), dict):
+                continue
+            ins = a["install"]
+            args = ins.get("arguments") if isinstance(ins.get("arguments"), dict) else {}
+            if ins.get("action") != "setRegistry" or "valueName" not in args:
+                continue	# another action, or only a key made or deleted
+            langs = a.get("languages") or ["*"]
+            r = max((2 if RUSSIAN.match(str(l)) or str(l).lower().startswith("ru") else
+                     1 if l == "*" else 0.5 if str(l).lower().startswith("en") else 0) for l in langs)
+            root = REG_ROOTS.get(str(args.get("root", "")).upper())
+            sub = str(args.get("subkey", "")).replace("/", "\\").strip("\\")
+            name = str(args.get("valueName", ""))
+            data = str(args.get("valueData", ""))
+            data = data.replace("{app}", "D:\\" + folder)
+            line = "%s\\%s\\%s=%s" % (root, sub, name, data)
+            why = None
+            if not r:
+                continue	# another language's
+            if not root or not sub:
+                why = "root or key"
+            elif str(args.get("valueType", "string")).lower() not in ("string", "sz", "reg_sz"):
+                why = "not a string"
+            elif not name or "=" in name or "\\" in name:
+                why = "its name"
+            elif re.search(r"\{\w+\}", data):
+                why = "a path of the installer"
+            elif any(ord(c) < 32 for c in line) or re.search(r"\s[;#]", line) or line != line.strip() or \
+                    data != data.strip() or len(line.encode()) > REG_LINE_MAX:
+                why = "not a line of wine.ini"
+            if why:
+                left.append("%s (%s)" % (line, why))
+                continue
+            key = (root, sub.lower(), name.lower())
+            if key not in rank:
+                order.append(key)
+            if key not in rank or r > rank[key][0]:
+                rank[key] = (r, line)
+    lines = [rank[k][1] for k in order]
+    left += ["%s (more than %d)" % (l, REG_MAX) for l in lines[REG_MAX:]]
+    return lines[:REG_MAX], left
 
 
 def programs(root):
@@ -880,6 +947,9 @@ def install(entry, replace, exe, title):
                                           log=log, step=step, elsewhere=redist)
         if not hit:
             # a Windows game of its own: its wine.ini, its icon
+            regs, left = gog_registry(dest, os.path.basename(dest))
+            for l in left:
+                log("registry value of goggame-*.script left out: %s" % l)
             with open(os.path.join(dest, "wine.ini"), "w", encoding="utf-8") as f:
                 f.write("; a Windows game installed on the device without a recipe (game-install):\n"
                         "; bare_app_wine's defaults (apps/bare_app/ports/wine/wine.ini says the keys)\n"
@@ -887,6 +957,9 @@ def install(entry, replace, exe, title):
                         "; UTF-8 for Wine (a path in Russian: \"Игра.exe\"), Windows' Russian code page\n"
                         "; (as every recipe's wine.ini)\n"
                         "locale = ru_RU\n" % (title, g["exe"]))	# relative: with "/"
+                if regs:
+                    f.write("; the registry values its GOG installer writes (goggame-*.script)\n")
+                    f.write("".join("reg = %s\n" % l for l in regs))
             step("cover")
             gamerecipe.icon_cover(dest, log=log)
         for s in skipped:
