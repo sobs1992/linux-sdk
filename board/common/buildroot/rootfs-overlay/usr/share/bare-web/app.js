@@ -586,7 +586,11 @@ function focusKey(sec, key) {
   if (W.tab === "fine") { W.fineQuery = ""; W.fineOnly = false; (W.fineOpen = W.fineOpen || {})[blockOf(sec, key)] = true; }
   renderTab();
   const el = $$("#game-body .edit").find(x => x.dataset.key === sec + "/" + key);
-  if (!el) return banner("Поле [" + sec + "] " + key + " сейчас не показывается (оно зависит от других ключей).");
+  if (!el) {
+    const e = schemaOf(sec, key);
+    return banner("Поле " + (sec ? "[" + sec + "] " : "") + key + " сейчас не показывается" +
+      (e && (e.tab === "controls" || W.r.kind === "native") ? " (оно зависит от других ключей, например крестовины или стика)." : "."));
+  }
   const d = el.closest("details");
   if (d) d.open = true;
   el.scrollIntoView({ block: "center" });
@@ -613,8 +617,12 @@ function renderEdits() {
     const name = (sec ? "[" + sec + "] " : "") + key;
     const what = ev === undefined ? " — вернётся как в рецепте" :
       ev === "" || (Array.isArray(ev) && !ev.length) ? " — убран из рецепта" : " = " + shown(ev);
+    // a field to go to: an edit, a key of the schema or of the recipe (a key known
+    // to neither, taken away by its cross, has none until it is saved)
+    const field = ev !== undefined || schemaOf(sec, key) || baseVal(sec, key) !== undefined;
     return h("li", { class: unsaved ? "unsaved" : null },
-      h("a", { href: "#", onclick: e => { e.preventDefault(); focusKey(sec, key); } }, h("code", null, name)), what,
+      field ? h("a", { href: "#", onclick: e => { e.preventDefault(); focusKey(sec, key); } }, h("code", null, name)) :
+        h("code", null, name), what,
       unsaved ? h("span", { class: "small" }, " (не сохранено)") : null,
       ev === undefined ? null : h("button", { class: "x", title: "как в рецепте", "aria-label": "как в рецепте",
         onclick: () => { setEdit(sec, key, undefined); renderTab(); } }, "×"));
