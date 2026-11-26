@@ -62,13 +62,19 @@ game-install: games copied onto the games card installed on the board
   while they run: a second one meanwhile fails at once ("fail busy").
   game-install prepare-card
       the card's install and redist folders, each with a text saying what
-      goes into it, and the user guide (the system's
+      goes into it (renewed when the system's text differs), and the user guide (the system's
       /usr/share/doc/user-guide.html) as "Руководство.html" at the card's
       top, renewed when the system's differs (bare_app's USB disk does
       this before the PC sees the card).
+The card is read-only: /usr/sbin/card-rw makes it writable while this
+writes (begin/end: one count of all the card's writers, read-only after
+the last one).
 GAME_INSTALL_GAMES, GAME_INSTALL_DATA, GAME_INSTALL_RECIPES and
 GAME_INSTALL_REDIST name other directories than /games, /data, the recipes
-and /usr/share/game-redist, GAME_INSTALL_LOCK another lock file (tests).
+and /usr/share/game-redist, GAME_INSTALL_LOCK another lock file,
+GAME_INSTALL_CARD_RW another card-rw, GAME_INSTALL_GUIDE another user guide
+(tests): all of them or none (one set and not all is refused, never the
+device's own place for the rest).
 """
 import atexit
 import fcntl
@@ -77,9 +83,19 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+
+HOOKS = ("GAME_INSTALL_GAMES", "GAME_INSTALL_DATA", "GAME_INSTALL_RECIPES", "GAME_INSTALL_REDIST",
+         "GAME_INSTALL_LOCK", "GAME_INSTALL_CARD_RW", "GAME_INSTALL_GUIDE")
+TEST = any(k in os.environ for k in HOOKS)
+if TEST and not all(os.environ.get(k) for k in HOOKS):
+    sys.stderr.write("game-install: test hooks without %s: refused\n" %
+                     ", ".join(k for k in HOOKS if not os.environ.get(k)))
+    print("fail error test hooks", flush=True)
+    sys.exit(2)
 
 # the recipes: the board's, else the SDK's this script is in; tests name
 # others (GAME_INSTALL_RECIPES: a copy as post-build.sh makes it, no lab/)
@@ -99,6 +115,7 @@ REDIST = os.path.join(GAMES, "redist")	# what recipes take from a PC, put there 
 SYSTEM_REDIST = os.environ.get("GAME_INSTALL_REDIST", "/usr/share/game-redist")
 UNPACK = ".unpack-"	# an installer unpacked in the install folder: .unpack-<name>
 LOCK = os.environ.get("GAME_INSTALL_LOCK", "/run/game-install.lock")
+CARD_RW = os.environ.get("GAME_INSTALL_CARD_RW", "/usr/sbin/card-rw")
 STEPS = ("find", "unpack", "files", "extras", "cover", "prepare", "data", "finish")
 # programs of a game that are not the game
 NOT_GAME = re.compile(r"(unins|setup|install|config|dxsetup|directx|vcredist|vc_redist|dotnet|"
@@ -616,21 +633,23 @@ def card_present():
     """the games card is mounted at /games (tests name another directory,
     GAME_INSTALL_GAMES: as it is); without it /games is a directory of the
     root file system, where nothing is to be written"""
-    return "GAME_INSTALL_GAMES" in os.environ or os.path.ismount(GAMES)
+    return TEST or os.path.ismount(GAMES)
 
 
 def card_rw(rw):
-    """the card writable (the mount's own flag: it is read-only while games
-    run), or read-only again"""
-    try:
-        opts = next(l.split()[3] for l in open("/proc/mounts") if l.split()[1] == GAMES)
-    except (StopIteration, OSError):
-        return False	# not a mount point (tests): as it is
-    if rw == opts.startswith("rw"):
-        return False
-    r = subprocess.run(["mount", "-o", "remount," + ("rw" if rw else "ro"), GAMES])
+    """this process writes on the card (card-rw begin: writable now; True)
+    or is done (card-rw end: read-only again after the last writer of all);
+    a True of card_rw(True) has its card_rw(False)"""
+    r = subprocess.run([CARD_RW, "begin" if rw else "end", str(os.getpid())],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    err = r.stderr.decode("utf-8", "replace").strip()
     if r.returncode and rw:
+        sys.stderr.write("game-install: %s\n" % err)
+        if r.returncode == 3:
+            die("no games card", "card", "")
         die("the games card cannot be written", "card", "")
+    if err:
+        sys.stderr.write("game-install: %s\n" % err)
     return True
 
 
@@ -927,9 +946,20 @@ INSTALL_README = """\
 Потом на приставке: главный экран, круглая кнопка «+» (Установка игр),
 выберите игру и нажмите A. Подробно: руководство, глава «Установка игр».
 
+Можно и без режима «USB-диск»: подключите приставку к компьютеру кабелем
+USB и откройте в браузере на компьютере адрес http://192.168.7.2 (вторая
+приставка: http://192.168.8.2). В разделе «Установка игр» перетащите
+установщик (setup_....exe вместе с файлами .bin) в окно браузера: он
+загрузится прямо в эту папку, и там же его можно установить. Файлы
+обновления системы (.upd) загружаются там же, в разделе «Обновление
+системы».
+
 Put a game here to install it on the device: a GOG installer
 (setup_....exe with its .bin files) or the folder of a game installed on a
 computer. Then on the device: home screen, the "+" round button.
+Or without the USB disk: a browser of the computer on the USB cable,
+http://192.168.7.2 (the second device: http://192.168.8.2), uploads
+installers and .upd files straight here.
 """
 
 GUIDE = os.environ.get("GAME_INSTALL_GUIDE", "/usr/share/doc/user-guide.html")
@@ -944,9 +974,29 @@ REDIST_README = """\
 «DirectX End-User Runtimes (June 2010)» (файл directx_Jun2010_redist.exe)
 и положите его сюда как есть.
 
+Эти файлы можно загрузить и из браузера, без режима «USB-диск»: подключите
+приставку к компьютеру кабелем USB, откройте адрес http://192.168.7.2
+(вторая приставка: http://192.168.8.2), раздел «Установка игр», и
+перетащите файлы в поле «Файлы Windows для игр»: они попадут в эту папку.
+
 Windows files some games need (the device names them: "files needed").
-DirectX: Microsoft's directx_Jun2010_redist.exe as it is.
+DirectX: Microsoft's directx_Jun2010_redist.exe as it is. Also from a
+browser on the USB cable: http://192.168.7.2 (http://192.168.8.2 the second
+device), "Установка игр".
 """
+
+
+def note_bytes(text):
+    """a note as it is on the card: Windows' Notepad's UTF-8 with its mark, CR LF"""
+    return b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8")
+
+
+def read_bytes(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(1 << 16)
+    except OSError:
+        return None
 
 
 def prepare_card():
@@ -955,7 +1005,8 @@ def prepare_card():
         return	# no card in: nothing to prepare (and not the root file system's /games)
     todo = [(INSTALL, "КАК УСТАНОВИТЬ ИГРУ.txt", INSTALL_README),
             (REDIST, "ЧТО СЮДА КЛАСТЬ.txt", REDIST_README)]
-    todo = [t for t in todo if not os.path.isfile(os.path.join(t[0], t[1]))]
+    # written, or written anew when its text is another (an older system's)
+    todo = [t for t in todo if read_bytes(os.path.join(t[0], t[1])) != note_bytes(t[2])]
     guide = None
     try:
         guide = open(GUIDE, "rb").read()
@@ -970,8 +1021,8 @@ def prepare_card():
     try:
         for d, name, text in todo:
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, name), "w", encoding="utf-8-sig", newline="\r\n") as f:
-                f.write(text)	# Windows' Notepad: UTF-8 with its mark, CR LF
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(note_bytes(text))
         if guide is not None:
             with open(os.path.join(GAMES, GUIDE_ON_CARD), "wb") as f:
                 f.write(guide)
@@ -1001,6 +1052,9 @@ def lock():
 
 
 def main():
+    # stopped (SIGTERM, SIGHUP): the finally blocks still run (card-rw end)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda n, f: sys.exit(128 + n))
     a = sys.argv[1:]
     if a[:1] == ["scan"] and len(a) <= 2:
         scan(a[1] if len(a) == 2 else INSTALL)
