@@ -77,6 +77,13 @@ BARE_APP_FFMPEG_PARSERS = \
 	h264 hevc mpeg4video mpegvideo mpegaudio aac aac_latm ac3 dca vorbis opus \
 	flac vp3 vp8 vp9 vc1 h263 png mjpeg bmp gif webp cook
 BARE_APP_FFMPEG_LIST = $(subst $(space),$(comma),$(strip $(1)))
+# The one encoder: the stream's sound for a browser (MPEG-1 Layer II,
+# which MSE players read and LPCM they do not); bare_app loads
+# libavcodec for it only while a browser watches (src/stream/mp2.c), it
+# is not linked with it
+ifeq ($(BR2_PACKAGE_BARE_APP_STREAM),y)
+BARE_APP_FFMPEG_ENCODERS = mp2fixed
+endif
 ifeq ($(BR2_PACKAGE_BARE_APP_MEDIA),y)
 FFMPEG_CONF_OPTS += \
 	--disable-everything --disable-programs --disable-network \
@@ -84,7 +91,8 @@ FFMPEG_CONF_OPTS += \
 	--enable-protocol=file,pipe \
 	--enable-decoder=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_DECODERS)) \
 	--enable-demuxer=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_DEMUXERS)) \
-	--enable-parser=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_PARSERS))
+	--enable-parser=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_PARSERS)) \
+	$(if $(BARE_APP_FFMPEG_ENCODERS),--enable-encoder=$(call BARE_APP_FFMPEG_LIST,$(BARE_APP_FFMPEG_ENCODERS)))
 endif
 # SDL2 games come by game.ini; other programs may too, so only "on"
 ifeq ($(BR2_PACKAGE_BARE_APP_SDL),y)
