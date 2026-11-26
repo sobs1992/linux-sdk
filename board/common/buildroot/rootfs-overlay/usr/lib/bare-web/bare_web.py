@@ -1745,6 +1745,8 @@ def adopt_controls(r, st):
     if conf.get("options." + key):
         lines.append("options.%s=%s" % (key, conf["options." + key]))
     with RECIPE_LOCK:
+        for p in (imp, imp + ".taken", imp + ".bad"):	# of an earlier one: not this one's answer
+            gone(p)
         put_layer(r, entries)
         try:
             with open(imp + ".tmp", "w") as f:
@@ -1754,29 +1756,73 @@ def adopt_controls(r, st):
             restore_layer(r, raw)
             raise Refused(500, "Файл для bare_app не записан: %s" % e)
         if not ctl("import-settings " + imp):
-            restore_layer(r, raw)
-            os.remove(imp)
-            raise Refused(503, NO_CTL)
-        # bare_app keeps the settings in its file a second later
-        done = False
-        end = time.monotonic() + 4
-        while time.monotonic() < end:
-            now = conf_values().get("controls." + key)
-            if set(remap_pairs(now)) == set(keep):
-                done = True
-                break
-            time.sleep(0.1)
-        try:
-            os.remove(imp)
-        except OSError:
-            pass
+            gone(imp)
+            raise Refused(503, NO_CTL if restore_layer(r, raw) else NO_CTL + " " + NOT_BACK)
+        done = settings_taken(imp, key, keep)
+        if not done:
+            raise Refused(503, NOT_APPLIED if restore_layer(r, raw) else NOT_APPLIED_KEPT)
     log.info("adopt %s: %s moved, %s kept", r.folder, moved, keep)
     return {"moved": [{"from": a, "to": b} for a, b in moved], "kept": [{"from": a, "to": b} for a, b in keep],
-            "settings_done": done}
+            "settings_done": True}
+
+
+IMPORT_WAIT = 15.0	# s: bare_app takes an import-settings file (view_ctl.c, ctl_settings.c)
+NOT_APPLIED = "Приставка не применила настройки, ничего не изменено."
+NOT_BACK = "Правки рецепта вернуть не удалось: сбросьте их в Мастерской."
+NOT_APPLIED_KEPT = "Приставка не применила настройки; " + NOT_BACK
+
+
+def gone(path):
+    """True: path is no more (removed now or before)"""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def wait_for(cond, seconds):
+    end = time.monotonic() + seconds
+    while not cond():
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def settings_taken(imp, key, keep):
+    """bare_app's answer to "import-settings imp": it renames imp to
+    imp.taken, removes that once the settings are in, renames it imp.bad if
+    they cannot be. True: the settings are in. False: they are not (imp
+    taken back by removing it before bare_app took it, or .bad, or bare_app
+    took it and did not finish)"""
+    if not wait_for(lambda: not os.path.exists(imp), IMPORT_WAIT):
+        try:
+            os.remove(imp)
+            log.warning("import-settings %s: not taken in %.0f s, taken back", imp, IMPORT_WAIT)
+            return False
+        except FileNotFoundError:
+            pass	# taken just now
+        except OSError as e:
+            log.warning("import-settings %s: not taken, not removed: %s", imp, e)
+            return False
+    if not wait_for(lambda: not os.path.exists(imp + ".taken"), IMPORT_WAIT):
+        log.warning("import-settings %s: taken, not done", imp)
+        return False
+    if os.path.exists(imp + ".bad"):
+        gone(imp + ".bad")
+        log.warning("import-settings %s: bare_app could not take the settings in", imp)
+        return False
+    # in: bare_app writes its settings file a second later
+    if not wait_for(lambda: set(remap_pairs(conf_values().get("controls." + key))) == set(keep), 4):
+        log.warning("import-settings %s: in, the settings file not yet written", imp)
+    return True
 
 
 def restore_layer(r, raw):
-    """the layer as it was (raw None: none)"""
+    """the layer as it was (raw None: none); False: it could not be"""
     try:
         if raw is None:
             put_layer(r, [])
@@ -1784,6 +1830,8 @@ def restore_layer(r, raw):
             put_layer(r, ini_parse(raw))
     except Refused as e:
         log.warning("layer %s not put back: %s", r.folder, e)
+        return False
+    return True
 
 
 # ---- the screen, the buttons, the sticks (the check of a game) -------------------

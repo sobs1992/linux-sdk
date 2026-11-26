@@ -980,8 +980,7 @@ async function adoptGame() {
   try {
     const r = await api("POST", "/api/recipe/" + encodeURIComponent(W.folder) + "/adopt-controls");
     banner("Перенесено: " + r.moved.map(p => p.from + "→" + p.to).join(", ") +
-      (r.kept.length ? "; осталось у игрока: " + r.kept.map(p => p.from + "=" + p.to).join(", ") : "") +
-      (r.settings_done ? "" : " (bare_app ещё не записал свои настройки — проверьте позже)"));
+      (r.kept.length ? "; осталось у игрока: " + r.kept.map(p => p.from + "=" + p.to).join(", ") : ""));
     W.r = r;
     W.edits = clone(r.layer);
     dirty(false);

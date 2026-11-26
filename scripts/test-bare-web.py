@@ -1146,6 +1146,8 @@ class FakeBareApp:
         self.lines = []
         self.fd = None
         self.games = {}	# folder: (base path, layer path, effective path)
+        self.importing = "now"
+        self.taken_back = []	# import files gone when it came to take them
 
     def start(self):
         if not os.path.exists(ENV["BARE_WEB_CTL"]):
@@ -1196,18 +1198,47 @@ class FakeBareApp:
             elif os.path.exists(eff):
                 os.remove(eff)
         elif cmd == "import-settings":
-            text = open(arg).read()
-            names = set()
-            for l in text.splitlines():
-                k, eq, v = l.partition("=")
-                if not eq or l.startswith(";"):
-                    continue
-                names.add(v if k == "game" else k.split(".", 1)[1])
-            conf = open(ENV["BARE_WEB_CONF"]).read().splitlines()
-            keep = [l for l in conf if not any(l.startswith(("controls.%s=" % n, "options.%s=" % n)) for n in names)]
-            new = [l for l in text.splitlines() if l.startswith(("controls.", "options.")) and l.split("=", 1)[1]]
-            with open(ENV["BARE_WEB_CONF"], "w") as f:
-                f.write("\n".join(keep + new) + "\n")
+            # as ctl_settings.c: taken (FILE.taken), then removed when in,
+            # FILE.bad when not; self.importing: "now", "late" (after the
+            # server's wait, in a thread), "never", "bad", "stuck"
+            mode = self.importing
+            if mode == "never":
+                return
+            if mode == "stuck":	# taken, never done
+                os.rename(arg, arg + ".taken")
+                return
+            if mode == "late":
+                threading.Thread(target=self.take_late, args=(arg,), daemon=True).start()
+                return
+            self.take(arg, mode == "bad")
+
+    def take_late(self, path):
+        time.sleep(bw.IMPORT_WAIT + 0.5)
+        self.take(path, False)
+
+    def take(self, path, bad):
+        try:
+            os.rename(path, path + ".taken")
+        except FileNotFoundError:
+            self.taken_back.append(path)
+            return
+        arg = path + ".taken"
+        if bad:
+            os.rename(arg, path + ".bad")
+            return
+        text = open(arg).read()
+        names = set()
+        for l in text.splitlines():
+            k, eq, v = l.partition("=")
+            if not eq or l.startswith(";"):
+                continue
+            names.add(v if k == "game" else k.split(".", 1)[1])
+        conf = open(ENV["BARE_WEB_CONF"]).read().splitlines()
+        keep = [l for l in conf if not any(l.startswith(("controls.%s=" % n, "options.%s=" % n)) for n in names)]
+        new = [l for l in text.splitlines() if l.startswith(("controls.", "options.")) and l.split("=", 1)[1]]
+        with open(ENV["BARE_WEB_CONF"], "w") as f:
+            f.write("\n".join(keep + new) + "\n")
+        os.remove(arg)
 
 
 BARE_APP = FakeBareApp()
@@ -1405,7 +1436,8 @@ class RecipeTest(unittest.TestCase):
             "[labels.ru]", "a = назад (Esc)", "b = клик", "x ="])
         self.assertEqual(BARE_APP.lines[0], "reload pirates")
         self.assertTrue(BARE_APP.lines[1].startswith("import-settings "), BARE_APP.lines)
-        self.assertFalse(os.path.exists(BARE_APP.lines[1].split(" ", 1)[1]))	# removed after
+        imp = BARE_APP.lines[1].split(" ", 1)[1]
+        self.assertEqual([p for p in (imp, imp + ".taken", imp + ".bad") if os.path.exists(p)], [])
         self.assertTrue(r["settings_done"])
         self.assertEqual(r["kept"], [{"from": "ly", "to": "invert"}])
         conf = open(ENV["BARE_WEB_CONF"]).read()
@@ -1421,6 +1453,43 @@ class RecipeTest(unittest.TestCase):
         self.assertEqual(s, 409, r)
         self.assertEqual(open(self.layer()).read(), layer)
         self.assertNotEqual(conf, conf_before)
+
+    def test_adopt_not_applied(self):
+        """bare_app takes the import after the server's wait, never, or
+        cannot: the layer as it was, bare_app.conf untouched, an error; the
+        late one finds the file taken back and changes nothing"""
+        old_wait, bw.IMPORT_WAIT = bw.IMPORT_WAIT, 1.0
+        try:
+            for mode in ("late", "never", "bad", "stuck"):
+                with self.subTest(mode=mode):
+                    self.setUp()
+                    jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"keys": {"y": "esc"}}})
+                    layer, conf = open(self.layer()).read(), open(ENV["BARE_WEB_CONF"]).read()
+                    del BARE_APP.lines[:], BARE_APP.taken_back[:]
+                    BARE_APP.importing = mode
+                    s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+                    self.assertEqual(s, 503, r)
+                    self.assertIn("не применила настройки, ничего не изменено", r["error"])
+                    self.assertEqual(open(self.layer()).read(), layer)
+                    imp = [l for l in BARE_APP.lines if l.startswith("import-settings ")][0].split(" ", 1)[1]
+                    if mode == "late":
+                        time.sleep(1.0)
+                        self.assertEqual(BARE_APP.taken_back, [imp])
+                    self.assertEqual(open(ENV["BARE_WEB_CONF"]).read(), conf)
+                    if mode == "stuck":
+                        os.remove(imp + ".taken")
+                    self.assertEqual([p for p in (imp, imp + ".taken", imp + ".bad") if os.path.exists(p)], [])
+                    self.assertEqual(BARE_APP.lines[-1], "reload pirates")	# the layer read again
+                    BARE_APP.importing = "now"
+            # and the same with no layer before: none after
+            self.setUp()
+            BARE_APP.importing = "never"
+            s, r = jreq("POST", "/api/recipe/pirates/adopt-controls")
+            self.assertEqual(s, 503, r)
+            self.assertFalse(os.path.exists(self.layer()))
+        finally:
+            bw.IMPORT_WAIT = old_wait
+            BARE_APP.importing = "now"
 
     def test_adopt_refused(self):
         self.state(running={"folder": "pirates", "key": PIRATES_KEY, "pid": os.getpid()})
