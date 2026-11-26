@@ -321,6 +321,26 @@ class Test(unittest.TestCase):
         self.assertIn("text/javascript", dict(h)["Content-Type"])
         self.assertEqual(req("GET", "/../bare-web")[0], 404)
         self.assertEqual(req("GET", "/%2e%2e/x")[0], 404)
+        self.assertEqual(dict(h)["Cache-Control"], "no-store")	# the pages: always anew
+        self.assertNotIn("ETag", dict(h))
+
+    def test_static_revalidated(self):
+        """mpegts.js (273 KB): kept by the browser, asked again by its ETag (the
+        file's md5), 304 without a body while it is the same"""
+        s, h, d = req("GET", "/mpegts.js")
+        h = dict(h)
+        self.assertEqual(s, 200)
+        self.assertEqual(d, open(os.path.join(STATIC, "mpegts.js"), "rb").read())
+        self.assertEqual(h["Cache-Control"], "no-cache")
+        self.assertEqual(h["ETag"], '"%s"' % hashlib.md5(d).hexdigest())
+        s, h2, d2 = req("GET", "/mpegts.js", headers={"If-None-Match": h["ETag"]})
+        self.assertEqual((s, d2), (304, b""))
+        self.assertEqual(dict(h2)["ETag"], h["ETag"])
+        s, h2, d2 = req("GET", "/mpegts.js", headers={"If-None-Match": '"0123", ' + h["ETag"]})
+        self.assertEqual(s, 304)
+        # another (an update): the file whole
+        s, h2, d2 = req("GET", "/mpegts.js", headers={"If-None-Match": '"0123"'})
+        self.assertEqual((s, d2), (200, d))
 
     def test_upload_whole(self):
         data = os.urandom(3 * 1024 * 1024 + 17)

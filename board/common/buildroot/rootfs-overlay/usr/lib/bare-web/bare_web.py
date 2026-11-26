@@ -147,6 +147,7 @@ own place for the rest.
 """
 import errno
 import fcntl
+import hashlib
 import http.server
 import io
 import json
@@ -873,6 +874,8 @@ STREAM_WAIT = 4.0	# s: a stream "stream on" has just asked for starts in the vie
 STREAM_QUIET = 10	# s without a byte from bare_app (or room at the browser): it is over
 RECIPES = os.path.join(GAMES, "recipes")
 SCHEMA = os.path.join(STATIC, "schema.json")
+# static files the browser keeps and asks again by their ETag (static())
+REVALIDATED = ("mpegts.js",)
 STATE_STALE = 3		# s: state.json older than this is no game running
 NO_BARE_APP = "bare_app не запущен: дождитесь главного экрана приставки и повторите."
 NO_CTL = "bare_app не принимает команды (он не запущен?)."
@@ -2490,7 +2493,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log.info("%s %s", self.client_address[0], fmt % args)
 
     # ---- answers
-    def send(self, code, body, ctype="application/json; charset=utf-8", headers=()):
+    def send(self, code, body, ctype="application/json; charset=utf-8", headers=(), cache="no-store"):
         if isinstance(body, str):
             body = body.encode()
         if getattr(self, "unread", False):
@@ -2499,7 +2502,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         for k, v in headers:
             self.send_header(k, v)
         self.end_headers()
@@ -2676,7 +2679,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = os.path.join(STATIC, name)
         if not os.path.isfile(p):
             p = os.path.join(STATIC, "index.html") if "." not in name else p
+        if name in REVALIDATED:
+            return self.revalidated(p, TYPES.get(os.path.splitext(p)[1], "application/octet-stream"))
         self.file(p, TYPES.get(os.path.splitext(p)[1], "application/octet-stream"))
+
+    def revalidated(self, path, ctype):
+        """a big file that seldom changes (mpegts.js, 273 KB on every check of a
+        game): kept by the browser, asked again each time (no-cache) by its
+        ETag, the md5 of the file (a new one after an update), 304 if the same"""
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError:
+            return self.fail(404, "Файла нет: %s" % os.path.basename(path))
+        tag = '"%s"' % hashlib.md5(body).hexdigest()
+        asked = [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]
+        if tag in asked or "*" in asked:
+            return self.send(304, b"", ctype, (("ETag", tag),), cache="no-cache")
+        self.send(200, body, ctype, (("ETag", tag),), cache="no-cache")
 
     # ---- the PIN (an address other than the USB computer's)
     def api_post_pin(self, segs, q):
