@@ -24,6 +24,13 @@ cat > "$TARGET_DIR/etc/sdk-release" <<-END
 	BARE_APP=$(ver "$SDK_DIR/apps/bare_app")
 END
 
+# The site's server (/usr/lib/bare-web/bare_web.py) is imported by its tests
+# on the PC straight from the overlay, which leaves a __pycache__ there that
+# the overlay then copies in: an old compiled form, differing from one unit
+# to another (the source's mtime is in it). The server compiles its own on
+# the first start (/usr/sbin/bare-web), so none goes into the image.
+rm -rf "$TARGET_DIR/usr/lib/bare-web/__pycache__"
+
 KEYS="$(dirname "$0")/authorized_keys"
 if [ -f "$KEYS" ]; then
 	echo "Adding SSH keys from $KEYS"
