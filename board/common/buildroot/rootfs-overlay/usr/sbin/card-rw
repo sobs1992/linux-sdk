@@ -1,0 +1,180 @@
+#!/bin/sh
+# card-rw: the games card (/games, mounted read-only) writable for its writers,
+# read-only again after the last one (docs/web-service-plan.md, "Риски").
+#
+#   card-rw begin [PID]   PID (else the caller, $PPID) is to write on the card:
+#                         the first writer makes it writable (remount,rw); exit 0
+#                         writable, 1 it cannot be made writable, 3 no card
+#   card-rw end [PID]     PID is done: after the last writer it is made read-only
+#                         again (sync; remount,ro, retried while busy) if card-rw
+#                         made it writable; a card that was writable before the
+#                         first writer (not by card-rw) is left as it is
+#   card-rw status        mounted=0|1 rw=0|1 writers=N ours=0|1
+#
+# Every writer (bare-web, game-install, bare-report, bare-backup) goes through
+# this: one count for all of them, under the lock /run/card-rw.lock. A writer is
+# a file /run/card-rw/<pid> ("pid starttime count": begin adds one, end takes
+# one, the file goes at 0); one whose process is gone (killed: its end never
+# comes) or whose pid is another process's now (another start time) is dropped
+# by the next begin, end or status, which then makes the card read-only as end
+# would. "ours" (/run/card-rw/ours): card-rw made it writable; kept when the
+# read-only remount failed, so the next end tries again.
+#
+# Tests (scripts/test-card-rw.py) name every place: CARD_RW_CARD (the mount
+# point), CARD_RW_STATE, CARD_RW_LOCK, CARD_RW_MOUNTS (/proc/mounts),
+# CARD_RW_MOUNT (the mount program), CARD_RW_LOG; one of them set and not all is
+# refused (a test never falls back to the real card). CARD_RW_PAUSE (seconds
+# between tries, 1) and CARD_RW_TRIES (5) tune the retries.
+
+hooks="CARD_RW_CARD CARD_RW_STATE CARD_RW_LOCK CARD_RW_MOUNTS CARD_RW_MOUNT CARD_RW_LOG"
+set_n=0 missing=
+for h in $hooks; do
+	eval "v=\${$h-}"
+	if [ -n "$v" ]; then set_n=$((set_n + 1)); else missing="$missing $h"; fi
+done
+if [ $set_n -gt 0 ] && [ -n "$missing" ]; then
+	echo "card-rw: test hooks without$missing: refused" >&2
+	exit 2
+fi
+CARD=${CARD_RW_CARD:-/games}
+STATE=${CARD_RW_STATE:-/run/card-rw}
+LOCK=${CARD_RW_LOCK:-/run/card-rw.lock}
+MOUNTS=${CARD_RW_MOUNTS:-/proc/mounts}
+MOUNT=${CARD_RW_MOUNT:-mount}
+LOG=${CARD_RW_LOG:-/var/log/card-rw.log}
+PAUSE=${CARD_RW_PAUSE:-1}
+TRIES=${CARD_RW_TRIES:-5}
+
+say() {
+	if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ]; then
+		mv -f "$LOG" "$LOG.1"
+	fi
+	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null
+}
+
+# the start time of a process (field 22 of its stat), nothing if it is gone
+start_of() {
+	s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+	s=${s##*") "}
+	# shellcheck disable=SC2086
+	set -- $s
+	echo "${20}"
+}
+
+# the card's mount options ("" not mounted): the last line of it counts
+opts() {
+	awk -v d="$CARD" '$2 == d { o = $4 } END { print o }' "$MOUNTS" 2>/dev/null
+}
+
+is_ro() {
+	case ",$(opts)," in *,ro,*) return 0 ;; esac
+	return 1
+}
+
+# the writers whose process is gone dropped; how many are left
+writers() {
+	n=0
+	for f in "$STATE"/[0-9]*; do
+		[ -f "$f" ] || continue
+		read -r wp wst wc < "$f"
+		if [ -n "$wp" ] && [ "$(start_of "$wp")" = "$wst" ]; then
+			n=$((n + 1))
+		else
+			rm -f "$f"
+			say "writer $wp gone without its end: dropped"
+		fi
+	done
+	echo $n
+}
+
+# no writer left: read-only again if card-rw made it writable
+settle() {
+	[ "$(writers)" -eq 0 ] || return 0
+	[ -e "$STATE/ours" ] || return 0
+	if [ -z "$(opts)" ] || is_ro; then
+		rm -f "$STATE/ours"	# gone, or made read-only by someone else
+		return 0
+	fi
+	sync
+	i=1
+	while :; do
+		if err=$("$MOUNT" -o remount,ro "$CARD" 2>&1); then
+			rm -f "$STATE/ours"
+			say "$CARD read-only again"
+			return 0
+		fi
+		[ $i -ge "$TRIES" ] && break
+		i=$((i + 1))
+		sleep "$PAUSE"
+		sync
+	done
+	say "$CARD stays writable: $err"
+	echo "card-rw: $CARD stays writable: $err" >&2
+	return 0
+}
+
+begin() {
+	pid=$1
+	st=$(start_of "$pid") || { echo "card-rw: no process $pid" >&2; exit 2; }
+	[ -n "$(opts)" ] || { echo "card-rw: $CARD is not mounted" >&2; exit 3; }
+	writers > /dev/null
+	if is_ro; then
+		if ! err=$("$MOUNT" -o remount,rw "$CARD" 2>&1); then
+			say "$CARD cannot be made writable: $err"
+			echo "card-rw: $CARD cannot be made writable: $err" >&2
+			settle
+			exit 1
+		fi
+		: > "$STATE/ours"
+		say "$CARD writable (for $pid)"
+	fi
+	c=0
+	if [ -f "$STATE/$pid" ]; then
+		read -r p s c < "$STATE/$pid"
+		[ "$s" = "$st" ] || c=0
+	fi
+	echo "$pid $st $((c + 1))" > "$STATE/$pid.tmp" && mv -f "$STATE/$pid.tmp" "$STATE/$pid"
+}
+
+end() {
+	pid=$1
+	if [ -f "$STATE/$pid" ]; then
+		read -r p s c < "$STATE/$pid"
+		if [ "${c:-1}" -gt 1 ]; then
+			echo "$p $s $((c - 1))" > "$STATE/$pid.tmp" && mv -f "$STATE/$pid.tmp" "$STATE/$pid"
+		else
+			rm -f "$STATE/$pid"
+		fi
+	else
+		say "end of $pid without its begin"
+		echo "card-rw: $pid has not begun" >&2
+	fi
+	settle
+}
+
+cmd=$1
+pid=${2:-$PPID}
+case "$pid" in
+'' | *[!0-9]*) echo "card-rw: $pid?" >&2; exit 2 ;;
+esac
+case "$cmd" in
+begin | end | status) ;;
+*) echo "usage: card-rw begin|end [PID] | status" >&2; exit 2 ;;
+esac
+mkdir -p "$STATE" || exit 1
+exec 9>> "$LOCK" || exit 1
+flock 9 || exit 1
+case "$cmd" in
+begin) begin "$pid" ;;
+end) end "$pid" ;;
+status)
+	settle
+	o=$(opts)
+	m=0 rw=0 ours=0
+	[ -n "$o" ] && m=1
+	[ -n "$o" ] && ! is_ro && rw=1
+	[ -e "$STATE/ours" ] && ours=1
+	echo "mounted=$m rw=$rw writers=$(writers) ours=$ours"
+	;;
+esac
+exit 0
