@@ -13,6 +13,7 @@
     <a href="#status">Состояние</a>
     <a href="#install">Установка игр</a>
     <a href="#games">Игры и журналы</a>
+    <a href="#workshop">Мастерская</a>
     <a href="#saves">Сохранения</a>
     <a href="#reports">Отчёты</a>
     <a href="#update">Обновление системы</a>
@@ -64,6 +65,7 @@
     <h1>Игры и журналы</h1>
     <p class="hint">Журнал 1 — последний запуск игры, 2 и 3 — запуски до него. Если игра не
       запускается, скачайте журнал или отчёт и приложите к сообщению об ошибке.</p>
+    <div id="games-job" class="job" hidden></div>
     <div id="games-list"></div>
     <div id="log-view" class="logview" hidden>
       <div class="row-head"><h2 id="log-title"></h2>
@@ -74,10 +76,22 @@
     </div>
   </section>
 
+  <section id="page-workshop" class="page" hidden>
+    <h1>Мастерская</h1>
+    <p class="hint">Рецепт игры — её настройки для приставки: управление, экран, тонкие ключи.
+      Ваши правки лежат отдельно от рецепта (в папке <b>recipes</b> на карте игр) и
+      сбрасываются в любой момент. Выберите игру, чтобы править её рецепт или проверить её на
+      приставке.</p>
+    <div class="actions"><input id="workshop-search" class="search" type="search"
+      placeholder="Поиск по названию или папке" autocomplete="off"></div>
+    <div id="workshop-list"></div>
+  </section>
+
   <section id="page-game" class="page" hidden>
-    <p class="small"><a href="#games">← Игры и журналы</a></p>
+    <p class="small"><a href="#workshop">← Мастерская</a></p>
     <h1 id="game-title"></h1>
     <div id="game-meta" class="small"></div>
+    <div id="game-edits" class="edits" hidden></div>
     <div id="game-tabs" class="tabs"></div>
     <div id="game-body"></div>
     <div id="game-bar" class="actions bar">

@@ -97,3 +97,18 @@ button.pad:active { background: var(--accent); color: #fff; }
 .stick .cross { grid-template-columns: repeat(3, 40px); }
 pre.live { background: #10141c; color: #d6dbe4; padding: 12px; border-radius: 8px; overflow: auto; max-height: 40vh;
   font: 12px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }
+/* the workshop's list, "my edits", the blocks of "Тонкое" */
+input.search { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; width: 100%; max-width: 420px; }
+tr.link { cursor: pointer; }
+tr.link:hover td { background: #f6f8fb; }
+.edits { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; margin: 12px 0 0; }
+.edits h3 { margin: 4px 0; font-size: 15px; }
+.edits p { margin: 4px 0; }
+.edits ul { margin: 4px 0; padding-left: 18px; }
+.edits li { margin: 2px 0; }
+.edits li.unsaved { color: var(--warn); }
+.edits button.x { background: #fff; color: var(--bad); border-color: var(--line); padding: 0 7px; margin-left: 8px;
+  font-size: 14px; line-height: 20px; }
+details { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; }
+details > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; }
+details > table { border: none; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }

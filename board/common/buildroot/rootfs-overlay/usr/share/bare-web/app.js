@@ -84,7 +84,7 @@ function show() {
   const [name, ...rest] = (location.hash || "#status").slice(1).split("/");
   const p = pages[name] ? name : "status";
   $$(".page").forEach(s => { s.hidden = s.id !== "page-" + p; });
-  $$("nav a").forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + (p === "game" ? "games" : p)));
+  $$("nav a").forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + (p === "game" ? "workshop" : p)));
   banner("");
   clearInterval(timer);
   timer = null;
@@ -242,7 +242,7 @@ function uploaded(place) {
 function follow(job, box, onEnd) {
   box.hidden = false;
   box.className = "job";
-  const head = h("div", null, (job.kind === "update" ? "Обновление " : "Установка ") + job.title);
+  const head = h("div", null, ({ update: "Обновление ", delete: "Удаление " }[job.kind] || "Установка ") + job.title);
   const bar = h("div", { class: "meter" }, h("i", { style: "width:0%" }));
   const text = h("div", { class: "text" }, "начинаю…");
   const skips = h("div", { class: "skips" });
@@ -466,11 +466,12 @@ async function gamesPage() {
       const logs = g.logs.map(l => h("button", { class: "secondary", onclick: () => openLog(g, l.n) }, "журнал " + l.n));
       const note = h("div", { class: "small" });
       const rep = h("button", { class: "secondary", onclick: () => makeReport(g.id, note) }, "отчёт");
-      const shop = h("a", { class: "button secondary", href: "#game/" + encodeURIComponent(g.id) },
-        g.kind === "built-in" ? "проверка" : "мастерская");
+      // a game of its own folder on the card (not a built-in one): deleted as on the device
+      const del = g.folder && g.kind !== "built-in" ?
+        h("button", { class: "danger", onclick: () => deleteGame(g, load) }, "удалить") : null;
       return h("tr", null, h("td", null, g.name, h("div", { class: "small" }, g.folder ? "/games/" + g.folder : "")),
         h("td", null, g.folder ? mb(g.size) : "—"), h("td", null, when(g.last)),
-        h("td", null, logs.length ? logs : h("span", { class: "small" }, "не запускалась"), rep, shop, note));
+        h("td", null, logs.length ? logs : h("span", { class: "small" }, "не запускалась"), rep, del, note));
     });
     list.replaceChildren(h("table", null, h("tr", null, h("th", null, "Игра"), h("th", null, "Размер"),
       h("th", null, "Последний запуск"), h("th", null, "Журналы")), rows));
@@ -479,10 +480,66 @@ async function gamesPage() {
       setTimeout(load, 2000);
   };
   $("#log-view").hidden = true;
+  $("#games-job").hidden = true;
   list.replaceChildren(h("p", { class: "small" }, "Загружаю…"));
   load();
+  resume("delete", $("#games-job"), () => load());
 }
 pages.games = gamesPage;
+
+// a game deleted from the card: the device's words (i18n S_OPT_DEL_GAME_ASK_FMT),
+// then a job of the device (big folders on exFAT take tens of seconds)
+async function deleteGame(g, reload) {
+  const size = g.size === null || g.size === undefined ? "размер ещё считается" : mb(g.size);
+  if (!confirm("Удалить игру «" + g.name + "» с карты игр (/games/" + g.folder + ", " + size + ")? " +
+    "Сохранения останутся в памяти приставки и вернутся, если поставить игру снова. " +
+    "Правки Мастерской останутся в /games/recipes.")) return;
+  try {
+    const r = await api("POST", "/api/game/" + encodeURIComponent(g.folder) + "/delete");
+    follow({ id: r.job, kind: "delete", title: g.name }, $("#games-job"), () => reload());
+  } catch (e) { say(e); }
+}
+
+// ---- the workshop: the games' recipes (#workshop) ---------------------------
+
+// 1 ключ, 2 ключа, 5 ключей
+function keysWord(n) {
+  const t = n % 10, hh = n % 100;
+  return n + (t === 1 && hh !== 11 ? " ключ" : t >= 2 && t <= 4 && (hh < 12 || hh > 14) ? " ключа" : " ключей");
+}
+
+const RECIPE_KIND = { "wine.ini": "Windows", "game.ini": "своя программа", "built-in": "встроенная" };
+
+async function workshopPage() {
+  const list = $("#workshop-list"), search = $("#workshop-search");
+  let games = [];
+  const fill = () => {
+    const q = search.value.trim().toLowerCase();
+    const shown = games.filter(g => !q || g.name.toLowerCase().includes(q) || (g.folder || g.id).toLowerCase().includes(q));
+    const rows = shown.map(g => {
+      const go = () => { location.hash = "#game/" + encodeURIComponent(g.id); };
+      const edits = g.kind === "built-in" ? "—" : g.layer_keys === null ? "не читаются" :
+        g.layer_keys ? "есть, " + keysWord(g.layer_keys) : "нет";
+      return h("tr", { class: "link", onclick: go },
+        h("td", null, h("a", { href: "#game/" + encodeURIComponent(g.id) }, g.name),
+          h("div", { class: "small" }, g.folder ? "/games/" + g.folder : "")),
+        h("td", null, RECIPE_KIND[g.kind] || g.kind), h("td", null, edits), h("td", null, when(g.last)),
+        h("td", null, g.running ? h("span", { class: "tag new" }, "идёт сейчас") : ""));
+    });
+    list.replaceChildren(shown.length ? h("table", null, h("tr", null, h("th", null, "Игра"), h("th", null, "Рецепт"),
+      h("th", null, "Правки"), h("th", null, "Последний запуск"), h("th", null, "")), rows) :
+      h("p", { class: "small" }, games.length ? "Ничего не нашлось." : "Игр нет."));
+  };
+  search.oninput = fill;
+  list.replaceChildren(h("p", { class: "small" }, "Загружаю…"));
+  try {
+    const r = await api("GET", "/api/games");
+    if (r.problem) banner(r.problem, true);
+    games = r.games;
+  } catch (e) { return say(e); }
+  fill();
+}
+pages.workshop = workshopPage;
 
 // ---- the workshop: a game's recipe and the check of it (#game/FOLDER) ----------
 
@@ -509,6 +566,61 @@ function setEdit(sec, key, v) {
     if (W.edits[sec]) { delete W.edits[sec][key]; if (!Object.keys(W.edits[sec]).length) delete W.edits[sec]; }
   } else (W.edits[sec] = W.edits[sec] || {})[key] = v;
   dirty(true);
+  renderEdits();
+}
+function savedVal(sec, key) { const s = (W.r.layer || {})[sec]; return s ? s[key] : undefined; }
+function sameVal(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+// the tab a key is edited on (renderTab() of it)
+function tabOf(sec, key) {
+  if (W.r.kind !== "wine") return "fine";
+  if (SCREEN_KEYS.some(([s, k]) => s === sec && k === key)) return "screen";
+  const e = schemaOf(sec, key);
+  if (e) return e.tab === "controls" ? "controls" : "fine";
+  return "fine";
+}
+
+// its tab opened, its field focused (its block of "Тонкое" opened, the search there cleared)
+function focusKey(sec, key) {
+  W.tab = tabOf(sec, key);
+  if (W.tab === "fine") { W.fineQuery = ""; W.fineOnly = false; (W.fineOpen = W.fineOpen || {})[blockOf(sec, key)] = true; }
+  renderTab();
+  const el = $$("#game-body .edit").find(x => x.dataset.key === sec + "/" + key);
+  if (!el) return banner("Поле [" + sec + "] " + key + " сейчас не показывается (оно зависит от других ключей).");
+  const d = el.closest("details");
+  if (d) d.open = true;
+  el.scrollIntoView({ block: "center" });
+  el.focus();
+}
+
+// "Мои правки": every key of the layer, the saved and the not saved ones
+function renderEdits() {
+  const box = $("#game-edits");
+  if (!W.r || !W.r.editable) { box.hidden = true; return; }
+  box.hidden = false;
+  const items = [];
+  const seen = new Set();
+  for (const src of [W.edits, W.r.layer || {}])
+    for (const [sec, keys] of Object.entries(src))
+      for (const key of Object.keys(keys)) {
+        if (seen.has(sec + "/" + key)) continue;
+        seen.add(sec + "/" + key);
+        items.push([sec, key]);
+      }
+  const line = ([sec, key]) => {
+    const ev = editVal(sec, key), sv = savedVal(sec, key);
+    const unsaved = !sameVal(ev, sv);
+    const name = (sec ? "[" + sec + "] " : "") + key;
+    const what = ev === undefined ? " — вернётся как в рецепте" :
+      ev === "" || (Array.isArray(ev) && !ev.length) ? " — убран из рецепта" : " = " + shown(ev);
+    return h("li", { class: unsaved ? "unsaved" : null },
+      h("a", { href: "#", onclick: e => { e.preventDefault(); focusKey(sec, key); } }, h("code", null, name)), what,
+      unsaved ? h("span", { class: "small" }, " (не сохранено)") : null,
+      ev === undefined ? null : h("button", { class: "x", title: "как в рецепте", "aria-label": "как в рецепте",
+        onclick: () => { setEdit(sec, key, undefined); renderTab(); } }, "×"));
+  };
+  box.replaceChildren(h("div", { class: "row-head" }, h("h3", null, "Мои правки")),
+    items.length ? h("ul", null, items.map(line)) : h("p", { class: "small" }, "правок нет"));
 }
 function shown(v) {
   if (v === undefined || v === null) return "—";
@@ -719,22 +831,65 @@ function envPresets() {
       } }, "добавить"), " ", h("b", null, p.name), h("div", { class: "small" }, h("code", null, p.value), " — ", p.hint))));
 }
 
-function fineTab() {
+const OTHER = "\u0001other";	// the block of the keys the schema does not know
+
+// the block of "Тонкое" a key is in: its section, or OTHER
+function blockOf(sec, key) { return schemaOf(sec, key) ? sec : OTHER; }
+
+// the keys of "Тонкое" by block, in the schema's order, the unknown ones last
+function fineKeys() {
   const list = W.r.kind === "native" ? W.schema.game : W.schema.wine;
   const shownKeys = new Set(W.r.kind === "native" ? [] : SCREEN_KEYS.map(x => x.join("/")));
-  const rows = [];
+  const blocks = new Map();
+  const add = (b, sec, key, e) => { if (!blocks.has(b)) blocks.set(b, []); blocks.get(b).push({ sec, key, e }); };
   for (const e of list) {
     if (e.hidden || shownKeys.has(e.section + "/" + e.key)) continue;
     if (W.r.kind !== "native" && (e.tab === "controls")) continue;
-    rows.push(fieldRow(e.section, e.key));
+    add(e.section, e.section, e.key, e);
   }
   // what the recipe or the layer has that the schema does not know
   const known = new Set(list.map(e => e.section + "/" + e.key));
   for (const src of [W.r.base || {}, W.edits])
     for (const [s, keys] of Object.entries(src))
       for (const k of Object.keys(keys))
-        if (!known.has(s + "/" + k)) { known.add(s + "/" + k); rows.push(fieldRow(s, k)); }
-  return [h("table", null, rows), W.r.kind === "native" ? null : envPresets()];
+        if (!known.has(s + "/" + k)) { known.add(s + "/" + k); add(OTHER, s, k, null); }
+  if (blocks.has(OTHER)) { const o = blocks.get(OTHER); blocks.delete(OTHER); blocks.set(OTHER, o); }
+  return blocks;
+}
+
+function fineTab() {
+  W.fineOpen = W.fineOpen || {};
+  const body = h("div");
+  const search = h("input", { type: "search", class: "search", placeholder: "Поиск по ключу, разделу, подсказке",
+    autocomplete: "off" });
+  search.value = W.fineQuery || "";
+  const only = h("input", { type: "checkbox" });
+  only.checked = !!W.fineOnly;
+  const presets = W.r.kind === "native" ? null : envPresets();
+  const fill = () => {
+    const q = (W.fineQuery || "").toLowerCase();
+    const set = (sec, key) => baseVal(sec, key) !== undefined || editVal(sec, key) !== undefined;
+    const out = [];
+    for (const [b, keys] of fineKeys()) {
+      const rows = keys.filter(({ sec, key, e }) => (!W.fineOnly || set(sec, key)) && (!q ||
+        key.toLowerCase().includes(q) || sec.toLowerCase().includes(q) || ("[" + sec + "]").includes(q) ||
+        (e && e.hint && e.hint.toLowerCase().includes(q))));
+      if (!rows.length) continue;
+      const title = b === OTHER ? "Прочее (ключей нет в схеме)" : b ? "[" + b + "]" : "Основные ключи (без раздела)";
+      const d = h("details", null, h("summary", null, title, h("span", { class: "small" }, "  " + rows.length)),
+        h("table", null, rows.map(({ sec, key }) => fieldRow(sec, key))));
+      d.open = q ? true : W.fineOpen[b] !== undefined ? W.fineOpen[b] : keys.some(({ sec, key }) => set(sec, key));
+      d.ontoggle = () => { if (!q) W.fineOpen[b] = d.open; };
+      out.push(d);
+    }
+    body.replaceChildren(...(out.length ? out : [h("p", { class: "small" }, "Ничего не нашлось.")]));
+    if (presets) presets.hidden = !!q;	// the env presets: not while searching
+  };
+  search.oninput = () => { W.fineQuery = search.value.trim(); fill(); };
+  only.onchange = () => { W.fineOnly = only.checked; fill(); };
+  fill();
+  return [h("div", { class: "actions" }, search, h("label", { class: "small" }, only, " только заданные (в рецепте или правках)")),
+    body, presets];
 }
 
 let checkTimer = null, checkStream = null;
@@ -883,6 +1038,7 @@ function exportTab() {
 
 function renderTab() {
   stopCheck();
+  renderEdits();
   const t = W.tab;
   $$("#game-tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
   const body = t === "controls" ? controlsTab() : t === "screen" ? screenTab() : t === "fine" ? fineTab() :
@@ -924,6 +1080,7 @@ function gameHead() {
 async function loadGame(folder) {
   stopCheck();
   W.folder = folder;
+  $("#game-edits").hidden = true;
   $("#game-body").replaceChildren(h("p", { class: "small" }, "Загружаю…"));
   try {
     if (!W.schema) {
@@ -935,6 +1092,7 @@ async function loadGame(folder) {
   } catch (e) { return say(e); }
   W.edits = clone(W.r.layer);
   W.hintTouched = editVal("", "hint") !== undefined;
+  W.fineQuery = ""; W.fineOnly = false; W.fineOpen = {};
   dirty(false);
   gameHead();
   renderTab();
