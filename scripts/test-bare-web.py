@@ -106,6 +106,7 @@ ENV = {
     "BARE_WEB_UNIT": os.path.join(BIN, "unit"), "BARE_WEB_REBOOT": os.path.join(BIN, "reboot"),
     "BARE_WEB_UPDATE_LOCK": os.path.join(STATE, "system-update.lock"), "BARE_WEB_NET": "192.168.7",
     "BARE_WEB_CARD_RW": os.path.join(BIN, "card-rw"), "BARE_WEB_IP": os.path.join(BIN, "ip"),
+    "BARE_WEB_ERRORS": os.path.join(SDK, "apps", "bare_app", "data", "errors.ini"),
     "GAME_INSTALL_GAMES": GAMES, "GAME_INSTALL_DATA": DATA, "GAME_INSTALL_RECIPES": os.path.join(TOP, "recipes"),
     "GAME_INSTALL_REDIST": os.path.join(TOP, "system-redist"), "GAME_INSTALL_LOCK": os.path.join(STATE, "gi.lock"),
     "GAME_INSTALL_CARD_RW": os.path.join(BIN, "card-rw"), "GAME_INSTALL_GUIDE": os.path.join(TOP, "guide.html"),
@@ -1582,6 +1583,162 @@ class RecipeTest(unittest.TestCase):
         # a base without top lines
         text = bw.merge_text("[keys]\na = b\n", [("", "mode", "1024x768")])
         self.assertEqual(bw.ini_sections(bw.ini_parse(text)), {"": {"mode": "1024x768"}, "keys": {"a": "b"}})
+
+def pe_i386(tag=b""):
+    """a file game-install takes for a 32-bit Windows DLL (MZ, PE, machine 0x14c)"""
+    h = bytearray(b"MZ" + b"\0" * 0x3a + (0x40).to_bytes(4, "little"))
+    h += b"PE\0\0" + (0x14c).to_bytes(2, "little") + b"\0" * 18 + tag
+    return bytes(h)
+
+
+def cab(name, data):
+    """a cabinet (MSCF) of one file, not compressed: as cabextract reads them"""
+    fname = name.encode() + b"\0"
+    files_off = 36 + 8
+    data_off = files_off + 16 + len(fname)
+    total = data_off + 8 + len(data)
+    out = b"MSCF" + (0).to_bytes(4, "little") + total.to_bytes(4, "little") + (0).to_bytes(4, "little")
+    out += files_off.to_bytes(4, "little") + (0).to_bytes(4, "little") + bytes([3, 1])
+    out += (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + b"\0\0" + b"\0\0" + b"\0\0"
+    out += data_off.to_bytes(4, "little") + (1).to_bytes(2, "little") + (0).to_bytes(2, "little")
+    out += len(data).to_bytes(4, "little") + (0).to_bytes(4, "little") + b"\0\0" + (0x5b21).to_bytes(2, "little")
+    out += (0).to_bytes(2, "little") + (0x20).to_bytes(2, "little") + fname
+    out += (0).to_bytes(4, "little") + len(data).to_bytes(2, "little") + len(data).to_bytes(2, "little") + data
+    return out
+
+
+HEAL_LOG = """bare_app: a launch of healme
+err:module:import_dll Library xinput1_3.dll (which is needed by L"C:\\\\windows\\\\system32\\\\x.exe") not found
+err:module:import_dll Library D3DX9_43.dll (which is needed by L"D:\\\\healme\\\\bin\\\\game.exe") not found
+err:module:loader_init Importing dlls for L"D:\\\\healme\\\\bin\\\\game.exe" failed, status c0000135
+fopen /games/healme/Save/slot1.sav: Read-only file system
+"""
+
+
+class HealTest(unittest.TestCase):
+    """stage 8: game-install heal through /api/heal (a game without a recipe)"""
+
+    def setUp(self):
+        self.game = os.path.join(GAMES, "healme")
+        for d in (self.game, os.path.join(GAMES, "recipes", "healme"), os.path.join(GAMES, "redist", "DirectX")):
+            shutil.rmtree(d, True)
+        os.makedirs(os.path.join(self.game, "bin"))
+        os.makedirs(os.path.join(self.game, "Save"))
+        touch(os.path.join(self.game, "bin", "game.exe"), b"MZ")
+        touch(os.path.join(self.game, "wine.ini"), b"name = Heal me\nexe = bin/game.exe\nwritable = Data\n")
+        os.makedirs(os.path.join(LOGS, "healme"), exist_ok=True)
+        touch(os.path.join(LOGS, "healme", "1.log"), HEAL_LOG.encode())
+        os.makedirs(os.path.join(GAMES, "redist", "DirectX"))
+        self.dll = pe_i386(b"d3dx9_43")
+        touch(os.path.join(GAMES, "redist", "DirectX", "Jun2010_d3dx9_43_x86.cab"), cab("d3dx9_43.dll", self.dll))
+        touch(os.path.join(GAMES, "redist", "xinput1_3.dll"), pe_i386(b"xinput"))
+        touch(os.path.join(GAMES, "redist", "x64only.dll"), pe_i386(b"")[:0x44] + (0x8664).to_bytes(2, "little"))
+        self.games_json()
+        del BARE_APP.lines[:]
+
+    def tearDown(self):
+        for d in (self.game, os.path.join(GAMES, "recipes"), os.path.join(GAMES, "redist", "DirectX"),
+                  os.path.join(LOGS, "healme")):
+            shutil.rmtree(d, True)
+        for f in ("xinput1_3.dll", "x64only.dll"):
+            os.remove(os.path.join(GAMES, "redist", f))
+
+    def games_json(self, running=None):
+        os.makedirs(ENV["BARE_WEB_RUN"], exist_ok=True)
+        with open(os.path.join(ENV["BARE_WEB_RUN"], "games.json"), "w") as f:
+            json.dump({"version": 1, "pid": os.getpid(), "running": running, "games": [
+                {"folder": "healme", "name": "Heal me", "kind": "wine", "key": "0000beef", "dir": self.game},
+                {"folder": "fake", "name": "Fake", "kind": "native", "key": "00000fa4",
+                 "dir": os.path.join(GAMES, "fake")},
+                {"folder": "homm3", "name": "Heroes", "kind": "homm3", "key": "fef6251f",
+                 "dir": os.path.join(GAMES, "heroes3")}]}, f)
+
+    def heal(self, kind, arg):
+        return jreq("POST", "/api/heal/healme", {"kind": kind, "arg": arg})
+
+    def test_suggestions(self):
+        s, r = jreq("GET", "/api/heal/healme")
+        self.assertEqual(s, 200, r)
+        self.assertEqual([(x["kind"], x["arg"]) for x in r["suggestions"]],
+                         [("dll", "D3DX9_43.dll"), ("writable", "Save/slot1.sav")])
+        # without loader_init's line (required) no library; a log without them: nothing
+        touch(os.path.join(LOGS, "healme", "1.log"), HEAL_LOG.replace("loader_init", "x").encode())
+        self.assertEqual([x["kind"] for x in jreq("GET", "/api/heal/healme")[1]["suggestions"]], ["writable"])
+        touch(os.path.join(LOGS, "healme", "1.log"), b"all well\n")
+        self.assertEqual(jreq("GET", "/api/heal/healme")[1]["suggestions"], [])
+        self.assertEqual(jreq("GET", "/api/heal/fake")[0], 400)
+        self.assertEqual(jreq("GET", "/api/heal/homm3")[0], 400)
+        self.assertEqual(jreq("GET", "/api/heal/nothere")[0], 404)
+
+    def test_dll(self):
+        n = len(card_rw_calls())
+        s, r = self.heal("dll", "D3DX9_43.dll")	# the log's case; the cabinet's member in lower case
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["line"], "done dll bin/D3DX9_43.dll")
+        self.assertEqual(open(os.path.join(self.game, "bin", "D3DX9_43.dll"), "rb").read(), self.dll)
+        gi = [c[0] for c in card_rw_calls()[n:] if c[2] in ("game-install", "python3")]
+        self.assertEqual(gi, ["begin", "end"])
+        self.assertEqual(self.heal("dll", "d3dx9_43.dll")[0], 400)	# there already (any case)
+        s, r = self.heal("dll", "xinput1_3.dll")	# a file of redist itself
+        self.assertEqual(s, 200, r)
+        s, r = self.heal("dll", "x64only.dll")	# 64-bit only: none
+        self.assertEqual(s, 400)
+        self.assertIn("redist", r["error"])
+        s, r = self.heal("dll", "nothere.dll")
+        self.assertEqual(s, 400)
+        self.assertFalse(os.path.exists(os.path.join(self.game, "bin", "nothere.dll")))
+        for bad in ("../x.dll", "a/b.dll", "x.exe", ""):
+            self.assertEqual(self.heal("dll", bad)[0], 400, bad)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.game, "bin"))),
+                         ["D3DX9_43.dll", "game.exe", "xinput1_3.dll"])
+        card_rw_balanced(self, n)
+
+    def test_writable(self):
+        layer = os.path.join(GAMES, "recipes", "healme", "wine.ini")
+        s, r = self.heal("writable", "Save/slot1.sav")	# not there: its directory
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["line"], "done writable Data Save")
+        self.assertIn("reload healme", BARE_APP.lines)
+        self.assertEqual([l for l in open(layer).read().splitlines() if not l.startswith(";")],
+                         ["writable = Data Save"])
+        mtime = os.stat(layer).st_mtime_ns
+        s, r = self.heal("writable", "save\\slot2.sav")	# there already (any case, "\\"): nothing written
+        self.assertEqual((s, r["line"]), (200, "done writable Data Save"))
+        self.assertEqual(os.stat(layer).st_mtime_ns, mtime)
+        # a layer of the player's: its other lines kept, its writable replaced
+        touch(layer, b"; mine\nmode = 640x480\nwritable = Data Save\n[keys]\na = esc\n")
+        touch(os.path.join(self.game, "game.cfg"), b"c")
+        s, r = self.heal("writable", "GAME.CFG")
+        self.assertEqual(s, 200, r)
+        self.assertEqual(open(layer).read(), "; mine\nmode = 640x480\nwritable = Data Save game.cfg\n[keys]\na = esc\n")
+        # a layer without writable: one line before its first section
+        touch(layer, b"[keys]\na = esc\n")
+        s, r = self.heal("writable", "new.ini")
+        self.assertEqual(r["line"], "done writable Data new.ini")
+        self.assertEqual(open(layer).read(), "writable = Data new.ini\n[keys]\na = esc\n")
+        # what writable cannot say, outside the game
+        for bad in ("../x", "/etc/x", "a b", "a,b", "C:\\x", ""):
+            self.assertEqual(self.heal("writable", bad)[0], 400, bad)
+        self.assertEqual(open(layer).read(), "writable = Data new.ini\n[keys]\na = esc\n")
+        # bare_app reads the layer: it is one by ini_layer's rules
+        self.assertEqual(bw.ini_sections(bw.ini_merge(bw.ini_parse(open(os.path.join(self.game, "wine.ini")).read()),
+                                                      bw.ini_parse(open(layer).read(), strict=True)))[""]["writable"],
+                         "Data new.ini")
+
+    def test_refused_while_running(self):
+        self.games_json(running={"folder": "healme"})
+        self.assertEqual(self.heal("dll", "xinput1_3.dll")[0], 409)
+        self.assertFalse(os.path.exists(os.path.join(self.game, "bin", "xinput1_3.dll")))
+        self.assertEqual(jreq("POST", "/api/heal/healme", {"kind": "rm", "arg": "x"})[0], 400)
+        # an install or removal running (game-install's lock): busy, nothing written
+        self.games_json()
+        with open(ENV["GAME_INSTALL_LOCK"], "a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            for kind, arg in (("dll", "xinput1_3.dll"), ("writable", "Save")):
+                s, r = self.heal(kind, arg)
+                self.assertEqual((s, r["line"].split(" ")[:2]), (409, ["fail", "busy"]), r)
+        self.assertFalse(os.path.exists(os.path.join(self.game, "bin", "xinput1_3.dll")))
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "recipes", "healme")))
 
 
 SHOT_HELPER = r"""

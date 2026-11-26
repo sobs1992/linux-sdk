@@ -64,6 +64,11 @@ password (Wi-Fi is later, with a PIN on the screen).
                                    wine.ini (the effective one: the game's with
                                    the layer), cover.png, README.md, manifest.section,
                                    needs.txt, logs/1.log
+  GET  /api/heal/FOLDER            what game-install heal can do for the game's last
+                                   launch (1.log by errors.ini's rules wine-missing-dll,
+                                   card-read-only): [{kind dll|writable, arg, text}]
+  POST /api/heal/FOLDER            {kind, arg}: game-install heal FOLDER KIND ARG
+                                   (writable: then FIFO "reload FOLDER"); 409 while it runs
   GET  /api/state                  state.json of bare_app: the game running, its
                                    frames a second, CPU, GPU, memory
   POST /api/game/FOLDER/launch|quit|options   FIFO launch, quit-game, options
@@ -99,7 +104,7 @@ BARE_WEB_AB_STATE, BARE_WEB_USB_DISK, BARE_WEB_UNIT, BARE_WEB_REBOOT,
 BARE_WEB_UPDATE_LOCK, BARE_WEB_BARE_BACKUP, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
 BARE_WEB_BIND, BARE_WEB_CARD_RW (card-rw), BARE_WEB_IP (ip); of bare_app BARE_WEB_RUN (games.json, state.json, ini/), BARE_WEB_CONF,
 BARE_WEB_CTL (its FIFO), BARE_WEB_WINE (bare_app_wine), BARE_WEB_SHOT, BARE_WEB_NATIVE_DIRS,
-BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks). A test names all of them (but PORT,
+BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks), BARE_WEB_ERRORS (errors.ini). A test names all of them (but PORT,
 BIND, NET) or none: one of them set and not all is refused at the start, never the device's
 own place for the rest.
 """
@@ -127,7 +132,8 @@ HOOKS = ("BARE_WEB_GAMES", "BARE_WEB_DATA", "BARE_WEB_LOGS", "BARE_WEB_STATIC", 
          "BARE_WEB_SYSTEM_UPDATE", "BARE_WEB_AB_STATE", "BARE_WEB_USB_DISK", "BARE_WEB_UNIT",
          "BARE_WEB_REBOOT", "BARE_WEB_BARE_BACKUP", "BARE_WEB_UPDATE_LOCK", "BARE_WEB_RUN",
          "BARE_WEB_CONF", "BARE_WEB_CTL", "BARE_WEB_WINE", "BARE_WEB_SHOT", "BARE_WEB_SYS_INPUT",
-         "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP")
+         "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP",
+         "BARE_WEB_ERRORS")
 NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET", "BARE_WEB_THP", "BARE_WEB_LIB")
 TEST = any(k.startswith("BARE_WEB_") and k not in NOT_HOOKS for k in os.environ)
 if TEST:
@@ -793,6 +799,7 @@ WINE = hook("BARE_WEB_WINE", "/usr/bin/bare_app_wine")
 SHOT = E("BARE_WEB_SHOT")	# else what bare_app's environment says (shot_path())
 SYS_INPUT = hook("BARE_WEB_SYS_INPUT", "/sys/class/input")
 DEV_INPUT = hook("BARE_WEB_DEV_INPUT", "/dev/input")
+ERRORS = hook("BARE_WEB_ERRORS", "/usr/share/bare_app/errors.ini")	# bare_app's rules of a log
 NATIVE_DIRS = (hook("BARE_WEB_NATIVE_DIRS", "/games /usr/share/bare_app/games") or "").split()
 RECIPES = os.path.join(GAMES, "recipes")
 SCHEMA = os.path.join(STATIC, "schema.json")
@@ -1344,6 +1351,89 @@ def recipe_of(folder, st=None):
         raise Refused(400, "У этой игры нет рецепта (wine.ini или game.ini), который можно править.")
     return r
 
+
+# ---- healing a game without a recipe (stage 8) ----------------------------------
+
+HEAL_RULES = {"wine-missing-dll": "dll", "card-read-only": "writable"}	# errors.ini's sections
+
+
+def error_rules():
+    """errors.ini's healable sections: {name: {match: [..], require: [..], exclude: [..]}}"""
+    out, sec = {}, None
+    for raw in (read(ERRORS, 1 << 20) or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] in ";#":
+            continue
+        if line.startswith("["):
+            sec = line[1:line.find("]")].strip() if "]" in line else None
+            if sec in HEAL_RULES:
+                out[sec] = {"match": [], "require": [], "exclude": []}
+            continue
+        k, eq, v = line.partition("=")
+        k = k.strip()
+        if eq and sec in out and k in ("match", "require", "exclude"):
+            v = re.split(r"\s[;#]", v.strip(), 1)[0]	# as it is: ini.c has no escapes
+            out[sec][k].append(v)
+    return out
+
+
+def find_piece(lines, piece, excl=()):
+    """game_errors.c find_piece(): the first line with piece (its "*" any
+    text, captured) and none of excl: (line, capture), None"""
+    head, star, tail = piece.partition("*")
+    for line in lines:
+        i = line.find(head)
+        if i < 0:
+            continue
+        j = line.find(tail, i + len(head)) if star else len(line)
+        if j < 0 or any(x in line for x in excl):
+            continue
+        return line, line[i + len(head):j].strip() if star else ""
+    return None
+
+
+def heal_suggestions(folder):
+    """what game-install heal can do for the game's last launch (1.log), by the
+    same rules as its error screen (errors.ini)"""
+    try:
+        with open(os.path.join(LOGS, folder, "1.log"), "rb") as f:
+            lines = f.read(4 << 20).decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for name, r in error_rules().items():
+        hit = None
+        for m in r["match"]:
+            hit = find_piece(lines, m, r["exclude"])
+            if hit:
+                break
+        if not hit or not all(find_piece(lines, q) for q in r["require"]):
+            continue
+        line, cap = hit
+        if HEAL_RULES[name] == "dll":
+            arg = os.path.basename(cap.replace("\\", "/"))
+            if re.match(r"^[A-Za-z0-9_.+-]+\.dll$", arg, re.I):
+                out.append({"rule": name, "kind": "dll", "arg": arg, "line": line,
+                            "text": "Положить библиотеку %s из папки redist в папку игры" % arg})
+        else:
+            # the path of the game's folder in that line: on the card or its copy
+            m = re.search(r"(?:/games|/data/wine/games)/%s/([^\s:'\"]+)" % re.escape(folder), line)
+            if m:
+                arg = m.group(1).rstrip(".,)")
+                out.append({"rule": name, "kind": "writable", "arg": arg, "line": line,
+                            "text": "Разрешить игре запись в %s (writable в правках рецепта)" % arg})
+    return out
+
+
+HEAL_WORDS = {
+    "need": "Библиотеки %s нет ни в папке redist на карте, ни в системе. Положите её (32-битную) или "
+            "установщик DirectX (directx_Jun2010_redist.exe) в папку redist и повторите.",
+    "exists": "Файл уже есть в папке игры: %s. Дело не в нём — сохраните отчёт.",
+    "gone": "Игры %s нет на карте (или это не игра Windows).",
+    "card": "Карту игр не удалось открыть для записи.",
+    "busy": "Сейчас идёт установка или удаление игры: дождитесь конца и повторите.",
+    "error": "Не вышло: %s",
+}
 
 def merge_text(base_text, layer):
     """the game's ini text with the layer's entries (ini_merge()'s rules, its
@@ -2764,6 +2854,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
         out = recipe_of(segs[1], st).describe(st)
         out.update(ok=True, **res)
         self.json(out)
+
+    # ---- healing a game without a recipe (stage 8)
+    def heal_game(self, segs):
+        if len(segs) != 2:
+            raise Refused(404, "?")
+        if not safe_name(segs[1]):
+            raise Refused(400, "Имя игры не подходит: %s" % segs[1])
+        g = game_entry(segs[1])
+        if not g:
+            raise Refused(404, "Такой игры нет: %s" % segs[1])
+        if g.get("kind") != "wine":
+            raise Refused(400, "Исправлять так можно только игры Windows.")
+        return g
+
+    def api_get_heal(self, segs, q):
+        try:
+            g = self.heal_game(segs)
+        except Refused as e:
+            return self.refused(e)
+        self.json({"folder": g["folder"], "suggestions": heal_suggestions(g["folder"])})
+
+    def api_post_heal(self, segs, q):
+        try:
+            g = self.heal_game(segs)
+            b = self.body_json() or {}
+            kind, arg = b.get("kind"), b.get("arg")
+            if kind not in ("dll", "writable") or not isinstance(arg, str) or not arg or len(arg) > 255 or \
+                    any(ord(c) < 32 for c in arg):
+                raise Refused(400, "Нужно {kind: dll|writable, arg}.")
+            if running_game() == g["folder"]:
+                raise Refused(409, "Игра идёт: сначала выйдите из неё.")
+        except Refused as e:
+            return self.refused(e)
+        rc, out, err = run([GAME_INSTALL, "heal", g["folder"], kind, arg], timeout=600)
+        last = ([l for l in out.splitlines() if l.startswith(("done ", "fail "))] or ["fail error " + err.strip()])[-1]
+        f = last.split(" ", 2) + ["", ""]
+        if f[0] == "done":
+            reloaded = ctl("reload " + g["folder"]) if kind == "writable" else None
+            text = ("Библиотека положена в папку игры: %s." % f[2] if kind == "dll" else
+                    "Игре разрешена запись: writable = %s (в правках рецепта). Действует со следующего запуска." % f[2])
+            return self.json({"ok": True, "line": last, "text": text, "reloaded": reloaded})
+        words = HEAL_WORDS.get(f[1], HEAL_WORDS["error"])
+        return self.fail(409 if f[1] == "busy" else 400, words % f[2] if "%s" in words else words, line=last)
 
     # ---- the check of a game (stage 5)
     def api_get_state(self, segs, q):

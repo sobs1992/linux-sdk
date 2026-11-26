@@ -391,8 +391,44 @@ async function openLog(g, n) {
   } catch (e) { return say(e); }
   $("#log-title").textContent = g.name + ": журнал " + n + (n === 1 ? " (последний запуск)" : "");
   $("#log-download").href = "/api/logs/" + encodeURIComponent(g.id) + "/" + n + "?download=1";
+  showHeal(g, n);
   v.hidden = false;
   v.scrollIntoView({ behavior: "smooth" });
+}
+
+// what the device can fix of a Windows game's last launch (stage 8): a library
+// from the redist folder, a path of the game made writable; then a new launch
+async function showHeal(g, n) {
+  const box = $("#log-heal");
+  box.hidden = true;
+  box.replaceChildren();
+  if (n !== 1 || g.kind !== "wine.ini" || !g.folder) return;
+  let r;
+  try { r = await api("GET", "/api/heal/" + encodeURIComponent(g.folder)); } catch (e) { return; }
+  if (!r.suggestions.length) return;
+  const note = h("div", { class: "small" });
+  const run = h("button", { class: "secondary", hidden: true }, "Запустить игру ещё раз");
+  run.onclick = async () => {
+    try { await api("POST", "/api/game/" + encodeURIComponent(g.folder) + "/launch"); note.textContent = "Игра запускается на приставке."; }
+    catch (e) { say(e); }
+  };
+  const buttons = r.suggestions.map(sg => {
+    const b = h("button", null, "Исправить: " + sg.text);
+    b.title = sg.line;
+    b.onclick = async () => {
+      b.disabled = true;
+      note.textContent = "Исправляю…";
+      try {
+        const x = await api("POST", "/api/heal/" + encodeURIComponent(g.folder), { kind: sg.kind, arg: sg.arg });
+        note.textContent = x.text;
+        run.hidden = false;
+      } catch (e) { note.textContent = ""; b.disabled = false; say(e); }
+    };
+    return b;
+  });
+  box.replaceChildren(h("p", null, "В журнале найдена ошибка, которую приставка может исправить сама:"),
+    h("div", { class: "actions" }, ...buttons, run), note);
+  box.hidden = false;
 }
 
 // a file of the device downloaded by the browser (the server says its name)

@@ -61,6 +61,21 @@ game-install: games copied onto the games card installed on the board
       with its .bin parts); "done removed NAME".
   An install and a removal hold the lock /run/game-install.lock (flock)
   while they run: a second one meanwhile fails at once ("fail busy").
+  game-install heal FOLDER dll NAME
+      the game in /games/FOLDER (a Windows game) misses the library NAME
+      (its log: "import_dll Library NAME ... not found"): NAME from the redist
+      folders (a file, or inside a DirectX cabinet, 32-bit) into the folder
+      of the game's program; "done dll PATH" (relative to the game's folder),
+      "fail need NAME" (in no redist folder), "fail exists PATH" (there
+      already), "fail gone FOLDER"
+  game-install heal FOLDER writable PATH
+      the game wrote into PATH of its folder on the read-only card: PATH
+      (relative; a file not there yet: the directory of the game's it is
+      in) one more "writable" entry of the game's layer (/games/recipes/
+      FOLDER/wine.ini, over its wine.ini): "done writable VALUE" (also when
+      it is there already: nothing written). The caller tells bare_app
+      (FIFO "reload FOLDER").
+      Both hold the lock of an install and write through card-rw.
   game-install recipe DIR
       what the recipes know of an installed game (DIR its folder on /games),
       for a recipe made of it (bare-web's export): lines, TAB between
@@ -1135,6 +1150,132 @@ def lock():
         die("%s: %s" % (LOCK, e))
 
 
+# ---- healing a game without a recipe (docs/web-service-plan.md, stage 8) ----
+
+FOLDER_OK = re.compile(r"^[^/\\\x00-\x1f]+$")
+
+
+def heal_game(folder):
+    """the game's folder on the card (its wine.ini there), else fail gone"""
+    if not FOLDER_OK.match(folder) or folder in (".", "..") or folder.startswith("."):
+        die("%s: not a folder of a game" % folder, "gone", folder)
+    d = os.path.join(GAMES, folder)
+    if os.path.islink(d) or not os.path.isfile(os.path.join(d, "wine.ini")):
+        die("%s: no Windows game there" % d, "gone", folder)
+    return d
+
+
+def heal_dll(folder, name):
+    """game-install heal FOLDER dll NAME: the library from the redist folder
+    (a file, or inside a DirectX cabinet) into the folder of the game's program"""
+    d = heal_game(folder)
+    if not re.match(r"^[A-Za-z0-9_.+-]+\.dll$", name, re.I):
+        die("%s: not the name of a library" % name, "error", "%s: not the name of a library" % name)
+    exe = (gamerecipe.wine_exe(d) or "").replace("\\", "/")
+    sub = os.path.dirname(exe) if exe and ":" not in exe and not exe.startswith("/") else ""
+    where = os.path.join(d, *[p for p in sub.split("/") if p])
+    if ".." in sub.split("/") or not os.path.isdir(where) or os.path.islink(where):
+        where = d
+    target = os.path.join(where, name)
+    there = [n for n in os.listdir(where) if n.lower() == name.lower()]
+    if there:
+        die("%s is there already" % os.path.join(where, there[0]), "exists", os.path.join(where, there[0]))
+    writable = card_rw(True)
+    try:
+        open_directx_package()	# Microsoft's package in redist: its cabinets out once (onto the card)
+        found = [p for p in lookup(name, True) if isinstance(p, str)]
+        if not found:
+            die("%s is in no redist folder" % name, "need", name)
+        tmp = target + ".part"
+        shutil.copyfile(found[0], tmp)
+        os.replace(tmp, target)
+        subprocess.run(["sync"])
+    finally:
+        if writable:
+            card_rw(False)
+    log("%s -> %s" % (found[0], target))
+    say("done dll %s" % os.path.relpath(target, d).replace(os.sep, "/"))
+
+
+def heal_writable(folder, path):
+    """game-install heal FOLDER writable PATH: PATH (relative to the game's
+    folder) one more entry of "writable" in the game's layer
+    (/games/recipes/FOLDER/wine.ini, over the game's wine.ini): the game gets
+    its own copy of it next to the Wine prefix"""
+    d = heal_game(folder)
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts or path.startswith(("/", "\\")) or ":" in path or \
+            any(ord(c) < 32 or c in " ,\t;#" for c in "".join(parts)):
+        die("%s: not a path writable takes (relative, no blank or comma)" % path, "error",
+            "%s: not a path writable takes" % path)
+    # the deepest part that is there (any case: the card's exFAT), the
+    # path itself if nothing of it is
+    real, p = [], d
+    for part in parts:
+        try:
+            hit = next((n for n in os.listdir(p) if n.lower() == part.lower()), None)
+        except OSError:
+            hit = None
+        if hit is None:
+            break
+        real.append(hit)
+        p = os.path.join(p, hit)
+    if real and not os.path.isdir(p):
+        entry = "/".join(real)	# a file that is there
+    elif real and len(real) < len(parts):
+        entry = "/".join(real)	# a file to be made in a directory of the game's: that directory
+    else:
+        entry = "/".join(real or parts)
+    layer = os.path.join(GAMES, "recipes", folder, "wine.ini")
+    if os.path.islink(layer) or os.path.islink(os.path.dirname(layer)):
+        die("%s is a link" % layer)
+    try:
+        text = open(layer, encoding="utf-8").read() if os.path.exists(layer) else ""
+    except (OSError, UnicodeDecodeError) as e:
+        die("%s: %s" % (layer, e))
+
+    def top_writable(t):
+        """(index of the line, value) of "writable" before the first section"""
+        for i, line in enumerate(t.splitlines()):
+            s = line.strip()
+            if s.startswith("["):
+                break
+            k, eq, v = s.partition("=")
+            if eq and not s.startswith((";", "#")) and k.strip().lower() == "writable":
+                return i, re.split(r"\s[;#]", v, 1)[0].strip()
+        return None, None
+    at, cur = top_writable(text)
+    if at is None:
+        _, cur = top_writable(open(os.path.join(d, "wine.ini"), encoding="utf-8", errors="replace").read())
+    have = [x for x in re.split(r"[\s,]+", cur or "") if x]
+    low = [x.replace("\\", "/").strip("/").lower() for x in have]
+    if any(entry.lower() == x or entry.lower().startswith(x + "/") for x in low):
+        say("done writable %s" % " ".join(have))	# already: nothing written
+        return
+    value = " ".join(have + [entry])
+    lines = text.splitlines()
+    if at is not None:
+        lines[at] = "writable = %s" % value
+    else:
+        first = next((i for i, l in enumerate(lines) if l.strip().startswith("[")), len(lines))
+        if not text:
+            lines = ["; the player's changes of %s's recipe (game-install heal)" % folder]
+            first = 1
+        lines.insert(first, "writable = %s" % value)
+    writable = card_rw(True)
+    try:
+        os.makedirs(os.path.dirname(layer), exist_ok=True)
+        tmp = layer + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, layer)
+        subprocess.run(["sync"])
+    finally:
+        if writable:
+            card_rw(False)
+    say("done writable %s" % value)
+
+
 def recipe_info(d):
     """game-install recipe DIR"""
     if not os.path.isdir(d):
@@ -1200,6 +1341,10 @@ def main():
         lock()
         remove(a[1])
         return
+    if a[:1] == ["heal"] and len(a) == 4 and a[2] in ("dll", "writable"):
+        lock()
+        (heal_dll if a[2] == "dll" else heal_writable)(a[1], a[3])
+        return
     if a[:1] == ["recipe"] and len(a) == 2:
         recipe_info(a[1])
         return
@@ -1207,7 +1352,7 @@ def main():
         prepare_card()
         return
     die("usage: game-install scan [DIR] | install PATH [--replace] [--exe EXE --title TITLE] | "
-        "remove PATH | recipe DIR | prepare-card")
+        "remove PATH | heal FOLDER dll|writable ARG | recipe DIR | prepare-card")
 
 
 if __name__ == "__main__":
