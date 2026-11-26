@@ -440,6 +440,24 @@ class Test(unittest.TestCase):
         time.sleep(1.05)
         self.assertTrue(self.bb("auto", "pirates").stdout.strip().endswith("-auto.zip"))
 
+    def test_copies(self):
+        """copies FOLDER: the game's copies of the card and of /data, newest first"""
+        card, data = os.path.join(self.games, "backups"), os.path.join(self.data, "backups")
+        for d, n in ((card, "saves-pirates-2026-11-20_10-00-00.zip"), (data, "saves-pirates-2026-11-25_09-00-00.zip"),
+                     (card, "saves-pirates-2026-11-24_08-00-00-auto.zip"), (card, "saves-pirates-x-2026-11-26_08-00-00.zip"),
+                     (card, "saves-all-2026-11-26_08-00-00.zip"), (card, "saves-pirates-junk.zip"),
+                     (data, "saves-homm3-2026-11-26_08-00-00.zip")):
+            put(os.path.join(d, n), "z" * 10)
+        os.makedirs(os.path.join(card, "saves-pirates-2026-11-26_01-00-00.zip"))	# a directory: none
+        lines = self.bb("copies", "pirates").stdout.splitlines()
+        self.assertEqual([l.split("\t") for l in lines], [
+            ["data", os.path.join(data, "saves-pirates-2026-11-25_09-00-00.zip"), "10", "2026-11-25_09-00-00", "-"],
+            ["card", os.path.join(card, "saves-pirates-2026-11-24_08-00-00-auto.zip"), "10", "2026-11-24_08-00-00", "auto"],
+            ["card", os.path.join(card, "saves-pirates-2026-11-20_10-00-00.zip"), "10", "2026-11-20_10-00-00", "-"]])
+        self.assertEqual(self.bb("copies", "worms").stdout, "")
+        for bad in ((), ("../x",), ("a/b",), ("pirates", "homm3")):
+            self.assertEqual(self.bb("copies", *bad, ok=False).returncode, 2, bad)
+
     def test_auto_nothing(self):
         shutil.rmtree(self.pir_saves)
         self.assertEqual(self.bb("auto", "pirates").stdout.strip(), "nothing")
@@ -448,6 +466,10 @@ class Test(unittest.TestCase):
     # ---- everything ----
 
     def test_all(self):
+        # the PIN of the device in a browser (bare-web over Wi-Fi) never goes into a copy
+        put(os.path.join(self.data, "bare-web.pin"), "735194\n")
+        with open(self.conf, "a") as f:
+            f.write("web_pin=735194\n")
         put(os.path.join(self.games, "recipes", "pirates", "wine.ini"), "mode = 1024x768\n")
         put(os.path.join(self.games, "recipes", "worms", "wine.ini"), "mode = 640x480\n")
         path = self.backup("all")
@@ -456,6 +478,10 @@ class Test(unittest.TestCase):
             names = z.namelist()
             conf = z.read("bare_app.conf").decode()
             m = json.loads(z.read("manifest.json"))
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                self.assertNotIn("bare-web.pin", n)
+                self.assertNotIn(b"735194", z.read(n), n)
         self.assertIn("lang=ru", conf)
         self.assertNotIn("wifi", conf)
         self.assertNotIn("bluetooth", conf)

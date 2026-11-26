@@ -12,6 +12,9 @@ stage 2), for the device in a browser (bare-web), for bare_app after each game, 
   bare-backup list [DIR]                the copies there (else on the card and in /data)
                                         and the games' data, JSON
   bare-backup info ZIP                  the copy's manifest, JSON
+  bare-backup copies FOLDER             the game's copies on the card and in /data, the
+                                        newest first, a line each (bare_app's options
+                                        screen): WHERE<tab>PATH<tab>SIZE<tab>DATE<tab>auto|-
 
 What a game's data is comes from bare_app itself: /run/bare_app/games.json (its folder,
 key, the data directories of game_def.storage), so bare_app must run. A copy is a zip,
@@ -987,6 +990,16 @@ def cmd_list(args):
     print(json.dumps(out, ensure_ascii=False))
 
 
+def cmd_copies(args):
+    if len(args) != 1 or not safe_folder(args[0]):
+        raise Fail("copies FOLDER", 2)
+    mine = [c for c in copies([("card", CARD_BACKUPS), ("data", DATA_BACKUPS)]) if c["folder"] == args[0]]
+    mine.sort(key=lambda c: (c["date"], c["name"]), reverse=True)
+    for c in mine:
+        print("%s\t%s\t%d\t%s\t%s" % (c["where"], os.path.join(c["dir"], c["name"]), c["size"], c["date"],
+                                      "auto" if c["auto"] else "-"))
+
+
 def cmd_info(args):
     if len(args) != 1:
         raise Fail("info ZIP", 2)
@@ -1000,7 +1013,7 @@ def cmd_info(args):
 
 def main(argv):
     cmds = {"backup": cmd_backup, "auto": cmd_auto, "restore": cmd_restore, "list": cmd_list,
-            "info": cmd_info}
+            "info": cmd_info, "copies": cmd_copies}
     if len(argv) < 2 or argv[1] not in cmds:
         say(__doc__.strip().splitlines()[0])
         return 2
