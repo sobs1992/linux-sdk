@@ -449,7 +449,7 @@ pages.games = gamesPage;
 
 const W = { folder: null, r: null, schema: null, edits: {}, tab: "controls", hintTouched: false, stop: [] };
 const LISTS = ["reg", "modes", "saves", "needs"];
-const TABS = { controls: "Управление", screen: "Экран", fine: "Тонкое", check: "Проверка" };
+const TABS = { controls: "Управление", screen: "Экран", fine: "Тонкое", check: "Проверка", export: "Экспорт" };
 const GROUPS = { key: "клавиша", mouse: "мышь", pad: "геймпад", special: "особое" };
 
 function isList(sec, key) { return sec === "" && LISTS.includes(key); }
@@ -801,13 +801,55 @@ function checkTab() {
     h("h3", null, "Журнал запуска (живьём)"), logPre];
 }
 
+// the recipe of the game as a zip for the SDK (scripts/recipe-import.py on the PC)
+function exportTab() {
+  const note = h("span", { class: "small" });
+  const b = h("button", null, "Скачать рецепт (zip)");
+  b.onclick = async () => {
+    if (isDirty && !confirm("На странице есть несохранённые правки: в рецепт попадёт только сохранённое. Продолжить?")) return;
+    b.disabled = true;
+    note.textContent = "Собираю…";
+    try {
+      let r;
+      try {
+        r = await fetch("/api/recipe/" + encodeURIComponent(W.folder) + "/export",
+          { method: "POST", headers: Object.assign({}, FROM_PAGE) });
+      } catch (e) { throw new Error("Приставка не отвечает. Проверьте кабель USB."); }
+      if (!r.ok) {
+        let j = null;
+        try { j = await r.json(); } catch (e) { /* not JSON */ }
+        throw new Error((j && j.error) || ("Ошибка " + r.status));
+      }
+      const cd = r.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+      const name = m ? decodeURIComponent(m[1]) : "recipe-" + W.folder + ".zip";
+      const url = URL.createObjectURL(await r.blob());
+      const a = h("a", { href: url, download: name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      note.textContent = "Скачан " + name + ".";
+    } catch (e) { note.textContent = ""; say(e); }
+    b.disabled = false;
+  };
+  return [
+    h("p", null, "Рецепт игры для репозитория SDK: действующий " + (W.r.ini || "ini") +
+      " (рецепт с сохранёнными правками), обложка, заготовка README.md, секция для games.manifest, " +
+      "файлы с компьютера, которые рецепт берёт (needs.txt), и журнал последнего запуска."),
+    h("p", { class: "small" }, "На компьютере: python3 scripts/recipe-import.py ФАЙЛ.zip в каталоге SDK — разложит " +
+      "файлы в games/" + W.folder + "/ и допишет секцию в games/games.manifest; source и README заполняются руками."),
+    h("div", { class: "actions" }, b, note)];
+}
+
 function renderTab() {
   stopCheck();
   const t = W.tab;
   $$("#game-tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
-  const body = t === "controls" ? controlsTab() : t === "screen" ? screenTab() : t === "fine" ? fineTab() : checkTab();
+  const body = t === "controls" ? controlsTab() : t === "screen" ? screenTab() : t === "fine" ? fineTab() :
+    t === "export" ? exportTab() : checkTab();
   $("#game-body").replaceChildren(...body.filter(x => x));
-  $("#game-bar").hidden = t === "check" || !W.r.editable;
+  $("#game-bar").hidden = t === "check" || t === "export" || !W.r.editable;
 }
 
 let isDirty = false;
@@ -825,7 +867,8 @@ function gameHead() {
     (r.layer ? " · правки " + r.layer_path : " · правок нет") + (r.running ? " · идёт сейчас" : "");
   if (r.layer_problem) banner("Файл правок не читается (" + r.layer_problem + "): сохраните заново или сбросьте.", true);
   else if (r.layer_state === "broken") banner("bare_app не принял правки: " + (r.layer_error || "?"), true);
-  const tabs = r.kind === "wine" ? ["controls", "screen", "fine", "check"] : r.kind === "native" ? ["fine", "check"] : ["check"];
+  const tabs = r.kind === "wine" ? ["controls", "screen", "fine", "check", "export"] :
+    r.kind === "native" ? ["fine", "check", "export"] : ["check"];
   if (!tabs.includes(W.tab)) W.tab = tabs[0];
   $("#game-tabs").replaceChildren(...tabs.map(t => {
     const b = h("button", { class: "tab" }, TABS[t]);

@@ -1399,6 +1399,130 @@ class RecipeTest(unittest.TestCase):
         if os.path.isfile(HOST_WINE):
             names = {(a["group"], a["name"]) for a in r["actions"]}
             self.assertLessEqual({("key", "esc"), ("mouse", "lbutton"), ("pad", "pad_a"), ("stick", "numpad")}, names)
+    def export(self, folder):
+        s, h, d = req("POST", "/api/recipe/%s/export" % folder)
+        return s, dict(h), d
+
+    def test_export(self):
+        """POST export: the zip of a recipe for the SDK (stage 6)"""
+        s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {
+            "": {"mode": "1024x768", "modes": ["1280x960", "1600x1200"], "dlls": ""},
+            "keys": {"select": "esc"}, "labels.ru": {"f4": "карта мира"}, "newsec": {"k": "v"}}})
+        self.assertEqual(s, 200, r)
+        info = {"gameId": "1234567", "name": "Pirates GOG", "playTasks": [
+            {"isPrimary": True, "path": "Pirates!.exe", "type": "FileTask"}]}
+        for n, data in (("goggame-1234567.info", json.dumps(info).encode()), ("cover.png", b"\x89PNG-cover"),
+                        ("__redist/x.cab", b"c"), ("tmp/t", b"t")):
+            os.makedirs(os.path.dirname(os.path.join(self.pirates, n)), exist_ok=True)
+            touch(os.path.join(self.pirates, n), data)
+        os.makedirs(os.path.join(LOGS, "pirates"), exist_ok=True)
+        log = "bare_app: a launch\n\xff not utf-8\n".encode("latin-1")
+        touch(os.path.join(LOGS, "pirates", "1.log"), log)
+        before = card_rw_calls()
+        pop = os.path.join(GAMES, "pop")
+        try:
+            s, h, d = self.export("pirates")
+            self.assertEqual(s, 200, d[:300])
+            self.assertEqual(h["Content-Type"], "application/zip")
+            self.assertIn("recipe-pirates-ogu-test-", h["Content-Disposition"])
+            z = zipfile.ZipFile(io.BytesIO(d))
+            self.assertEqual(sorted(z.namelist()), sorted([
+                "games/pirates/overlay/wine.ini", "games/pirates/cover.png", "games/pirates/README.md",
+                "manifest.section", "needs.txt", "logs/1.log"]))
+            ini = z.read("games/pirates/overlay/wine.ini").decode()
+            self.assertRegex(ini.splitlines()[0], r"^; made on the device ogu-test \d{4}-\d\d-\d\d, from "
+                             r"GOG 1234567 \(Pirates GOG\), with the player's changes$")
+            # the effective values (as the page shows them), the recipe's comments kept
+            s, r = jreq("GET", "/api/recipe/pirates")
+            self.assertEqual(bw.ini_sections(bw.ini_parse(ini)), r["effective"])
+            self.assertEqual(r["effective"][""]["modes"], ["1280x960", "1600x1200"])
+            self.assertNotIn("dlls", r["effective"][""])
+            self.assertEqual(r["effective"]["newsec"], {"k": "v"})
+            base = open(os.path.join(self.pirates, "wine.ini")).read()
+            comments = [l for l in base.splitlines() if l.startswith(";")]
+            self.assertEqual([l for l in ini.splitlines()[1:] if l.startswith(";")], comments)
+            self.assertEqual(z.read("games/pirates/cover.png"), b"\x89PNG-cover")
+            self.assertEqual(z.read("logs/1.log"), log)
+            self.assertEqual(z.read("needs.txt"), b"")
+            sec = z.read("manifest.section").decode().splitlines()
+            self.assertEqual(sec[0], "[pirates]")
+            for line in ("detect = Pirates!.exe", "gog = 1234567", "source = lab/games/Sid Meier's Pirates!",
+                         "exclude = goggame-*", "exclude = __redist", "exclude = tmp",
+                         "overlay = games/pirates/overlay", "cover = games/pirates/cover.png"):
+                self.assertIn(line, sec)
+            self.assertNotIn("exclude = commonappdata", sec)
+            readme = z.read("games/pirates/README.md").decode()
+            self.assertTrue(readme.startswith("# Sid Meier's Pirates!\n"), readme)
+            self.assertIn("GOG id 1234567", readme)
+            # nothing written on the card for it
+            self.assertEqual(card_rw_calls()[len(before):], [])
+            # a game of a firmware recipe (pop: detect, gog of the manifest), no layer, no cover or log
+            os.makedirs(pop, exist_ok=True)
+            touch(os.path.join(pop, "POP.EXE"))
+            touch(os.path.join(pop, "prince.bf"))
+            touch(os.path.join(pop, "wine.ini"), b"; pop\nname = Prince\nexe = poplaunch.exe\n")
+            with open(os.path.join(ENV["BARE_WEB_RUN"], "games.json")) as f:
+                gj = json.load(f)
+            gj["games"].append({"folder": "pop", "name": "Prince", "kind": "wine", "key": "0000f0f0", "dir": pop})
+            with open(os.path.join(ENV["BARE_WEB_RUN"], "games.json"), "w") as f:
+                json.dump(gj, f)
+            s, h, d = self.export("pop")
+            self.assertEqual(s, 200, d[:300])
+            z = zipfile.ZipFile(io.BytesIO(d))
+            self.assertEqual(sorted(z.namelist()), ["games/pop/README.md", "games/pop/overlay/wine.ini",
+                                                    "manifest.section", "needs.txt"])
+            ini = z.read("games/pop/overlay/wine.ini").decode()
+            self.assertEqual(ini.splitlines()[1:], ["; pop", "name = Prince", "exe = poplaunch.exe"])
+            self.assertIn("the firmware's recipe [pop]", ini.splitlines()[0])
+            self.assertNotIn("player's changes", ini.splitlines()[0])
+            sec = z.read("manifest.section").decode().splitlines()
+            self.assertIn("detect = POP.EXE | prince.bf", sec)
+            self.assertFalse([l for l in sec if l.startswith(("gog", "exclude", "cover"))], sec)
+            # a game.ini game: its game.ini; bare_app's own games and none: refused
+            s, h, d = self.export("fake")
+            self.assertEqual(s, 200, d[:300])
+            self.assertIn("games/fake/overlay/game.ini", zipfile.ZipFile(io.BytesIO(d)).namelist())
+            self.assertEqual(self.export("homm3")[0], 400)
+            self.assertEqual(self.export("nothere")[0], 404)
+            self.assertEqual(self.export("..")[0], 400)
+            self.assertEqual(req("GET", "/api/recipe/pirates/export")[0], 404)	# no GET
+            self.assertEqual(req("POST", "/api/recipe/pirates/export", page=False)[0], 403)
+        finally:
+            for n in ("goggame-1234567.info", "cover.png"):
+                os.remove(os.path.join(self.pirates, n))
+            for n in ("__redist", "tmp"):
+                shutil.rmtree(os.path.join(self.pirates, n))
+            shutil.rmtree(pop, True)
+            os.remove(os.path.join(LOGS, "pirates", "1.log"))
+
+    def test_merge_text(self):
+        """the effective ini as text: the same values as ini_merge(), the game's lines kept"""
+        base = ("; top\nname = G\nreg = A=1\n; between\nreg = B=2\nmode = 800x600 ; inline\nMode = 640x480\n"
+                "dlls = d3d9\n\n[keys]\n; k\na = esc\nb = enter\n[Labels]\na = x\n")
+        layers = [
+            [],
+            [("", "mode", "1024x768")],
+            [("", "MODE", "1024x768"), ("", "reg", "C=3"), ("", "reg", "D=4")],
+            [("", "reg", ""), ("", "dlls", "")],
+            [("", "gamma", "1.2"), ("keys", "A", "lbutton"), ("keys", "x", "f1"), ("labels", "b", "y")],
+            [("new", "k", "v"), ("", "saves", "S"), ("keys", "b", "")],
+            [("", "mode", "1"), ("", "mode", "2"), ("", "modes", "1280x960")],
+            [("", "nothere", "")],
+        ]
+        for layer in layers:
+            with self.subTest(layer=layer):
+                text = bw.merge_text(base, layer)
+                want = bw.ini_sections(bw.ini_merge(bw.ini_parse(base), layer))
+                self.assertEqual(bw.ini_sections(bw.ini_parse(text)), want, text)
+                # a key the layer sets: one line of it (the base's others dropped)
+                keys = [(e[0].lower(), e[1].lower()) for e in bw.ini_parse(text)]
+                for sec, k, v in layer:
+                    if v and not bw.is_list(sec, k):
+                        self.assertEqual(keys.count((sec.lower(), k.lower())), 1, text)
+                self.assertEqual([l for l in text.splitlines() if l.startswith(";")], ["; top", "; between", "; k"])
+        # a base without top lines
+        text = bw.merge_text("[keys]\na = b\n", [("", "mode", "1024x768")])
+        self.assertEqual(bw.ini_sections(bw.ini_parse(text)), {"": {"mode": "1024x768"}, "keys": {"a": "b"}})
 
 
 SHOT_HELPER = r"""

@@ -60,6 +60,17 @@ game-install: games copied onto the games card installed on the board
       with its .bin parts); "done removed NAME".
   An install and a removal hold the lock /run/game-install.lock (flock)
   while they run: a second one meanwhile fails at once ("fail busy").
+  game-install recipe DIR
+      what the recipes know of an installed game (DIR its folder on /games),
+      for a recipe made of it (bare-web's export): lines, TAB between
+        recipe NAME          the games.manifest section it is ("-" none)
+        detect FILES         that section's "detect" ("a.exe | b.dat")
+        gog ID NAME          a goggame-<ID>.info in DIR (GOG's name of it)
+        primary EXE          GOG's primary program (relative to DIR, "/")
+        need SPEC            a file the section takes from a PC (its file
+                             and data lines outside its source and the
+                             recipes: lab/redist/..., an env path)
+      reads only (no lock, the card not written).
   game-install prepare-card
       the card's install and redist folders, each with a text saying what
       goes into it (renewed when the system's text differs), and the user guide (the system's
@@ -1051,6 +1062,39 @@ def lock():
         die("%s: %s" % (LOCK, e))
 
 
+def recipe_info(d):
+    """game-install recipe DIR"""
+    if not os.path.isdir(d):
+        die("%s is not there" % d, "gone", d)
+    hit = gamerecipe.recipe_of(d, sections())
+    name, g = hit if hit else ("-", {})
+    say("recipe\t%s" % name)
+    if g.get("detect"):
+        say("detect\t%s" % g["detect"])
+    for n in sorted(os.listdir(d)):
+        m = re.match(r"goggame-(\d+)\.info$", n, re.I)
+        if m:
+            try:
+                info = json.load(open(os.path.join(d, n), encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                info = {}
+            say("gog\t%s\t%s" % (m.group(1), str(info.get("name") or "").replace("\t", " ")))
+    primary = gog_info(d)[1]
+    if primary:
+        say("primary\t%s" % primary)
+    orig = (g.get("source") or "").rstrip("/")
+    for spec in [gamerecipe.arrow(x)[0] for x in g.get("file", []) + g.get("data", [])]:
+        if orig and (spec == orig or spec.startswith(orig + "/")):
+            continue	# a file of the game itself
+        if gamerecipe.sources(spec):
+            continue	# a file of the recipes themselves
+        say("need\t%s" % spec)
+    for spec in g.get("env", []):
+        v = spec.partition("=")[2].strip()
+        if v.startswith("/") and not os.path.exists(v):
+            say("need\t%s" % v)
+
+
 def main():
     # stopped (SIGTERM, SIGHUP): the finally blocks still run (card-rw end)
     for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -1083,11 +1127,14 @@ def main():
         lock()
         remove(a[1])
         return
+    if a[:1] == ["recipe"] and len(a) == 2:
+        recipe_info(a[1])
+        return
     if a == ["prepare-card"]:
         prepare_card()
         return
     die("usage: game-install scan [DIR] | install PATH [--replace] [--exe EXE --title TITLE] | "
-        "remove PATH | prepare-card")
+        "remove PATH | recipe DIR | prepare-card")
 
 
 if __name__ == "__main__":

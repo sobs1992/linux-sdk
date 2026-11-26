@@ -59,6 +59,11 @@ password (Wi-Fi is later, with a PIN on the screen).
   POST /api/recipe/FOLDER/adopt-controls  the player's buttons (controls.<key>)
                                    into the layer's [keys] and [labels], then
                                    dropped from bare_app.conf (import-settings)
+  POST /api/recipe/FOLDER/export   a zip of a recipe made of the game for the SDK
+                                   (scripts/recipe-import.py): games/FOLDER/overlay/
+                                   wine.ini (the effective one: the game's with
+                                   the layer), cover.png, README.md, manifest.section,
+                                   needs.txt, logs/1.log
   GET  /api/state                  state.json of bare_app: the game running, its
                                    frames a second, CPU, GPU, memory
   POST /api/game/FOLDER/launch|quit|options   FIFO launch, quit-game, options
@@ -99,6 +104,7 @@ BIND, NET) or none: one of them set and not all is refused at the start, never t
 own place for the rest.
 """
 import http.server
+import io
 import json
 import os
 import re
@@ -109,6 +115,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import zipfile
 import zlib
 
 E = os.environ.get
@@ -1338,6 +1345,192 @@ def recipe_of(folder, st=None):
     return r
 
 
+def merge_text(base_text, layer):
+    """the game's ini text with the layer's entries (ini_merge()'s rules, its
+    result as ini_parse() reads it) and the game's comments kept: a key the
+    layer has its value in the base's first line of it (the others dropped),
+    a list where its first line was, a key the base has not at the end of its
+    section (a section the base has not at the end)"""
+    def low(sk):
+        return (sk[0].lower(), sk[1].lower())
+    lists, scalars, order = {}, {}, []
+    for sec, k, v in layer:
+        key = low((sec, k))
+        if is_list(sec, k):
+            lists.setdefault(key, [])
+            if v:
+                lists[key].append((k, v))
+        else:
+            scalars[key] = (k, v)
+        if key not in order:
+            order.append(key)
+    out, done = [], set()
+    sec, sec_end = "", {}
+    for raw in base_text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            e = line.find("]")
+            sec = (line[1:e] if e > 0 else line[1:]).strip()[:63]
+            out.append(raw)
+            sec_end[sec.lower()] = len(out)
+            continue
+        k, eq, _ = line.partition("=")
+        if not line or line[0] in ";#" or not eq or not k.strip():
+            out.append(raw)
+            sec_end[sec.lower()] = len(out)
+            continue
+        key = low((sec, k.strip()))
+        if key in lists:
+            if key not in done:
+                out += ["%s = %s" % (lk, lv) for lk, lv in lists[key]]
+            done.add(key)
+        elif key in scalars:
+            if key not in done and scalars[key][1]:
+                out.append("%s = %s" % (k.strip(), scalars[key][1]))
+            done.add(key)
+        else:
+            out.append(raw)
+        sec_end[sec.lower()] = len(out)
+    adds = {}
+    for key in order:
+        if key in done:
+            continue
+        lines = (["%s = %s" % kv_ for kv_ in lists[key]] if key in lists else
+                 ["%s = %s" % scalars[key]] if scalars[key][1] else [])
+        if lines:
+            adds.setdefault(key[0], []).extend(lines)
+    new_secs = []
+    for sname, lines in sorted(adds.items(), key=lambda a: -sec_end.get(a[0], -1)):
+        if sname in sec_end:
+            at = sec_end[sname]
+            out[at:at] = lines
+        else:
+            new_secs.append((sname, lines))
+    if "" in dict(new_secs):	# a top key, the base has no line at the top: before its first section
+        at = next((i for i, l in enumerate(out) if l.strip().startswith("[")), len(out))
+        out[at:at] = dict(new_secs).pop("") + [""]
+        new_secs = [x for x in new_secs if x[0]]
+    for sname, lines in new_secs:
+        out += ["", "[%s]" % sname] + lines
+    return "\n".join(out) + "\n"
+
+
+def unit_label():
+    _, label, _ = run([UNIT, "label"], timeout=5)
+    return label.strip() or (kv(read(RELEASE) or "").get("FIRMWARE") or "?")
+
+
+def recipe_info(d):
+    """game-install recipe DIR: (lines by kind {kind: [fields...]})"""
+    rc, out, _ = run([GAME_INSTALL, "recipe", d], timeout=60)
+    info = {}
+    if rc != 0:
+        return info
+    for line in out.splitlines():
+        f = line.split("\t")
+        if f and f[0] in ("recipe", "detect", "gog", "primary", "need"):
+            info.setdefault(f[0], []).append(f[1:])
+    return info
+
+
+README_TEMPLATE = """# {name}
+
+{name}, {edition}, {engine} on the GO Ultra (manifest `[{folder}]`,
+{ini} in `overlay/`). Made on the device {unit} on {date} (bare-web's
+export: the recipe of the device with the player's changes).
+
+TODO, fill in before the review:
+- the edition (the year, the publisher, the version; GOG id {gog});
+- what was checked: the start, the menus, a level or a scene, saving and
+  loading, the controls, the frame rate;
+- what is not done or known wrong.
+"""
+
+
+def export_zip(r, st):
+    """the zip of POST /api/recipe/FOLDER/export: (bytes, its name)"""
+    g, folder = r.g, r.folder
+    d = g.get("dir") or os.path.join(GAMES, folder)
+    base_text = read(r.base_path, 1 << 20) or ""
+    raw = r.layer_raw()
+    layer = None
+    if raw is not None:
+        try:
+            layer = ini_parse(raw, strict=True)
+        except IniError:
+            layer = None	# not taken by bare_app either: the game's ini as it is
+    text = merge_text(base_text, layer) if layer else base_text
+    info = recipe_info(d)
+    gog = [x for x in info.get("gog", []) if x and x[0]]
+    known = (info.get("recipe") or [["-"]])[0][0]
+    unit, date = unit_label(), time.strftime("%Y-%m-%d")
+    if gog:
+        edition = "GOG %s" % ", ".join("%s (%s)" % (x[0], x[1]) if len(x) > 1 and x[1] else x[0] for x in gog)
+    else:
+        edition = "edition not known"
+    origin = edition + ("; the firmware's recipe [%s]" % known if known != "-" else "")
+    head = "; made on the device %s %s, from %s%s\n" % (unit, date, origin,
+                                                       ", with the player's changes" if layer else "")
+    eff = ini_sections(ini_parse(text))
+    name = (eff.get("") or {}).get("name") or g.get("name") or folder
+    # the main program: the recipe's detect, else the ini's exe (relative), else GOG's primary one
+    exe = (eff.get("") or {}).get("exe", "").replace("\\", "/")
+    if info.get("detect"):
+        detect = info["detect"][0][0]
+    elif exe and ":" not in exe and not exe.startswith("/"):
+        detect = exe
+    else:
+        detect = (info.get("primary") or [[""]])[0][0]
+    try:
+        names = os.listdir(d)
+    except OSError:
+        names = []
+    lower = {n.lower() for n in names}
+    excl = (["goggame-*"] if any(n.startswith("goggame-") for n in lower) else []) + \
+        [x for x in ("__redist", "tmp", "commonappdata") if x in lower]
+    cover_rel = (eff.get("") or {}).get("cover") or "cover.png"
+    cover = None
+    cp = os.path.normpath(os.path.join(d, cover_rel))
+    if not os.path.isabs(cover_rel) and ".." not in cover_rel.replace("\\", "/").split("/") and \
+            os.path.isfile(cp) and not os.path.islink(cp) and os.path.getsize(cp) <= 8 << 20:
+        with open(cp, "rb") as f:
+            cover = f.read()
+    sec = ["[%s]" % folder]
+    if detect:
+        sec.append("detect = %s" % detect)
+    else:
+        sec.append("; detect = MAIN.exe (fill in: the game's program, relative to its folder)")
+    if gog:
+        sec.append("gog = %s" % " ".join(x[0] for x in gog))
+    sec.append("; %s, %s: exported from the device %s %s (bare-web); fill in source, check"
+               % (name, edition, unit, date))
+    sec.append("source = lab/games/%s" % name)
+    sec += ["exclude = %s" % x for x in excl]
+    sec.append("overlay = games/%s/overlay" % folder)
+    if cover:
+        sec.append("cover = games/%s/cover.png" % folder)
+    needs = [x[0] for x in info.get("need", []) if x]
+    try:	# a Windows or game.ini game's log: its folder's; as it is (bytes)
+        with open(os.path.join(LOGS, folder, "1.log"), "rb") as f:
+            log = f.read(4 << 20)
+    except OSError:
+        log = None
+    buf = io.BytesIO()
+    pre = "games/%s/" % folder
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(pre + "overlay/" + r.ini, head + text)
+        if cover:
+            z.writestr(pre + "cover.png", cover)
+        z.writestr(pre + "README.md", README_TEMPLATE.format(
+            name=name, edition=edition, engine="under Wine" if r.kind == "wine" else "its own engine",
+            folder=folder, ini=r.ini, unit=unit, date=date, gog=" ".join(x[0] for x in gog) or "none"))
+        z.writestr("manifest.section", "\n".join(sec) + "\n")
+        z.writestr("needs.txt", "".join(n + "\n" for n in needs))
+        if log is not None:
+            z.writestr("logs/1.log", log)
+    return buf.getvalue(), "recipe-%s-%s-%s.zip" % (folder, unit, date)
+
+
 def games_json_stamp():
     try:
         return os.stat(os.path.join(RUN, "games.json")).st_mtime_ns
@@ -2550,6 +2743,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.json(out)
 
     def api_post_recipe(self, segs, q):
+        if len(segs) == 3 and segs[2] == "export":
+            try:
+                r = recipe_of(segs[1])
+                data, name = export_zip(r, games_json())
+            except Refused as e:
+                return self.refused(e)
+            return self.send(200, data, "application/zip",
+                             (("Content-Disposition", "attachment; filename*=UTF-8''%s"
+                               % urllib.parse.quote(name)),))
         try:
             if len(segs) != 3 or segs[2] != "adopt-controls":
                 raise Refused(404, "?")
