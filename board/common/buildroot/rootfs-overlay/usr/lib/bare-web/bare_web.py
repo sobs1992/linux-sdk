@@ -2139,6 +2139,11 @@ def same_text(a, b):
     return d == 0
 
 
+# a stream (text/event-stream) asks again every so many seconds whether its
+# request is still let in: a new PIN ends the streams of the old one's sessions
+SSE_RECHECK = 5
+
+
 def session_ok(cookie_header):
     """the request's session cookie is one this gave, not over, for the PIN
     there is now"""
@@ -2304,6 +2309,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return v if isinstance(v, dict) else None
 
     # ---- the request
+    def still_in(self):
+        """a stream's request still let in (the USB computer, or its session
+        holds: not for a PIN that is no more)"""
+        return self.allowed() or session_ok(self.headers.get("Cookie"))
+
     def allowed(self):
         ip = self.client_address[0]
         if ip.startswith("::ffff:"):
@@ -2977,11 +2987,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
+        check = time.monotonic() + SSE_RECHECK
+        quiet = 0.0
         try:
             while True:
+                if time.monotonic() >= check:
+                    if not self.still_in():
+                        return	# a new PIN: this session is over
+                    check = time.monotonic() + SSE_RECHECK
+                t0 = time.monotonic()
                 with job.cond:
                     if i >= len(job.events) and not job.ended:
-                        job.cond.wait(15)
+                        job.cond.wait(min(15, SSE_RECHECK))
                     new = job.events[i:]
                     ended = job.ended
                 if new:
@@ -2989,8 +3006,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   for k, e in enumerate(new))
                     i += len(new)
                     self.wfile.write(out.encode())
+                    quiet = 0.0
                 elif not ended:
-                    self.wfile.write(b": still running\n\n")
+                    quiet += time.monotonic() - t0
+                    if quiet >= 15:	# as before: a word every 15 s at least
+                        self.wfile.write(b": still running\n\n")
+                        quiet = 0.0
                 self.wfile.flush()
                 if ended and i >= len(job.events):
                     return
@@ -3235,8 +3256,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         ino, pos, rest, quiet = None, 0, b"", 0
         end = time.monotonic() + 3600
+        check = time.monotonic() + SSE_RECHECK
         try:
             while time.monotonic() < end:
+                if time.monotonic() >= check:
+                    if not self.still_in():
+                        return	# a new PIN: this session is over
+                    check = time.monotonic() + SSE_RECHECK
                 try:
                     st = os.stat(p)
                 except OSError:

@@ -1181,6 +1181,61 @@ class PinTest(unittest.TestCase):
         self.assertEqual(freq("GET", "/api/status", cookie=a)[0], 200)
         self.assertEqual(freq("GET", "/api/status", cookie=b)[0], 200)
 
+    def stream(self, path, cookie):
+        """an event stream opened from FOREIGN with the cookie: the socket, its headers read"""
+        c = socket.create_connection(("127.0.0.1", PORT), source_address=(FOREIGN, 0))
+        c.settimeout(10)
+        c.sendall(b"GET %s HTTP/1.1\r\n" % path.encode() + HOSTB + b"Cookie: %s\r\n\r\n" % cookie.encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            d = c.recv(4096)
+            self.assertTrue(d, head)
+            head += d
+        self.assertIn(b" 200 ", head.split(b"\r\n")[0])
+        return c
+
+    def ends_within(self, c, seconds):
+        """the stream closed by the server within seconds (its data read away)"""
+        end = time.monotonic() + seconds
+        c.settimeout(0.2)
+        while time.monotonic() < end:
+            try:
+                if not c.recv(65536):
+                    return True
+            except socket.timeout:
+                continue
+            except OSError:
+                return True
+        return False
+
+    def test_streams_end_with_pin(self):
+        """a new PIN ends the event streams of the old one's sessions (asked
+        again every SSE_RECHECK); with the PIN the same they go on"""
+        saved = bw.SSE_RECHECK
+        bw.SSE_RECHECK = 0.3
+        job = None
+        try:
+            os.makedirs(os.path.join(LOGS, "streamtest"), exist_ok=True)
+            with bw.Jobs.lock:
+                job = bw.Jobs.current = bw.Job("install", "stream test")
+            cookie = self.login()
+            log_s = self.stream("/api/logs/streamtest/live", cookie)
+            job_s = self.stream("/api/job/%d/events" % job.id, cookie)
+            self.assertFalse(self.ends_within(log_s, 1.5))	# the PIN the same: open
+            self.assertFalse(self.ends_within(job_s, 0.5))
+            self.set_pin("654321")
+            self.assertTrue(self.ends_within(log_s, 3))
+            self.assertTrue(self.ends_within(job_s, 3))
+            log_s.close()
+            job_s.close()
+        finally:
+            bw.SSE_RECHECK = saved
+            if job:
+                with job.cond:
+                    job.ended = True
+                    job.cond.notify_all()
+            shutil.rmtree(os.path.join(LOGS, "streamtest"), ignore_errors=True)
+
     def test_no_pin_yet(self):
         for text in (None, "12345", "1234567", "abcdef", "12 456", ""):
             self.set_pin(text)
