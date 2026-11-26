@@ -21,8 +21,12 @@ function h(tag, attrs, ...kids) {
   return e;
 }
 
+// every request that changes anything says it comes from this page (the
+// server refuses such requests of other sites' forms and images)
+const FROM_PAGE = { "X-Requested-With": "bare-web" };
+
 async function api(method, url, body) {
-  const opt = { method, headers: {} };
+  const opt = { method, headers: Object.assign({}, FROM_PAGE) };
   if (body !== undefined) {
     opt.headers["Content-Type"] = "application/json";
     opt.body = JSON.stringify(body);
@@ -194,6 +198,7 @@ function pump() {
   const t0 = Date.now();
   x.open("PUT", (u.place === "saves" ? "/api/saves/upload/" : "/api/upload/" + u.place + "/") +
     encodeURIComponent(u.file.name));
+  x.setRequestHeader("X-Requested-With", FROM_PAGE["X-Requested-With"]);
   x.upload.onprogress = e => {
     if (!e.lengthComputable) return;
     const p = Math.floor(e.loaded * 100 / e.total);
@@ -390,24 +395,21 @@ async function openLog(g, n) {
   v.scrollIntoView({ behavior: "smooth" });
 }
 
+// a file of the device downloaded by the browser (the server says its name)
+function download(url) {
+  const a = h("a", { href: url + (url.includes("?") ? "&" : "?") + "download=1", download: "" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
 async function makeReport(game, note) {
   note.textContent = "Собираю отчёт…";
   try {
-    const r = await fetch("/api/report" + (game ? "?game=" + encodeURIComponent(game) : ""));
-    if (!r.ok) {
-      let j = null;
-      try { j = await r.json(); } catch (e) { /* not JSON */ }
-      throw new Error((j && j.error) || "Отчёт не получился.");
-    }
-    const blob = await r.blob();
-    const cd = r.headers.get("Content-Disposition") || "";
-    const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
-    const name = m ? decodeURIComponent(m[1]) : "report.txt";
-    const a = h("a", { href: URL.createObjectURL(blob), download: name });
-    document.body.append(a);
-    a.click();
-    a.remove();
-    note.textContent = "Готово: " + name + " (он же лежит на карте игр в папке reports).";
+    const r = await api("POST", "/api/report", game ? { game } : {});
+    download("/api/reports/" + r.where + "/" + encodeURIComponent(r.name));
+    note.textContent = "Готово: " + r.name + " (он же лежит " +
+      (r.where === "card" ? "на карте игр в папке reports" : "в памяти приставки, /data/reports") + ").";
   } catch (e) {
     note.textContent = "";
     say(e);
@@ -920,26 +922,15 @@ pages.game = gamePage;
 
 // ---- saved games -----------------------------------------------------------
 
-// a file the device makes and sends (a report, a copy): saved by the browser
-async function fetchFile(url, note, busyText, doneText) {
+// a copy of saved games made on the device (game: a folder or "all"), then
+// downloaded by the browser
+async function makeCopy(game, note, busyText, doneText) {
   note.textContent = busyText;
   try {
-    const r = await fetch(url);
-    if (!r.ok) {
-      let j = null;
-      try { j = await r.json(); } catch (e) { /* not JSON */ }
-      throw new Error((j && j.error) || ("Ошибка " + r.status));
-    }
-    const blob = await r.blob();
-    const cd = r.headers.get("Content-Disposition") || "";
-    const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
-    const name = m ? decodeURIComponent(m[1]) : "file";
-    const a = h("a", { href: URL.createObjectURL(blob), download: name });
-    document.body.append(a);
-    a.click();
-    a.remove();
-    note.textContent = doneText(name);
-    return name;
+    const r = await api("POST", "/api/saves/backup", { game });
+    download("/api/saves/copy/" + r.where + "/" + encodeURIComponent(r.name));
+    note.textContent = doneText(r.name);
+    return r.name;
   } catch (e) {
     note.textContent = "";
     say(e);
@@ -978,7 +969,7 @@ async function savesPage() {
     const n = (byGame[g.folder] || []).length;
     const dl = h("button", { class: "secondary", disabled: !g.size && !g.has_layer },
       "скачать копию");
-    dl.onclick = () => fetchFile("/api/saves/" + encodeURIComponent(g.folder) + "/backup", note,
+    dl.onclick = () => makeCopy(g.folder, note,
       "Делаю копию…", name => "Готово: " + name + " (она же лежит в папке backups)").then(savesPage);
     return h("tr", null,
       h("td", null, g.name, h("div", { class: "small" }, g.folder + (r.running === g.folder ? " — запущена" : ""))),
@@ -1121,7 +1112,7 @@ $("#log-close").onclick = () => { $("#log-view").hidden = true; };
 $("#game-save").onclick = saveGame;
 $("#game-reset").onclick = resetGame;
 $("#game-adopt").onclick = adoptGame;
-$("#saves-all").onclick = () => fetchFile("/api/saves/all", $("#saves-note"), "Делаю копию всей приставки…",
+$("#saves-all").onclick = () => makeCopy("all", $("#saves-note"), "Делаю копию всей приставки…",
   name => "Готово: " + name + " (она же лежит в папке backups)").then(savesPage);
 $("#report-make").onclick = () => makeReport("", $("#report-note")).then(reportsPage);
 setupDrops();

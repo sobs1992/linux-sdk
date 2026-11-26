@@ -82,6 +82,18 @@ echo "done 2026-11-25 test123-dirty"
     "usb-disk": "#!/bin/sh\n[ -e \"$STATE/usb-disk\" ] && exit 0\nexit 1\n",
     "unit": "#!/bin/sh\ncase $1 in label) echo ogu-test ;; net) echo 192.168.7 ;; esac\n",
     "reboot": "#!/bin/sh\necho reboot >> \"$STATE/calls\"\n",
+    # card-rw begin|end PID: each call written down (who, by its pid); a begin
+    # fails with $STATE/no-card-rw
+    "card-rw": r"""#!/bin/sh
+[ "$1" = begin ] && [ -e "$STATE/no-card-rw" ] && { echo "card-rw: cannot" >&2; exit 1; }
+echo "$1 $2 $(cat /proc/$2/comm 2>/dev/null)" >> "$STATE/card-rw.log"
+""",
+    # ip -o -4 addr show: the device's addresses (usb0, wlan0, lo)
+    "ip": r"""#!/bin/sh
+echo "1: lo    inet 127.0.0.1/8 scope host lo"
+echo "3: usb0    inet 192.168.7.2/24 brd 192.168.7.255 scope global usb0"
+echo "4: wlan0    inet 10.1.2.3/24 brd 10.1.2.255 scope global wlan0"
+""",
 }
 
 ENV = {
@@ -93,14 +105,17 @@ ENV = {
     "BARE_WEB_AB_STATE": os.path.join(BIN, "ab-state"), "BARE_WEB_USB_DISK": os.path.join(BIN, "usb-disk"),
     "BARE_WEB_UNIT": os.path.join(BIN, "unit"), "BARE_WEB_REBOOT": os.path.join(BIN, "reboot"),
     "BARE_WEB_UPDATE_LOCK": os.path.join(STATE, "system-update.lock"), "BARE_WEB_NET": "192.168.7",
+    "BARE_WEB_CARD_RW": os.path.join(BIN, "card-rw"), "BARE_WEB_IP": os.path.join(BIN, "ip"),
     "GAME_INSTALL_GAMES": GAMES, "GAME_INSTALL_DATA": DATA, "GAME_INSTALL_RECIPES": os.path.join(TOP, "recipes"),
     "GAME_INSTALL_REDIST": os.path.join(TOP, "system-redist"), "GAME_INSTALL_LOCK": os.path.join(STATE, "gi.lock"),
+    "GAME_INSTALL_CARD_RW": os.path.join(BIN, "card-rw"), "GAME_INSTALL_GUIDE": os.path.join(TOP, "guide.html"),
     "STATE": STATE,
     # bare-backup (the real one) in the same places
     "BARE_WEB_BARE_BACKUP": BARE_BACKUP, "BARE_BACKUP_DATA": DATA, "BARE_BACKUP_GAMES": GAMES,
     "BARE_BACKUP_RUN": os.path.join(TOP, "run"), "BARE_BACKUP_CONF": os.path.join(TOP, "bare_app.conf"),
     "BARE_BACKUP_CTL": os.path.join(TOP, "no-ctl"), "BARE_BACKUP_RELEASE": os.path.join(TOP, "sdk-release"),
     "BARE_BACKUP_UNIT": os.path.join(BIN, "unit"), "BARE_BACKUP_USB_DISK": os.path.join(BIN, "usb-disk"),
+    "BARE_BACKUP_CARD_RW": os.path.join(BIN, "card-rw"),
     # bare_app's places for the workshop and the check of a game (stages 4, 5)
     "BARE_WEB_RUN": os.path.join(TOP, "run"), "BARE_WEB_CONF": os.path.join(TOP, "bare_app.conf"),
     "BARE_WEB_CTL": os.path.join(TOP, "ctl"), "BARE_WEB_WINE": os.path.join(BIN, "bare_app_wine"),
@@ -167,9 +182,12 @@ PORT = SERVER.server_address[1]
 threading.Thread(target=SERVER.serve_forever, daemon=True).start()
 
 
-def req(method, path, body=None, headers=None, timeout=30):
+def req(method, path, body=None, headers=None, timeout=30, page=True):
+    """a request as the page sends it (page: with X-Requested-With)"""
     c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=timeout)
     h = dict(headers or {})
+    if page:
+        h.setdefault("X-Requested-With", "bare-web")
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode()
         h["Content-Type"] = "application/json"
@@ -201,6 +219,28 @@ def events(job, timeout=60):
                 break
     c.close()
     return out
+
+
+# a raw request's Host and its X-Requested-With, as the page's
+HOSTB = b"Host: 127.0.0.1:%d\r\nX-Requested-With: bare-web\r\n" % PORT
+
+
+def card_rw_calls():
+    """[(begin|end, pid, comm)] of card-rw"""
+    try:
+        with open(os.path.join(STATE, "card-rw.log")) as f:
+            return [tuple((line.split() + ["", ""])[:3]) for line in f]
+    except OSError:
+        return []
+
+
+def card_rw_balanced(test, since=0):
+    """every begin of card-rw since then had its end, by the same process"""
+    depth = {}
+    for cmd, pid, _ in card_rw_calls()[since:]:
+        depth[pid] = depth.get(pid, 0) + (1 if cmd == "begin" else -1)
+        test.assertGreaterEqual(depth[pid], 0, card_rw_calls())
+    test.assertEqual(set(depth.values()) - {0}, set(), card_rw_calls())
 
 
 def calls():
@@ -294,7 +334,7 @@ class Test(unittest.TestCase):
     def test_upload_short(self):
         """the computer goes away mid-file: no file of that name, no .part"""
         s = socket.create_connection(("127.0.0.1", PORT))
-        s.sendall(b"PUT /api/upload/install/setup_cut.exe HTTP/1.1\r\nHost: x\r\n"
+        s.sendall(b"PUT /api/upload/install/setup_cut.exe HTTP/1.1\r\n" + HOSTB + b""
                   b"Content-Length: 5000000\r\n\r\n" + b"y" * 100000)
         s.shutdown(socket.SHUT_WR)
         s.settimeout(10)
@@ -335,7 +375,7 @@ class Test(unittest.TestCase):
     def test_upload_same_name(self):
         """one upload of a name at a time: the second would write the same .part"""
         c = socket.create_connection(("127.0.0.1", PORT))
-        c.sendall(b"PUT /api/upload/install/setup_two.exe HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nab")
+        c.sendall(b"PUT /api/upload/install/setup_two.exe HTTP/1.1\r\n" + HOSTB + b"Content-Length: 10\r\n\r\nab")
         part = os.path.join(GAMES, "install", "setup_two.exe.part")
         deadline = time.time() + 5
         while not os.path.exists(part) and time.time() < deadline:
@@ -371,7 +411,7 @@ class Test(unittest.TestCase):
         self.assertIn("USB-диск", json.loads(d)["error"])
         # refused before the body with Expect: 100-continue
         c = socket.create_connection(("127.0.0.1", PORT))
-        c.sendall(b"PUT /api/upload/install/setup_x.exe HTTP/1.1\r\nHost: x\r\nContent-Length: 999999999\r\n"
+        c.sendall(b"PUT /api/upload/install/setup_x.exe HTTP/1.1\r\n" + HOSTB + b"Content-Length: 999999999\r\n"
                   b"Expect: 100-continue\r\n\r\n")
         c.settimeout(10)
         first = c.recv(4096).split(b"\r\n")[0]
@@ -384,7 +424,7 @@ class Test(unittest.TestCase):
 
     def test_upload_room(self):
         c = socket.create_connection(("127.0.0.1", PORT))
-        c.sendall(b"PUT /api/upload/install/huge.exe HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n"
+        c.sendall(b"PUT /api/upload/install/huge.exe HTTP/1.1\r\n" + HOSTB + b"Content-Length: %d\r\n"
                   b"Expect: 100-continue\r\n\r\n" % (1 << 60))
         c.settimeout(10)
         first = c.recv(4096).split(b"\r\n")[0]
@@ -401,6 +441,7 @@ class Test(unittest.TestCase):
 
     def test_install_unknown(self):
         d = self.tiny_game()
+        n = len(card_rw_calls())
         s, r = jreq("GET", "/api/install/scan")
         e = [x for x in r["entries"] if x["path"] == d]
         self.assertEqual(len(e), 1, r)
@@ -417,6 +458,9 @@ class Test(unittest.TestCase):
         self.assertIn("exe = tiny.exe", open(os.path.join(game, "wine.ini")).read())
         self.assertEqual(open(os.path.join(game, "data.pak"), "rb").read(), b"p" * 5000)
         self.assertFalse(os.path.exists(d))	# moved: the same "card"
+        # game-install wrote through card-rw: its begin, its end
+        gi = [c[0] for c in card_rw_calls()[n:] if c[2] in ("game-install", "python3")]
+        self.assertEqual(gi, ["begin", "end"], card_rw_calls()[n:])
         # the job is the last one
         j = jreq("GET", "/api/job")[1]["job"]
         self.assertTrue(j["ended"])
@@ -524,20 +568,25 @@ class Test(unittest.TestCase):
             self.assertEqual(req("GET", bad)[0], 404, bad)
 
     def test_reports(self):
-        s, h, d = req("GET", "/api/report?game=coldfear")
-        self.assertEqual(s, 200, d)
-        self.assertEqual(d, b"a report of coldfear\n")
+        # made by POST (no GET makes one), then downloaded
+        self.assertIn(req("GET", "/api/report?game=coldfear")[0], (404, 405))
+        self.assertEqual(jreq("GET", "/api/reports")[1]["reports"], [])
+        s, r = jreq("POST", "/api/report", {"game": "coldfear"})
+        self.assertEqual(s, 200, r)
         name = "2026-11-25_12-00-00-coldfear.txt"
+        self.assertEqual((r["where"], r["name"]), ("card", name))
+        s, h, d = req("GET", "/api/reports/card/%s?download=1" % name)
+        self.assertEqual(d, b"a report of coldfear\n")
         self.assertIn(name, dict(h)["Content-Disposition"])
         r = jreq("GET", "/api/reports")[1]["reports"]
         self.assertEqual([(x["where"], x["name"]) for x in r], [("card", name)])
         self.assertEqual(req("GET", "/api/reports/card/" + name)[2], b"a report of coldfear\n")
-        self.assertEqual(req("GET", "/api/report?game=..%2Fx")[0], 400)
+        self.assertEqual(jreq("POST", "/api/report", {"game": "../x"})[0], 400)
         self.assertEqual(req("DELETE", "/api/reports/card/..%2Fcoldfear%2Fwine.ini")[0], 404)
         self.assertEqual(req("DELETE", "/api/reports/card/" + name)[0], 200)
         self.assertEqual(jreq("GET", "/api/reports")[1]["reports"], [])
         os.environ["FAIL_REPORT"] = "1"
-        s, r = jreq("GET", "/api/report")
+        s, r = jreq("POST", "/api/report", {})
         self.assertEqual(s, 500)
         self.assertIn("cannot", r["error"])
         # one in /data
@@ -602,32 +651,46 @@ class Test(unittest.TestCase):
         self.assertIn("reboot", calls())
 
     def test_card_writing(self):
-        """remounted writable once for all of this server's writers, read-only
-        after the last; left alone when it was writable"""
-        did = []
-        opts = [["ro", "noatime"]]
-        real = bw.card_opts, bw.run
-        bw.card_opts = lambda: opts[0]
-
-        def fake_run(argv, timeout=60):
-            did.append(argv[2])
-            opts[0] = [argv[2].split(",")[1]]
-            return 0, "", ""
-        bw.run = fake_run
-        try:
-            with bw.CardWriting():
-                with bw.CardWriting():
-                    pass
-                self.assertEqual(did, ["remount,rw"])
-            self.assertEqual(did, ["remount,rw", "remount,ro"])
-            did.clear()
-            opts[0] = ["rw"]
+        """each writer of this server a begin of card-rw (this pid) and its end,
+        nested ones too, an exception inside too; a begin that fails no end"""
+        n = len(card_rw_calls())
+        me = str(os.getpid())
+        with bw.CardWriting():
             with bw.CardWriting():
                 pass
-            self.assertEqual(did, [])
-            self.assertEqual(opts[0], ["rw"])
+            self.assertEqual([c[:2] for c in card_rw_calls()[n:]], [("begin", me), ("begin", me), ("end", me)])
+        with self.assertRaises(ZeroDivisionError):
+            with bw.CardWriting():
+                1 / 0
+        self.assertEqual([c[0] for c in card_rw_calls()[n:]], ["begin", "begin", "end", "end", "begin", "end"])
+        touch(os.path.join(STATE, "no-card-rw"))
+        try:
+            with self.assertRaises(bw.CardError):
+                with bw.CardWriting():
+                    self.fail("written without the card writable")
+            # an upload: refused, nothing written
+            s, h, d = req("PUT", "/api/upload/install/setup_rw.exe", b"data")
+            self.assertEqual(s, 503, d)
+            self.assertFalse(os.path.exists(os.path.join(GAMES, "install", "setup_rw.exe")))
         finally:
-            bw.card_opts, bw.run = real
+            os.remove(os.path.join(STATE, "no-card-rw"))
+        self.assertEqual(len(card_rw_calls()), n + 6)
+        # uploads (a whole one, one cut short) and deletions through the server: pairs
+        k = len(card_rw_calls())
+        self.assertEqual(req("PUT", "/api/upload/updates/x.upd", b"data")[0], 200)
+        self.assertEqual(req("DELETE", "/api/files/updates/x.upd")[0], 200)
+        c = socket.create_connection(("127.0.0.1", PORT))
+        c.sendall(b"PUT /api/upload/install/setup_cut2.exe HTTP/1.1\r\n" + HOSTB +
+                  b"Content-Length: 5000\r\n\r\nabc")
+        c.shutdown(socket.SHUT_WR)
+        c.settimeout(10)
+        c.recv(4096)
+        c.close()
+        deadline = time.time() + 5
+        while len(card_rw_calls()) < k + 6 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual([c[0] for c in card_rw_calls()[k:]], ["begin", "end"] * 3)
+        card_rw_balanced(self)
 
     def test_allowed(self):
         class H:
@@ -643,6 +706,230 @@ class Test(unittest.TestCase):
             self.assertTrue(bw.safe_name(n), n)
         for n in ("", ".", "..", ".x", "a/b", "a\\b", "a..b", "x\ny", "x" * 300):
             self.assertFalse(bw.safe_name(n), n)
+
+
+class GateTest(unittest.TestCase):
+    """who is answered: Host of the device, Origin of the page, no simple
+    request of another site's form or image; bodies; names; the hooks"""
+
+    def raw(self, text, body=b""):
+        """a request as bytes; its status line and the connection's state"""
+        c = socket.create_connection(("127.0.0.1", PORT))
+        c.settimeout(10)
+        c.sendall(text.encode() + body)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            b = c.recv(65536)
+            if not b:
+                break
+            data += b
+        return c, data
+
+    def test_host(self):
+        for host, ok in (("127.0.0.1:%d" % PORT, True), ("192.168.7.2:%d" % PORT, True),
+                         ("10.1.2.3:%d" % PORT, True),		# wlan0's
+                         ("127.0.0.1", False),			# another port (80)
+                         ("evil.example:%d" % PORT, False), ("localhost:%d" % PORT, False),
+                         ("192.168.7.1:%d" % PORT, False), ("", False)):
+            for path in ("/", "/app.js", "/api/status"):
+                s, h, d = req("GET", path, headers={"Host": host})
+                self.assertEqual(s == 200, ok, (host, path, s))
+                if not ok:
+                    self.assertEqual(s, 421, (host, path))
+        # none at all, two of them
+        c, d = self.raw("GET /api/status HTTP/1.1\r\n\r\n")
+        c.close()
+        self.assertIn(b" 421 ", d.split(b"\r\n")[0])
+        c, d = self.raw("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nHost: evil\r\n\r\n" % PORT)
+        c.close()
+        self.assertIn(b" 421 ", d.split(b"\r\n")[0])
+        # a POST with another Host: nothing done
+        k = len(calls())
+        s, h, d = req("POST", "/api/reboot", headers={"Host": "evil.example"})
+        self.assertEqual(s, 421)
+        time.sleep(1.3)
+        self.assertNotIn("reboot", calls()[k:])
+
+    def test_origin(self):
+        me = "http://127.0.0.1:%d" % PORT
+        for origin, ok in ((me, True), ("http://evil.example", False), ("null", False),
+                           ("http://127.0.0.1:1", False), ("https://127.0.0.1:%d" % PORT, False),
+                           ("http://192.168.7.2:%d" % PORT, False)):	# a device address, not this Host
+            s, h, d = req("GET", "/api/status", headers={"Origin": origin}, page=False)
+            self.assertEqual(s == 200, ok, (origin, s))
+            s, h, d = req("POST", "/api/report", b"", page=False,
+                          headers={"Origin": origin, "Content-Type": "text/plain"})
+            self.assertEqual(s == 200, ok, (origin, s, d))
+            if not ok:
+                self.assertEqual(s, 403)
+
+    def test_simple_requests_refused(self):
+        """what a form or an image of another site can send: no Origin (an old
+        browser, curl), no X-Requested-With, not JSON"""
+        k = len(calls())
+        for method, path, body, ctype in (
+                ("POST", "/api/reboot", b"", "text/plain"),
+                ("POST", "/api/update/switch", b"x", "text/plain"),
+                ("POST", "/api/install/remove", b'{"path": "x"}', "text/plain"),
+                ("POST", "/api/saves/restore", b'{"where": "data", "name": "x"}',
+                 "application/x-www-form-urlencoded"),
+                ("POST", "/api/report", b"", "multipart/form-data; boundary=x"),
+                ("PUT", "/api/upload/updates/evil.upd", b"data", "text/plain"),
+                ("DELETE", "/api/files/updates/x.upd", b"", "")):
+            h = {"Content-Type": ctype} if ctype else {}
+            s, _, d = req(method, path, body, headers=h, page=False)
+            self.assertEqual(s, 403, (method, path, d))
+        time.sleep(1.3)
+        self.assertNotIn("reboot", calls()[k:])
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "updates", "evil.upd")))
+        # the same with the page's header: answered
+        s, h, d = req("POST", "/api/report", b"", headers={"Content-Type": "text/plain"})
+        self.assertEqual(s, 200, d)
+        # JSON without the header: answered (no other site's form sends JSON)
+        s, h, d = req("POST", "/api/report", b"{}", headers={"Content-Type": "application/json"}, page=False)
+        self.assertEqual(s, 200, d)
+        for r in jreq("GET", "/api/reports")[1]["reports"]:
+            req("DELETE", "/api/reports/%s/%s" % (r["where"], r["name"]))
+        # GETs change nothing: the old ones that did are gone
+        for path in ("/api/report", "/api/report?game=coldfear", "/api/saves/all",
+                     "/api/saves/coldfear/backup"):
+            self.assertIn(req("GET", path)[0], (404, 405), path)
+
+    def test_json_only_as_json(self):
+        # a JSON body that is not sent as application/json is not read
+        s, h, d = req("POST", "/api/saves/info", b'{"where": "data", "name": "saves-x.zip"}',
+                      headers={"Content-Type": "text/plain"})
+        self.assertEqual(s, 400, d)
+        s, h, d = req("POST", "/api/pad", b'{"button": "a", "down": true}', headers={"Content-Type": "text/plain"})
+        self.assertEqual(s, 400, d)
+        # as JSON it is read (no copy of that name: 404)
+        s, r = jreq("POST", "/api/saves/info", {"where": "data", "name": "saves-x.zip"})
+        self.assertEqual(s, 404, r)
+
+    def test_unread_body_closes(self):
+        """a PUT that no handler reads: the answer closes the connection; a
+        POST's body is read and dropped: what is in it is no next request"""
+        for method, path in (("PUT", "/api/nothing"), ("PUT", "/nothing.html"), ("POST", "/api/nothing"),
+                             ("PUT", "/api/upload/elsewhere/x")):
+            body = b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n" * 3
+            c, d = self.raw("%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Requested-With: bare-web\r\n"
+                            "Content-Length: %d\r\n\r\n" % (method, path, PORT, len(body)), body)
+            head = d.split(b"\r\n\r\n")[0]
+            self.assertRegex(head.split(b"\r\n")[0], rb" (404|405) ", (method, path))
+            rest, closed = b"", False
+            c.settimeout(1.5)
+            try:
+                while True:
+                    b = c.recv(65536)
+                    if not b:
+                        closed = True
+                        break
+                    rest += b
+            except socket.timeout:
+                pass
+            c.close()
+            if method == "PUT":
+                self.assertTrue(closed, "the connection stays open: %s %s" % (method, path))
+            self.assertNotIn(b"HTTP/1.1 ", rest.split(b"\r\n\r\n", 1)[-1], (method, path))
+            self.assertNotIn(b"421", rest, (method, path))
+        # a body over 64 KB for a POST: refused, closed
+        c, d = self.raw("POST /api/report HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Requested-With: bare-web\r\n"
+                        "Content-Length: 70000\r\n\r\n" % PORT)
+        c.close()
+        self.assertIn(b" 413 ", d.split(b"\r\n")[0])
+
+    def test_logs_numbers(self):
+        for n in ("0", "4", "01", "1.0", "1 ", "+1", "-1", "1x", "١", "", "12"):
+            self.assertEqual(req("GET", "/api/logs/coldfear/" + urllib.parse.quote(n))[0], 404, n)
+        self.assertEqual(req("GET", "/api/logs/coldfear/1")[0], 200)
+
+    def test_card_names(self):
+        for bad in ('a:b.exe', 'a?.exe', 'a<b', 'a>b', 'a"b', 'a|b', 'a*b', 'a\\b', 'a\x01b', 'a\x7fb',
+                    'trail.', 'trail '):
+            s, h, d = req("PUT", "/api/upload/install/" + urllib.parse.quote(bad), b"data")
+            self.assertEqual(s, 400, bad)
+            self.assertIn("не подходит", json.loads(d)["error"], bad)
+        self.assertEqual(os.listdir(os.path.join(GAMES, "install")) and
+                         [n for n in os.listdir(os.path.join(GAMES, "install")) if n.startswith(("a", "trail"))], [])
+        s, h, d = req("PUT", "/api/saves/upload/" + urllib.parse.quote("saves-a:b.zip"), b"x")
+        self.assertEqual(s, 400)
+        self.assertTrue(bw.card_name_ok("setup_cold_fear_(86830)-1.bin") and bw.card_name_ok("Шрифт #1.ttf"))
+
+    def test_copy_path_no_links(self):
+        d = os.path.join(DATA, "backups")
+        os.makedirs(d, exist_ok=True)
+        outside = os.path.join(TOP, "outside.zip")
+        touch(outside, b"secret")
+        link = os.path.join(d, "saves-link-2026-01-01_00-00-00.zip")
+        os.symlink(outside, link)
+        try:
+            self.assertEqual(req("GET", "/api/saves/copy/data/" + os.path.basename(link))[0], 404)
+            self.assertEqual(req("DELETE", "/api/saves/copy/data/" + os.path.basename(link))[0], 404)
+            self.assertTrue(os.path.exists(outside))
+        finally:
+            os.remove(link)
+        # the directory itself a link
+        real_dir = os.path.join(TOP, "elsewhere")
+        os.makedirs(real_dir)
+        touch(os.path.join(real_dir, "saves-x-2026-01-01_00-00-00.zip"), b"x")
+        card = os.path.join(GAMES, "backups")
+        had = os.path.lexists(card)
+        if not had:
+            os.symlink(real_dir, card)
+            try:
+                self.assertEqual(req("GET", "/api/saves/copy/card/saves-x-2026-01-01_00-00-00.zip")[0], 404)
+            finally:
+                os.remove(card)
+
+    def test_saves_info_not_json(self):
+        d = os.path.join(DATA, "backups")
+        os.makedirs(d, exist_ok=True)
+        name = "saves-odd-2026-01-01_00-00-00.zip"
+        touch(os.path.join(d, name), b"x")
+        real = bw.run
+        bw.run = lambda argv, timeout=60: (0, "not json", "")
+        try:
+            s, r = jreq("POST", "/api/saves/info", {"where": "data", "name": name})
+        finally:
+            bw.run = real
+            os.remove(os.path.join(d, name))
+        self.assertEqual(s, 500)
+        self.assertIn("не JSON", r["error"])
+
+    def test_hooks_all_or_none(self):
+        """bare-web, game-install: one test place set and not all of them refused
+        at the start (never the device's own place for the rest)"""
+        code = ("import importlib.machinery, importlib.util, sys\n"
+                "l = importlib.machinery.SourceFileLoader('bw', %r)\n"
+                "m = importlib.util.module_from_spec(importlib.util.spec_from_loader('bw', l))\n"
+                "l.exec_module(m)\nprint('started')\n" % BARE_WEB)
+        base = {k: v for k, v in os.environ.items() if not k.startswith(("BARE_WEB_", "GAME_INSTALL_"))}
+        for drop in ("BARE_WEB_CARD_RW", "BARE_WEB_GAMES", "BARE_WEB_RUN", "BARE_WEB_IP"):
+            env = dict(base, **{k: v for k, v in ENV.items() if k.startswith("BARE_WEB_") and k != drop})
+            r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, drop)
+            self.assertIn("refused", r.stderr, drop)
+            self.assertIn(drop, r.stderr)
+        env = dict(base, BARE_WEB_LOG=os.path.join(TOP, "x.log"))
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        env = dict(base, **{k: v for k, v in ENV.items() if k.startswith("BARE_WEB_")}, BARE_WEB_TYPO="x")
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        self.assertIn("unknown BARE_WEB_TYPO", r.stderr)
+        env = dict(base, **{k: v for k, v in ENV.items() if k.startswith("BARE_WEB_")})
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "started", r.stderr)
+        # game-install: the lock and card-rw too, never /run's
+        gi = {k: v for k, v in ENV.items() if k.startswith("GAME_INSTALL_")}
+        for drop in ("GAME_INSTALL_LOCK", "GAME_INSTALL_CARD_RW", "GAME_INSTALL_GAMES"):
+            env = dict(base, **{k: v for k, v in gi.items() if k != drop})
+            r = subprocess.run([sys.executable, GAME_INSTALL, "scan"], env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, drop)
+            self.assertIn("refused", r.stderr)
+            self.assertIn("fail error", r.stdout)
+        env = dict(base, **gi)
+        r = subprocess.run([sys.executable, GAME_INSTALL, "scan"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 def tearDownModule():
@@ -701,20 +988,29 @@ class SavesTest(unittest.TestCase):
         self.assertEqual((g["folder"], g["files"]), ("pirates", 2))
         self.assertEqual(r["copies"], [])
         before = tree_md5(self.saves)
-        # a copy made and sent
-        s, h, d = req("GET", "/api/saves/pirates/backup", timeout=60)
+        # a copy made by POST (no GET makes one), then downloaded
+        for old in ("/api/saves/pirates/backup", "/api/saves/all"):
+            self.assertIn(req("GET", old)[0], (404, 405), old)
+        self.assertFalse(os.path.isdir(os.path.join(GAMES, "backups")))
+        n = len(card_rw_calls())
+        s, r = jreq("POST", "/api/saves/backup", {"game": "pirates"})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(r["where"], "card")
+        name = r["name"]
+        self.assertIn("saves-pirates-", name)
+        self.assertEqual([c[0] for c in card_rw_calls()[n:]], ["begin", "end"])	# bare-backup's
+        s, h, d = req("GET", "/api/saves/copy/card/" + urllib.parse.quote(name))
         self.assertEqual(s, 200, d)
         h = dict(h)
         self.assertEqual(h["Content-Type"], "application/zip")
         self.assertIn("saves-pirates-", h["Content-Disposition"])
+        self.assertEqual(r["size"], len(d))
         with zipfile.ZipFile(io.BytesIO(d)) as z:
             self.assertIn("manifest.json", z.namelist())
             self.assertIn("controls.0000abcd=a=b", z.read("settings.ini").decode())
         s, r = jreq("GET", "/api/saves")
         self.assertEqual([c["where"] for c in r["copies"]], ["card"])
-        name = r["copies"][0]["name"]
-        s, h, d2 = req("GET", "/api/saves/copy/card/" + urllib.parse.quote(name))
-        self.assertEqual((s, d2), (200, d))
+        self.assertEqual(jreq("POST", "/api/saves/backup", {"game": "../x"})[0], 400)
         # its manifest, then back after a change
         s, m = jreq("POST", "/api/saves/info", {"where": "card", "name": name})
         self.assertEqual(m["games"][0]["folder"], "pirates")
@@ -752,8 +1048,9 @@ class SavesTest(unittest.TestCase):
         self.assertEqual(s, 500)
         self.assertEqual(tree_md5(self.saves), mine)
         # a copy of all
-        s, h, d = req("GET", "/api/saves/all", timeout=60)
-        self.assertEqual(s, 200, d)
+        s, r = jreq("POST", "/api/saves/backup", {"game": "all"})
+        self.assertEqual(s, 200, r)
+        s, h, d = req("GET", "/api/saves/copy/%s/%s" % (r["where"], r["name"]), timeout=60)
         with zipfile.ZipFile(io.BytesIO(d)) as z:
             self.assertIn("bare_app.conf", z.namelist())
         # copies deleted; nothing else is
@@ -770,9 +1067,9 @@ class SavesTest(unittest.TestCase):
         s, r = jreq("GET", "/api/saves")
         self.assertEqual(s, 200)
         self.assertIn("bare_app не запущен", r["error"])
-        s, h, d = req("GET", "/api/saves/pirates/backup")
+        s, r = jreq("POST", "/api/saves/backup", {"game": "pirates"})
         self.assertEqual(s, 500)
-        self.assertIn("bare_app не запущен", json.loads(d)["error"])
+        self.assertIn("bare_app не запущен", r["error"])
 
 
 class FakeBareApp:

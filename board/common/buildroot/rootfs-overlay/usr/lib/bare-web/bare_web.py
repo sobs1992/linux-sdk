@@ -25,7 +25,8 @@ password (Wi-Fi is later, with a PIN on the screen).
   GET  /api/games                  the games on the card (wine.ini,
                                    game.ini) and the built-in ones
   GET  /api/logs/GAME/N            /data/logs/GAME/N.log (N 1..3)
-  GET  /api/report?game=GAME       bare-report [GAME], the file it wrote
+  POST /api/report                 {game}: bare-report [GAME]; {where, name} of
+                                   the report it wrote (GET /api/reports/... then)
   GET  /api/reports                the reports on the card and in /data
   GET|DELETE /api/reports/WHERE/NAME   one of them (WHERE card or data)
   GET  /api/update/files           the .upd files (/games/updates, /games,
@@ -38,8 +39,8 @@ password (Wi-Fi is later, with a PIN on the screen).
   POST /api/reboot                 the restart
   GET  /api/saves                  bare-backup list: the games' data, the copies
                                    on the card and in /data
-  GET  /api/saves/FOLDER/backup    a copy of the game made (bare-backup backup),
-                                   sent; GET /api/saves/all the same of all
+  POST /api/saves/backup           {game: FOLDER|all}: a copy made (bare-backup
+                                   backup); {where, name, size} (GET .../copy/ then)
   GET|DELETE /api/saves/copy/WHERE/NAME   one of the copies (WHERE card, data)
   PUT  /api/saves/upload/NAME      a copy from the computer into /data/backups
   POST /api/saves/info             {where, name}: its manifest (bare-backup info)
@@ -71,21 +72,31 @@ password (Wi-Fi is later, with a PIN on the screen).
 
 One job at a time (409 otherwise); game-install takes its own lock too
 (/run/game-install.lock), so the device's install screen and this one do
-not run two installs: "fail busy". The card is read-only: written to with
-"mount -o remount,rw" while this server writes (a count of its writers),
-read-only again after the last one, unless it was writable before.
+not run two installs: "fail busy". The card is read-only: made writable
+while anyone writes on it by /usr/sbin/card-rw (one count of all its
+writers: this server, game-install, bare-report, bare-backup), read-only
+again after the last one, unless it was writable before.
+
+Who is answered: the USB computer and the device itself; a Host that is
+one of the device's addresses (ip -o -4 addr, <net>.2, 127.0.0.1), else
+421 (a name of another site resolving here); an Origin, if sent, of the
+same Host; a request other than GET or HEAD without Origin only with
+"X-Requested-With: bare-web" (app.js sends it) or as application/json,
+else 403 (a form or an image of another site). No GET changes anything;
+a JSON body is read only when sent as application/json.
 
 Tests (scripts/test-bare-web.py) name other places: BARE_WEB_GAMES (then
-the card is that directory as it is: no mount test, no remount),
+the card is that directory as it is: no mount test),
 BARE_WEB_DATA, BARE_WEB_LOGS, BARE_WEB_STATIC, BARE_WEB_LOG (the server's
 log), BARE_WEB_POWER (/sys/class/power_supply), BARE_WEB_RELEASE, the
 programs BARE_WEB_GAME_INSTALL, BARE_WEB_BARE_REPORT, BARE_WEB_SYSTEM_UPDATE,
 BARE_WEB_AB_STATE, BARE_WEB_USB_DISK, BARE_WEB_UNIT, BARE_WEB_REBOOT,
 BARE_WEB_UPDATE_LOCK, BARE_WEB_BARE_BACKUP, and BARE_WEB_NET (the network answered), BARE_WEB_PORT,
-BARE_WEB_BIND; of bare_app BARE_WEB_RUN (games.json, state.json, ini/), BARE_WEB_CONF,
+BARE_WEB_BIND, BARE_WEB_CARD_RW (card-rw), BARE_WEB_IP (ip); of bare_app BARE_WEB_RUN (games.json, state.json, ini/), BARE_WEB_CONF,
 BARE_WEB_CTL (its FIFO), BARE_WEB_WINE (bare_app_wine), BARE_WEB_SHOT, BARE_WEB_NATIVE_DIRS,
-BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks). In a test a place it does not name is
-none: never the device's own (hook()).
+BARE_WEB_SYS_INPUT and BARE_WEB_DEV_INPUT (the sticks). A test names all of them (but PORT,
+BIND, NET) or none: one of them set and not all is refused at the start, never the device's
+own place for the rest.
 """
 import http.server
 import json
@@ -101,7 +112,23 @@ import urllib.parse
 import zlib
 
 E = os.environ.get
-TEST = "BARE_WEB_GAMES" in os.environ	# the card: a directory of a test, as it is
+# a test names every place and program (all of them or none: a test never falls
+# back to the device's own); PORT, BIND, NET are no places
+HOOKS = ("BARE_WEB_GAMES", "BARE_WEB_DATA", "BARE_WEB_LOGS", "BARE_WEB_STATIC", "BARE_WEB_LOG",
+         "BARE_WEB_POWER", "BARE_WEB_RELEASE", "BARE_WEB_GAME_INSTALL", "BARE_WEB_BARE_REPORT",
+         "BARE_WEB_SYSTEM_UPDATE", "BARE_WEB_AB_STATE", "BARE_WEB_USB_DISK", "BARE_WEB_UNIT",
+         "BARE_WEB_REBOOT", "BARE_WEB_BARE_BACKUP", "BARE_WEB_UPDATE_LOCK", "BARE_WEB_RUN",
+         "BARE_WEB_CONF", "BARE_WEB_CTL", "BARE_WEB_WINE", "BARE_WEB_SHOT", "BARE_WEB_SYS_INPUT",
+         "BARE_WEB_DEV_INPUT", "BARE_WEB_NATIVE_DIRS", "BARE_WEB_CARD_RW", "BARE_WEB_IP")
+NOT_HOOKS = ("BARE_WEB_PORT", "BARE_WEB_BIND", "BARE_WEB_NET")
+TEST = any(k.startswith("BARE_WEB_") and k not in NOT_HOOKS for k in os.environ)
+if TEST:
+    _missing = [k for k in HOOKS if not E(k)]
+    _unknown = [k for k in os.environ if k.startswith("BARE_WEB_") and k not in HOOKS + NOT_HOOKS]
+    if _missing or _unknown:
+        sys.exit("bare-web: test hooks %s: refused" % "; ".join(
+            (["without " + ", ".join(_missing)] if _missing else []) +
+            (["unknown " + ", ".join(_unknown)] if _unknown else [])))
 GAMES = E("BARE_WEB_GAMES", "/games")
 DATA = E("BARE_WEB_DATA", "/data")
 LOGS = E("BARE_WEB_LOGS", os.path.join(DATA, "logs"))
@@ -117,6 +144,8 @@ USB_DISK = E("BARE_WEB_USB_DISK", "/usr/sbin/usb-disk")
 UNIT = E("BARE_WEB_UNIT", "/usr/sbin/unit")
 REBOOT = E("BARE_WEB_REBOOT", "/sbin/reboot")
 BARE_BACKUP = E("BARE_WEB_BARE_BACKUP", "/usr/sbin/bare-backup")
+CARD_RW = E("BARE_WEB_CARD_RW", "/usr/sbin/card-rw")	# the one count of the card's writers
+IP = E("BARE_WEB_IP", "/sbin/ip")	# the device's addresses (ip -o -4 addr)
 SAVES_NAME = re.compile(r"^saves-[^/\\]+\.zip$")
 SAVES_MAX = 4 << 30	# a copy uploaded: at most this
 UPDATE_LOCK = E("BARE_WEB_UPDATE_LOCK", "/run/system-update.lock")	# system-update's own
@@ -219,6 +248,16 @@ def safe_name(n):
             ".." not in n and not n.startswith(".") and not any(ord(c) < 32 for c in n))
 
 
+EXFAT_BAD = set(':?<>"|*\\')
+NAME_BAD = "Имя «%s» не подходит: на карте нельзя знаки : ? < > \" | * \\, управляющие и точку или пробел в конце."
+
+
+def card_name_ok(n):
+    """a file's own name the card (exFAT, and Windows reading it) can have"""
+    return (safe_name(n) and not any(c in EXFAT_BAD or ord(c) < 32 or ord(c) == 127 for c in n) and
+            not n.endswith((".", " ")))
+
+
 def kv(text):
     """the "name=value" lines of text"""
     out = {}
@@ -279,40 +318,24 @@ class CardError(Exception):
 
 
 class CardWriting:
-    """with CardWriting(): the card writable inside (remounted rw if it is
-    read-only); read-only again when the last writer of this server is done,
-    if it was this server that made it writable"""
-    lock = threading.Lock()
-    users = 0
-    ours = False
+    """with CardWriting(): the card writable inside. card-rw keeps one count of
+    all the card's writers (this server, game-install, bare-report, bare-backup,
+    by their pids): the first one makes it writable, the last one read-only
+    again (unless it was writable before); every begin here has its end, an
+    exception inside too"""
 
     def __enter__(self):
-        c = CardWriting
-        with c.lock:
-            if c.users == 0:
-                opts = card_opts()
-                if opts is not None and "ro" in opts:
-                    rc, _, err = run(["mount", "-o", "remount,rw", GAMES])
-                    if rc:
-                        log.warning("%s cannot be made writable: %s", GAMES, err.strip())
-                        raise CardError(INSTALL_FAIL["card"])
-                    c.ours = True
-                    log.info("%s writable", GAMES)
-            c.users += 1
+        rc, _, err = run([CARD_RW, "begin", str(os.getpid())], timeout=60)
+        if rc:
+            log.warning("card-rw begin: %s", err.strip() or "exit %d" % rc)
+            raise CardError(NO_CARD if rc == 3 else INSTALL_FAIL["card"])
         return self
 
     def __exit__(self, *exc):
-        c = CardWriting
-        with c.lock:
-            c.users -= 1
-            if c.users == 0 and c.ours:
-                c.ours = False
-                os.sync()
-                rc, _, err = run(["mount", "-o", "remount,ro", GAMES])
-                if rc:
-                    log.warning("%s stays writable: %s", GAMES, err.strip())
-                else:
-                    log.info("%s read-only again", GAMES)
+        os.sync()
+        rc, _, err = run([CARD_RW, "end", str(os.getpid())], timeout=60)
+        if rc or err.strip():
+            log.warning("card-rw end: %s", err.strip() or "exit %d" % rc)
         return False
 
 
@@ -1674,6 +1697,37 @@ def allowed_net():
     return n
 
 
+HOSTS = {"at": 0.0, "set": frozenset()}	# the device's own addresses, a while
+HOSTS_LOCK = threading.Lock()
+HOSTS_AGE = 5.0		# s: Wi-Fi may get its address later
+ADDR_RE = re.compile(r"\binet (\d{1,3}(?:\.\d{1,3}){3})/")
+
+
+def own_hosts():
+    """the names a request of a page of this device has in its Host: the
+    addresses of the device's interfaces (ip -o -4 addr: usb0's <net>.2,
+    wlan0's if any, 127.0.0.1) and <net>.2"""
+    now = time.monotonic()
+    with HOSTS_LOCK:
+        if now - HOSTS["at"] < HOSTS_AGE and HOSTS["set"]:
+            return HOSTS["set"]
+        rc, out, _ = run([IP, "-o", "-4", "addr", "show"], timeout=5)
+        hosts = {"127.0.0.1", "%s.2" % NET}
+        if rc == 0:
+            hosts.update(ADDR_RE.findall(out))
+        HOSTS["at"], HOSTS["set"] = now, frozenset(hosts)
+        return HOSTS["set"]
+
+
+def host_port(text, port):
+    """("address", port) of a Host header or of an Origin's host; None if it
+    is no address of the form a.b.c.d[:port]"""
+    m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?", text or "")
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)) if m.group(2) else port
+
+
 NET = None
 UPLOADS = set()	# (place, name) being uploaded: one at a time each
 UPLOADS_LOCK = threading.Lock()
@@ -1695,6 +1749,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def send(self, code, body, ctype="application/json; charset=utf-8", headers=()):
         if isinstance(body, str):
             body = body.encode()
+        if getattr(self, "unread", False):
+            self.close_connection = True
+            headers = tuple(headers) + (("Connection", "close"),)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1725,7 +1782,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                       (download.encode("ascii", "replace").decode().replace('"', "_"), q)))
         self.send(200, body, ctype, h)
 
+    def ctype(self):
+        return (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
     def body_json(self):
+        """the body as a JSON object; None if it is not one, or not sent as
+        application/json (a form of another site cannot send that)"""
+        if self.body and self.ctype() != "application/json":
+            return None
         try:
             v = json.loads(self.body or b"{}")
         except ValueError:
@@ -1739,29 +1803,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ip = ip[7:]
         return ip == "127.0.0.1" or ip.startswith(NET + ".")
 
+    def gate(self):
+        """(code, text) why this request is not answered, None: it is.
+        Only the USB computer (and the device itself); Host one of the
+        device's addresses (a name of another site that resolves here, DNS
+        rebinding, is not); Origin, when a browser sends one, this page's;
+        a request that changes anything without Origin only from this
+        page's script (X-Requested-With: bare-web) or as JSON: a form or
+        an image of another site can send neither"""
+        if not self.allowed():
+            return 403, "Доступ только с компьютера на кабеле USB."
+        port = self.server.server_address[1]
+        hosts = self.headers.get_all("Host") or []
+        h = host_port(hosts[0], 80) if len(hosts) == 1 else None
+        if not h or h[0] not in own_hosts() or h[1] != port:
+            return 421, "Откройте страницу по адресу приставки (http://%s.2)." % NET
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            o = host_port(origin[7:], 80) if origin.startswith("http://") else None
+            if o != h:
+                return 403, "Запрос со страницы другого сайта: отказано."
+        elif self.command not in ("GET", "HEAD"):
+            if self.headers.get("X-Requested-With") != "bare-web" and self.ctype() != "application/json":
+                return 403, "Запрос не со страницы приставки: отказано."
+        return None
+
     def parts(self):
         u = urllib.parse.urlsplit(self.path)
         segs = [urllib.parse.unquote(s) for s in u.path.split("/")[1:]]
         return segs, urllib.parse.parse_qs(u.query)
 
     def route(self):
-        if not self.allowed():
-            self.close_connection = True
-            return self.fail(403, "Доступ только с компьютера на кабеле USB.")
-        segs, q = self.parts()
         m = self.command
-        # a body other than an upload's read whole first: what is left of
-        # one would be the next request of the connection
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        # a body not read (a PUT's until its handler reads it): the answer
+        # closes the connection, what is left of it is no next request
+        self.unread = n != 0
+        no = self.gate()
+        if no:
+            self.close_connection = True
+            return self.fail(*no)
+        segs, q = self.parts()
+        # a body other than an upload's read whole first
         self.body = b""
-        if m in ("POST", "DELETE"):
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                n = -1
+        if m != "PUT":
             if not 0 <= n <= 1 << 16:
-                self.close_connection = True
                 return self.fail(413, "?")
             self.body = self.rfile.read(n)
+            self.unread = False
         if not segs or segs[0] != "api":
             if m in ("GET", "HEAD"):
                 return self.static(segs)
@@ -1791,7 +1883,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def handle_expect_100(self):
         # an upload that will be refused is refused before its body comes
-        if self.command == "PUT" and self.allowed():
+        self.unread = True
+        no = self.gate()
+        if no:
+            self.fail(*no)
+            return False
+        if self.command == "PUT":
             segs, _ = self.parts()
             if segs[:2] == ["api", "recipe"]:
                 why = None	# small: read whole (api_put_recipe)
@@ -1823,8 +1920,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """(code, text) why an upload to rest ([PLACE, NAME]) is refused, None"""
         if not rest or len(rest) != 2 or rest[0] not in PLACES:
             return 404, "Загружать можно только в install, redist и updates."
-        if not safe_name(rest[1]):
-            return 400, "Имя файла не подходит: %s" % rest[1]
+        if not card_name_ok(rest[1]):
+            return 400, NAME_BAD % rest[1]
         why = card_problem()
         if why:
             return 503, why
@@ -1881,6 +1978,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             f.write(mv[:k])
                             got += k
                         if got == n:
+                            self.unread = False
                             f.flush()
                             os.fsync(f.fileno())
                             # renamed while still open: the card stays writable
@@ -2020,16 +2118,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.file(p, "text/plain; charset=utf-8", dl)
 
     # ---- reports
-    def api_get_report(self, segs, q):
-        game = (q.get("game") or [""])[0]
-        if game and not safe_name(game):
+    def api_post_report(self, segs, q):
+        """{game}: bare-report [GAME]; where it wrote the report (the page
+        then downloads it: GET /api/reports/WHERE/NAME?download=1)"""
+        b = self.body_json()
+        if b is None or len(segs) != 1:
+            return self.fail(400, "?")
+        game = b.get("game") or ""
+        if not isinstance(game, str) or (game and not safe_name(game)):
             return self.fail(400, "Имя игры не подходит: %s" % game)
         rc, out, err = run([BARE_REPORT] + ([game] if game else []), timeout=120)
         path = out.strip().splitlines()[-1] if out.strip() else ""
         if rc or not path or not os.path.isfile(path):
             return self.fail(500, "Отчёт не получился: %s" % (err.strip() or "код выхода %d" % rc))
+        where = next((w for w, d in REPORT_DIRS.items() if os.path.dirname(path) == d()), None)
+        if not where or not self.report_path(["", where, os.path.basename(path)]):
+            return self.fail(500, "Отчёт записан не туда: %s" % path)
         log.info("report %s", path)
-        self.file(path, "text/plain; charset=utf-8", os.path.basename(path))
+        self.json({"ok": True, "where": where, "name": os.path.basename(path)})
 
     def api_get_reports(self, segs, q):
         if len(segs) == 1:
@@ -2065,7 +2171,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def stream(self, path, ctype, download):
         """a file as it is read: a copy may be large"""
         try:
-            f = open(path, "rb")
+            f = open(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb")
         except OSError:
             return self.fail(404, "Файла нет: %s" % os.path.basename(path))
         with f:
@@ -2093,11 +2199,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.fail(code, "%s: %s" % (what, text))
 
     def copy_path(self, where, name):
+        """a copy of saved games there: a file of its own (not a link, nor
+        in a directory that is one)"""
         if not isinstance(where, str) or where not in SAVES_DIRS or not isinstance(name, str) or \
                 not safe_name(name) or not SAVES_NAME.match(name):
             return None
-        p = os.path.join(SAVES_DIRS[where], name)
-        return p if os.path.isfile(p) and not os.path.islink(p) else None
+        d = SAVES_DIRS[where]
+        p = os.path.join(d, name)
+        if os.path.islink(d) or os.path.islink(p) or not os.path.isfile(p):
+            return None
+        return p
 
     def api_get_saves(self, segs, q):
         if len(segs) == 1:
@@ -2113,16 +2224,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not p:
                 return self.fail(404, "Такой копии нет.")
             return self.stream(p, "application/zip", segs[3])
-        if (segs[1] == "all" and len(segs) == 2) or (len(segs) == 3 and segs[2] == "backup"):
-            what = segs[1]
-            if what != "all" and not safe_name(what):
-                return self.fail(400, "Имя игры не подходит: %s" % what)
-            rc, out, err = run([BARE_BACKUP, "backup", what], timeout=900)
-            path = out.strip().splitlines()[-1] if out.strip() else ""
-            if rc or not path or not os.path.isfile(path):
-                return self.backup_err(rc, err, "Копия не получилась")
-            log.info("saves %s: %s", what, path)
-            return self.stream(path, "application/zip", os.path.basename(path))
         return self.fail(404, "?")
 
     def api_delete_saves(self, segs, q):
@@ -2146,8 +2247,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.json({"ok": True})
 
     def saves_upload_problem(self, rest):
-        if not rest or len(rest) != 1 or not safe_name(rest[0]) or not SAVES_NAME.match(rest[0]):
+        if not rest or len(rest) != 1 or not SAVES_NAME.match(rest[0]):
             return 400, "Это не копия сохранений: имя должно быть saves-….zip."
+        if not card_name_ok(rest[0]):
+            return 400, NAME_BAD % rest[0]
         try:
             n = int(self.headers.get("Content-Length"))
         except (TypeError, ValueError):
@@ -2191,6 +2294,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 os.fsync(f.fileno())
             if got != n:
                 raise OSError("%d of %d bytes" % (got, n))
+            self.unread = False
             os.replace(part, dest)
         except (OSError, ValueError) as e:
             self.close_connection = True
@@ -2208,8 +2312,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def api_post_saves(self, segs, q):
         b = self.body_json()
-        if b is None or len(segs) != 2 or segs[1] not in ("info", "restore"):
+        if b is None or len(segs) != 2 or segs[1] not in ("info", "restore", "backup"):
             return self.fail(400, "?")
+        if segs[1] == "backup":
+            # {game: FOLDER|"all"}: the copy made; the page then downloads it
+            # (GET /api/saves/copy/WHERE/NAME)
+            what = b.get("game")
+            if not isinstance(what, str) or (what != "all" and not safe_name(what)):
+                return self.fail(400, "Имя игры не подходит: %s" % what)
+            rc, out, err = run([BARE_BACKUP, "backup", what], timeout=900)
+            path = out.strip().splitlines()[-1] if out.strip() else ""
+            if rc or not path or not os.path.isfile(path):
+                return self.backup_err(rc, err, "Копия не получилась")
+            where = next((w for w, d in SAVES_DIRS.items() if os.path.dirname(path) == d), None)
+            name = os.path.basename(path)
+            if not where or not self.copy_path(where, name):
+                return self.fail(500, "Копия записана не туда: %s" % path)
+            log.info("saves %s: %s", what, path)
+            return self.json({"ok": True, "where": where, "name": name, "size": os.path.getsize(path)})
         p = self.copy_path(b.get("where"), b.get("name") or "")
         if not p:
             return self.fail(404, "Такой копии нет.")
@@ -2217,7 +2337,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rc, out, err = run([BARE_BACKUP, "info", p], timeout=60)
             if rc:
                 return self.backup_err(rc, err, "Копия не читается")
-            return self.json(json.loads(out))
+            try:
+                info = json.loads(out)
+            except ValueError:
+                return self.fail(500, "bare-backup info: не JSON")
+            return self.json(info)
         game = b.get("game") or ""
         if game and not safe_name(game):
             return self.fail(400, "Имя игры не подходит: %s" % game)
@@ -2373,7 +2497,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not 0 <= n <= LAYER_MAX:
             self.close_connection = True
             raise Refused(413 if n > 0 else 411, "Нужно тело запроса до 64 КБ.")
-        return self.rfile.read(n)
+        body = self.rfile.read(n)
+        self.unread = len(body) != n
+        return body
 
     def api_put_recipe(self, segs, q):
         try:
