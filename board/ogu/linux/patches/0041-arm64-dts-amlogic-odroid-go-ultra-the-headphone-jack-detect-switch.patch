@@ -1,0 +1,42 @@
+From: OdroidLinux SDK
+Subject: [PATCH] arm64: dts: amlogic: odroid-go-ultra: the headphone jack detect switch
+
+GPIOAO_9 is the headphone jack's detect line (hp_det in Hardkernel's
+odroidgoU dts): read on the board 1 with a plug in, 0 without, in GPIO
+mode, unused in the mainline dts.
+
+Report it as SW_HEADPHONE_INSERT of an input device "headphones" of its
+own, so the event device of the buttons (gpio-keys) stays as it is.
+gpio-keys-polled at 20 ms with a 50 ms debounce: the meson pinctrl GPIO
+chip maps no interrupts (no to_irq), so the interrupt driven gpio-keys
+cannot use the line. No pinctrl state: the line reads right as it is.
+---
+--- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
++++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
+@@ -224,6 +224,26 @@
+ 		};
+ 	};
+ 
++	/*
++	 * The headphone jack's detect line (hp_det in Hardkernel's dts): high
++	 * with a plug in. A device of its own after gpio-keys, so the buttons'
++	 * event device stays the same; polled, as the AO GPIO bank has no
++	 * interrupts mapped (gpiod_to_irq() fails on it).
++	 */
++	headphones-detect {
++		compatible = "gpio-keys-polled";
++		label = "headphones";
++		poll-interval = <20>;
++
++		headphones-switch {
++			label = "headphones";
++			linux,input-type = <EV_SW>;
++			linux,code = <SW_HEADPHONE_INSERT>;
++			gpios = <&gpio_ao GPIOAO_9 GPIO_ACTIVE_HIGH>;
++			debounce-interval = <50>;
++		};
++	};
++
+ 	memory@0 {
+ 		device_type = "memory";
+ 		reg = <0x0 0x0 0x0 0x40000000>;
