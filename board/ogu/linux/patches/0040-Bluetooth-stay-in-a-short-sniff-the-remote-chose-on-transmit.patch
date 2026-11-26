@@ -1,0 +1,86 @@
+From: OdroidLinux SDK
+Subject: [PATCH] Bluetooth: stay in a short sniff the remote chose on transmit
+
+A Nintendo pad that is Central of the link holds it in sniff with an
+interval of 15 ms. hci_sched_acl_pkt() asks the link out of sniff
+(hci_conn_enter_active_mode(), force_active is on for L2CAP data) before
+every packet we send to it, and the pad puts it back: some 20 mode changes
+a second while the pad works.
+
+hci_mode_change_evt() keeps the sniff interval in hci_conn (at the end of
+the struct); with the new bluetooth.ko parameter sniff_keep_ms (default 20,
+writable at run time) the transmit path leaves a link in sniff whose
+interval is that short or shorter: the next sniff anchor is at most that
+far. 0 = upstream. Only the transmit path changes: the SCO setup and
+the receive path still bring the link to active mode as before, and a link
+we put into sniff ourselves (hdev->sniff_max_interval, 500 ms) is left as
+before.
+---
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -791,6 +791,7 @@ struct hci_conn {
+ 	struct delayed_work enc_grace_work;
+ 	__u8		enc_grace;	/* HCI_ENC_GRACE_*, under hdev->lock */
+ 	bool		enc_grace_aes;	/* AES-CCM before the remote stopped */
++	__u16		sniff_interval;	/* slots of 0.625 ms, 0 out of sniff */
+ };
+ 
+ /* hci_conn.enc_grace: the remote turned the encryption of an ACL link off */
+--- a/net/bluetooth/hci_core.c
++++ b/net/bluetooth/hci_core.c
+@@ -23,6 +23,7 @@
+ /* Bluetooth HCI core. */
+ 
+ #include <linux/export.h>
++#include <linux/moduleparam.h>
+ #include <linux/rfkill.h>
+ #include <linux/debugfs.h>
+ #include <linux/crypto.h>
+@@ -3648,6 +3649,24 @@ static void hci_sched_sco(struct hci_dev
+ 		queue_work(hdev->workqueue, &hdev->tx_work);
+ }
+ 
++/* A link the remote holds in sniff with an interval this short (a Nintendo
++ * pad: 15 ms) carries what we send well enough: do not ask it out of sniff
++ * on every packet (some 20 mode changes a second). 0: always out, as before.
++ */
++static unsigned int sniff_keep_ms = 20;
++module_param(sniff_keep_ms, uint, 0644);
++MODULE_PARM_DESC(sniff_keep_ms,
++		 "Stay in sniff on transmit if its interval is this short or shorter, in ms (0 = always exit)");
++
++static bool hci_conn_keep_sniff(struct hci_conn *conn)
++{
++	unsigned int ms = READ_ONCE(sniff_keep_ms);
++
++	/* sniff_interval is in slots of 625 us */
++	return ms && conn->mode == HCI_CM_SNIFF && conn->sniff_interval &&
++	       conn->sniff_interval * 625ULL <= ms * 1000ULL;
++}
++
+ static void hci_sched_acl_pkt(struct hci_dev *hdev)
+ {
+ 	unsigned int cnt = hdev->acl_cnt;
+@@ -3670,8 +3689,9 @@ static void hci_sched_acl_pkt(struct hci
+ 
+ 			skb = skb_dequeue(&chan->data_q);
+ 
+-			hci_conn_enter_active_mode(chan->conn,
+-						   bt_cb(skb)->force_active);
++			if (!hci_conn_keep_sniff(chan->conn))
++				hci_conn_enter_active_mode(chan->conn,
++							   bt_cb(skb)->force_active);
+ 
+ 			hci_send_conn_frame(hdev, chan->conn, skb);
+ 			hdev->acl_last_tx = jiffies;
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -4610,6 +4610,8 @@ static void hci_mode_change_evt(struct h
+ 	conn = hci_conn_hash_lookup_handle(hdev, __le16_to_cpu(ev->handle));
+ 	if (conn) {
+ 		conn->mode = ev->mode;
++		conn->sniff_interval = conn->mode == HCI_CM_SNIFF ?
++				       __le16_to_cpu(ev->interval) : 0;
+ 
+ 		if (!test_and_clear_bit(HCI_CONN_MODE_CHANGE_PEND,
+ 					&conn->flags)) {
