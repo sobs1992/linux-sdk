@@ -1673,6 +1673,32 @@ Heroes III, как и раньше, кончается сигналом 15. OGU1
 9 файлов (sdk-release 9f86570, bare_app той же версии другой сборки, режим 0700, libavcodec с mp2fixed uid 1000,
 остальные libav старые, user-guide.html, poplaunch.exe).
 
+## OGU2: громкости по выходам и Bluetooth-модули, полная дельта (2026-11-26 ночь, builder)
+
+Эталон: rootfs.tar master SDK 430c13c (bare_app 993180e) и output/ogu/linux-install. Image эталона — #81
+(a1096d7b) против #77 на OGU2 (fd4ea9ca): отличаются 41 байт — строка версии (2 места) и GNU build-id, код и
+.config одинаковые, vermagic модулей тот же, MODVERSIONS выключен; по решению координатора Image не ставился,
+ядро осталось #77.
+
+Сначала копия сохранений через сайт: POST /api/saves/backup {game: all} → /games/backups/
+saves-all-2026-11-26_23-00-55.zip (73216976 Б, 33 игры, 2148 файлов, данные 151,9 МБ), скачана GET
+/api/saves/copy/card/… в lab/backups/ogu2/saves-2026-11-26/, md5 af0fb356… = на карте, `unzip -t` без ошибок.
+Прежние автокопии на карте и в /data/backups не трогались.
+
+Дельта: sdk-release, bare_app, user-guide.html, poplaunch.exe, dtb meson-g12b-odroid-go-ultra.dtb (904f4c2f →
+f4f28140, добавлен узел headphones-detect) и 11 модулей Bluetooth (net/bluetooth/bluetooth.ko,
+drivers/bluetooth/*.ko); остальные 927 модулей совпадали. Оверлеи карты: 45 из 48 совпадают, 3 — ut2004 (игры
+нет), карта не писалась. Копии: lab/backups/ogu2/web-2026-11-26/volume-bt-before/ и
+/data/sdk-backup/volume-bt-2026-11-26/ (16 файлов). apply-delta.sh, sync, reboot.
+
+После старта: uname -v #77, /api/status SDK 430c13c BARE_APP 993180e, сайт 200, bare_app запущен; в журнале
+`jack: /dev/input/event1: "headphones"`, `services: … jack detector yes`; в /proc/bus/input/devices «headphones»
+(gpio-keys-polled); bare_app.conf: volume=0, volume_headphones=0, volume_bt=0 (громкость на OGU2 нулевая — так
+у игрока), pad_triggers нет; модуль bluetooth не загружен (адаптера нет), md5 всех 938 модулей = эталон.
+Дымовой тест через сайт: Serious Sam TFE (native) и Pirates! (Wine) — launch/quit 200, card0 pcm0p RUNNING, hw_ptr
+растёт, sink speaker, выход 0. Итоговое сравнение rootfs: только per-unit (fstab, wpa_supplicant.conf, ключ
+dropbear) и прежние файлы, которых нет в эталоне.
+
 ## Риски
 
 - Память: Python-сервер ~10–15 МБ при играх у предела памяти → запуск по кабелю.
