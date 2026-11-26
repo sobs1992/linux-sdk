@@ -20,11 +20,23 @@ DAEMON=/usr/sbin/bare-web
 PIDFILE=/var/run/bare-web.pid
 MODE=/data/bare-web.mode
 
+# a pid file whose process is not bare-web (it ended, its pid is another
+# python3's now: game-install, bare-backup) is no server: removed, so that
+# start-stop-daemon neither says "already running" nor stops that one
+stale() {
+	pid=$(cat $PIDFILE 2>/dev/null)
+	[ -n "$pid" ] || return 0
+	tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q bare-web && return 0
+	rm -f $PIDFILE
+}
+
 up() {
+	stale
 	start-stop-daemon -S -q -b -m -p $PIDFILE -x /usr/bin/python3 -- $DAEMON
 }
 
 stop() {
+	stale
 	pid=$(cat $PIDFILE 2>/dev/null)
 	start-stop-daemon -K -q -p $PIDFILE
 	rc=$?
