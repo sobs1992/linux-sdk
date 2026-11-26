@@ -608,7 +608,8 @@ data-games.tar (данные neighbours, NFH1, coldfear, /data/backups, журн
 или ни одного» приняло это за тест и сервер не стартовал (f4ed3fe + тест).
 
 Отклонения и открытые вопросы: файловые задания bare_app (files.c) не переведены на card-rw
-(C-правка вне задания) — их ro во время записи сайта может дать EROFS; памятки на карте
+(C-правка вне задания) — их ro во время записи сайта может дать EROFS (сделано 2026-11-26,
+bare_app 5135dcb, см. «Риски»); памятки на карте
 переписываются при каждом расхождении с текстом системы (правки пользователя в них
 затираются); родительские каталоги восстановления (например users/root/Documents) могут
 создаваться до проверки md5 (так было и раньше).
@@ -623,6 +624,62 @@ data-games.tar (данные neighbours, NFH1, coldfear, /data/backups, журн
 5.2 На ПК `scripts/recipe-import.py ZIP`: раскладывает в games/, дописывает секцию в
     манифест, далее обычный review.
 5.3 Тот же zip загружается на другой приставке в /games/recipes (страница Рецепты).
+
+### Этап 6: сделано 2026-11-26 (builder, ветка `web`, не слито, не запушено)
+
+Коммиты SDK: a971ff2 (`POST /api/recipe/FOLDER/export`, `game-install recipe DIR`, вкладка
+«Экспорт», тесты), 43bad8f (scripts/recipe-import.py + scripts/test-recipe-import.py).
+
+Запрос — `POST /api/recipe/FOLDER/export` (не `/api/recipe/export/<game>` пункта 5.1: так он
+лёг в обработчик POST рецепта рядом с adopt-controls; GET ничего не отдаёт — 404, без
+X-Requested-With — 403). Только игры с wine.ini или game.ini (свои движки — 400). Ответ —
+application/zip, имя `recipe-<папка>-<unit>-<дата>.zip`:
+- `games/<папка>/overlay/wine.ini` (у game.ini-игр `game.ini`): текст ini игры с правками
+  слоя, вписанными по правилам ini_layer (значение ключа — в его первую строку, повторы
+  убраны; список — на месте первой строки; новый ключ — в конец своей секции; новая секция —
+  в конец), комментарии рецепта сохранены; первая строка `; made on the device <unit>
+  <дата>, from GOG <id> (<имя>)` или `edition not known`, `; the firmware's recipe [<секция>]`,
+  если игра узнана рецептом, `, with the player's changes`, если есть слой. Значения
+  совпадают с «действующими» страницы (тест сравнивает разбор zip с GET /api/recipe);
+- `cover.png` — файл `cover` из ini (по умолчанию cover.png) из папки игры, если он есть;
+- `README.md` — заготовка (название, издание, GOG id, TODO: что проверено, что не так);
+- `manifest.section` — `[папка]`, `detect` (detect рецепта, если игра узнана, иначе `exe` из
+  ini, если путь относительный, иначе главная программа GOG, иначе закомментированная
+  подсказка), `gog` (goggame-*.info), комментарий, `source = lab/games/<Название>`,
+  `exclude` для goggame-*/__redist/tmp/commonappdata, если они есть в папке, `overlay`,
+  `cover = games/<папка>/cover.png`;
+- `needs.txt` — строки `need` от `game-install recipe DIR` (новая команда: секция рецепта
+  по gamerecipe.recipe_of, её detect, gog-файлы, главная программа GOG, файлы/данные/env
+  рецепта вне его source и вне рецептов прошивки — то, что берётся с ПК); у неизвестной игры
+  пусто;
+- `logs/1.log` — последний запуск как есть (байты).
+
+На ПК: `python3 scripts/recipe-import.py ZIP [--sdk DIR] [--force]` — проверяет все имена zip
+до записи (только `games/<одна папка>/…`, manifest.section, needs.txt, logs/1.log; без `..`,
+`\`, абсолютных, `:`), не пишет через ссылки, не трогает существующую `games/<папка>` без
+`--force` (с ним заменяет файлы из zip, прочие остаются), дописывает секцию в
+games/games.manifest, если `[папка]` там нет (сохраняет CRLF/LF файла), иначе печатает
+секцию приставки для сравнения; печатает, что заполнить руками (source, README, needs, где
+журнал). pathlib, без chmod/symlink; на Windows не запускался (нет машины под рукой).
+
+Проверено: test-bare-web.py RecipeTest.test_export (pirates со слоем, GOG-info, обложкой,
+__redist/tmp, журнал не UTF-8; pop по рецепту прошивки; game.ini; отказы 400/404/403/GET) и
+test_merge_text (8 слоёв: значения = ini_merge, одна строка на ключ, комментарии); весь файл 52
+→ 56 тестов OK; test-recipe-import.py 6 тестов (новый, повтор без --force — отказ и ничего не
+изменено, --force, секция уже есть, CRLF, 9 плохих zip, ссылка на папку и внутри неё).
+Мутации: merge_text (повторы, новые секции), обложка, слой, exclude; recipe-import (exists,
+секция, две папки, ссылки) — каждая ловится.
+OGU1: `POST /api/recipe/pirates/export` → 200, 143597 байт, 6 файлов; разобран
+`recipe-import.py` во временную копию games/ (scratchpad, не репозиторий): wine.ini без
+первой строки = /games/pirates/wine.ini по md5 (bc4a69dc…), cover.png = обложке карты
+(e1eb060e…, PNG 240x240), logs/1.log = /data/logs/pirates/1.log (e9f8bb4c…); секция [pirates]
+уже в манифесте — не тронута, печатается для сравнения; повтор без --force — отказ, код 1.
+Со слоем (PUT mode 640x480, select esc): первая строка «…, with the player's changes», разбор
+zip = effective GET /api/recipe (True); слой удалён, /games/recipes нет, карта ro.
+Не проверено: вкладка «Экспорт» в живом браузере (только синтаксис app.js через node).
+
+Отклонения: 5.3 (загрузка zip на другую приставку в /games/recipes) не делался — не было в
+задании ночи.
 
 ## Этап 7. Windows 10, Wi-Fi и адрес (1 день)
 
@@ -651,6 +708,69 @@ mDNS-ответчика в rootfs, адрес показывается на эк
     goggame-*.script: ключи реестра в `reg`. 7.4 Эвристика по импортам exe и
     goginput.ini: стартовые mode/keys/dlls.
 
+### Этап 8: сделано 2026-11-26 (builder, ветка `web`, не отдельная — по заданию ночи)
+
+Коммиты SDK: dd3adb3 (7.3 реестр из goggame-*.script), 9d4e274 (`game-install heal`,
+`/api/heal`, кнопки в журнале сайта); bare_app: d4c1547 (экран ошибки: «Исправить и запустить снова»).
+
+7.3 Реестр. game-install при установке игры без рецепта читает goggame-*.script в её папке:
+действия `setRegistry` с `valueName` → строки `reg = HKCU\KEY\NAME=DATA` в её wine.ini (корни
+HKEY_LOCAL_MACHINE/CURRENT_USER/CLASSES_ROOT/USERS → HKLM/HKCU/HKCR/HKU, `{app}` → `D:\<папка>`
+как в рецептах coldfear/nfsu); из нескольких значений одного имени — для ru, иначе для «*»,
+иначе для en; пропускаются (с причиной в stderr) не строки (dword), имя с `=` или `\` или пустое,
+другие `{подстановки}` установщика, строка не для wine.ini (` ;`, управляющие, >511 байт),
+сверх 16 (MAX_REG bare_app_wine); `deleteSubkeys` и прочие действия — ничего. Только для
+неизвестных игр (ветка `if not hit`). На реальных script-файлах lab/ (копии): Cold Fear даёт
+ровно строку рецепта coldfear, PoP — 4 значения Ubisoft, Tales of Monkey Island — 10 (en).
+Тест test_install_unknown_gog_registry (поддельный script: 14 действий, языки, dword,
+подстановки, `=` в имени, ` ;` в значении, supportData; 20 значений → 16); мутации (ранг языка,
+dword, подстановки, предел, ` ;`, пустое имя) ловятся. На OGU1 не проверялось.
+
+7.1/7.2 Самолечение:
+- `game-install heal FOLDER dll NAME` — NAME (`[A-Za-z0-9_.+-]+.dll`) из папок redist (файл или
+  член .cab DirectX, 32-бит; пакет directx_Jun2010_redist.exe сначала распаковывается, как при
+  установке) в папку программы игры (каталог `exe` wine.ini); `done dll PATH`, `fail need NAME`,
+  `fail exists PATH` (уже есть, в любом регистре), `fail gone`;
+- `game-install heal FOLDER writable PATH` — PATH (относительный, без пробелов/запятых, `\` → `/`)
+  дописывается в `writable` слоя /games/recipes/FOLDER/wine.ini (значение = writable слоя, иначе
+  рецепта, + PATH; если PATH или его родитель уже там — ничего не пишется); файла ещё нет —
+  берётся ближайший существующий каталог игры; прочие строки слоя сохраняются;
+- обе под замком установки и через card-rw;
+- bare-web: `GET /api/heal/FOLDER` — по 1.log и правилам errors.ini (`wine-missing-dll`:
+  match/require/exclude как в game_errors.c; `card-read-only`: путь `/games/FOLDER/…` или
+  `/data/wine/games/FOLDER/…` в строке) → предложения; `POST /api/heal/FOLDER {kind, arg}` —
+  только игры Windows, 409 пока игра идёт или идёт установка, после writable — FIFO `reload`;
+  страница журнала (журнал 1 игры Windows) показывает кнопки «Исправить: …» и затем «Запустить
+  игру ещё раз»; новый хук BARE_WEB_ERRORS;
+- экран ошибки bare_app: game_errors отдаёт `arg` (%1) и строку совпадения; game_heal_of()
+  решает, что можно исправить (dll — по правилу, writable — только у wine.ini-игр, путь своей
+  папки без `..`); текст ошибки дополняется «Приставка может исправить это сама: A …», подпись
+  A — «Исправить и запустить снова»; A → ACT_GAME_HEAL → ctl_heal (фоном `game-install heal`)
+  → NOTIFY_GAME_HEAL → при успехе (для writable сначала view_games_reload(FOLDER)) игра
+  запускается снова, при неудаче — всплывающее объяснение, следующая A только запускает.
+
+Проверено: test-bare-web.py HealTest 4 теста (предложения и require, dll из настоящего .cab
+(тест собирает несжатый MSCF, cabextract его читает) и из файла redist, 64-битная — нет,
+плохие имена, card-rw парно; writable: каталог вместо файла, уже есть, слой игрока, вставка
+перед секцией, плохие пути, результат читается ini_layer-правилами; 409 при идущей игре и при
+занятом замке); bare_app ctest 9/9: test_core (матрица game_heal_of 13 строк через
+game_error_find с установленным errors.ini), game_log 9 и 10 (A → `heal fake dll
+D3DX9_43.dll` → два запуска; неудача → без запуска, следующая A — запуск). Мутации C (сброс
+предложения при неудаче, перезапуск после исправления, wine-проверка, `..`, граница папки,
+точка в конце пути, .dll) и Python (замок, exists, уже в writable, running, require, exclude,
+замена строки слоя) ловятся.
+OGU1 (через сайт, тестовая игра zz-heal с поддельным 1.log): предложения dll d3dx9_35.dll и
+writable Save/slot1.sav; heal dll → `done dll bin/d3dx9_35.dll` за 1,1 с из
+AUG2007_d3dx9_35_x86.cab на карте (3727720 байт); heal writable → слой `writable = Save`, bare_app
+применил (games.json layer applied, storage +/data/wine/games/zz-heal); nothere.dll → `fail
+need`; каждый вызов — begin/end card-rw, карта ro, писателей 0; zz-heal, её слой, /games/recipes
+и журнал удалены. Экран ошибки на приставке с настоящей игрой не проверялся (нет игры без
+библиотеки под рукой) — только host-ut.
+
+Не делалось: 7.4 (эвристика по импортам exe и goginput.ini).
+Замечено: после удаления игры со слоем в /run/bare_app/ini остаётся её действующий файл
+(bare_app не убирает его при пересканировании) — безвредно (tmpfs), удалён вручную.
+
 ## Риски
 
 - Память: Python-сервер ~10–15 МБ при играх у предела памяти → запуск по кабелю.
@@ -664,9 +784,18 @@ mDNS-ответчика в rootfs, адрес показывается на эк
   процесс умер (или pid занят другим процессом — другое время старта), выбрасывается
   следующим `begin`/`end`/`status` того же или другого писателя, и карта уходит в ro.
   Через card-rw пишут bare-web (CardWriting), game-install (`card_rw`), bare-report,
-  bare-backup. Не через него: файловые задания самого bare_app (services/files.c: файловый
-  менеджер, удаление игры с экрана опций) — они делают свой remount rw/ro, и их ro во время
-  записи сайта даст тому EROFS (открытый вопрос, C-правка не делалась).
+  bare-backup и (с 2026-11-26, bare_app 5135dcb) файловые задания самого bare_app
+  (services/files.c: файловый менеджер, удаление игры с экрана опций): задание, которое пишет
+  на /games, — писатель card-rw (`card-rw begin <pid bare_app>` до, `end` после, в том числе
+  при ошибке и отмене), и тогда, когда карта уже rw для другого писателя (без подтверждения
+  игрока — только если она rw сейчас), так что конец записи сайта не делает карту ro под
+  заданием и наоборот. Без /usr/sbin/card-rw (платформа без него, ПК) и для других разделов
+  старой карты из нескольких разделов — прежний свой remount. Проверено: test_core
+  test_files_card_rw (заглушка card-rw: парность при успехе, ошибке, отмене, отказе begin;
+  карта rw для другого писателя; чтение и задания не на карте — без begin; 4 мутации
+  ловятся); OGU1: удаление тестовой игры с экрана опций — «/games writable (for <pid
+  bare_app>)» и «read-only again» в card-rw.log; то же при удерживаемом писателе (sleep):
+  после удаления карта rw, writers=1, после его end — ro.
 - Карту вынули или включили «USB-диск» во время загрузки → сервер отвечает 503 и
   страница объясняет; .part не считается записью.
 - Восстановление поверх живых данных: игра не должна идти (сайт отказывает, если
