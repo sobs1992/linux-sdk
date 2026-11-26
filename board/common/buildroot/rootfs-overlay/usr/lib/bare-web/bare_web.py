@@ -951,7 +951,7 @@ def ini_parse(text, strict=False):
     sec = ""
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
-        if strict and (any(ord(c) < 32 and c != "\t" for c in raw) or len(raw.encode()) > 1000):
+        if strict and (any(ord(c) < 32 and c != "\t" for c in raw) or len(raw.encode()) > LAYER_LINE_MAX):
             raise IniError("строка %d: управляющие символы или длиннее 1000 байт" % n)
         if not line or line[0] in ";#":
             continue
@@ -1278,6 +1278,19 @@ class Recipe:
     def base_entries(self):
         return ini_parse(read(self.base_path, 1 << 20) or "") if self.base_path else []
 
+    def base_too_long(self):
+        """the game's ini has a line longer than bare_app's readers take
+        (ini_layer.c base_fits(): more than 1000 bytes before its newline):
+        bare_app does not use the layer then; the line's number, else 0"""
+        try:
+            with open(self.base_path, "rb") as f:
+                for n, line in enumerate(f, 1):
+                    if len(line.rstrip(b"\n")) > LAYER_LINE_MAX:
+                        return n
+        except (OSError, TypeError):
+            pass
+        return 0
+
     def layer_raw(self):
         if not self.layer_path or os.path.islink(self.layer_path):
             return None
@@ -1288,8 +1301,8 @@ class Recipe:
         merged here by the same rules; without a layer the game's"""
         base = self.base_entries()
         raw = self.layer_raw()
-        if raw is None:
-            return base, "base"
+        if raw is None or self.base_too_long():
+            return base, "base"	# bare_app: the layer broken, the game's as it is
         try:
             lm = os.stat(self.layer_path).st_mtime_ns
             em = os.stat(self.eff_path).st_mtime_ns if self.eff_path else -1
@@ -1317,6 +1330,10 @@ class Recipe:
                 layer = ini_sections(ini_parse(raw, strict=True))
             except IniError as e:
                 err = str(e)
+            long_line = self.base_too_long()
+            if long_line and not err:
+                err = ("строка %d ini игры длиннее %d байт: приставка правки не применяет"
+                       % (long_line, LAYER_LINE_MAX))
         eff, src = self.effective()
         out.update(base=ini_sections(self.base_entries()), layer=layer, layer_text=raw,
                    layer_problem=err, effective=ini_sections(eff), effective_source=src,
@@ -1331,7 +1348,19 @@ class Recipe:
         return out
 
 
-RECIPE_LOCK = threading.Lock()	# one change of a layer at a time
+LAYER_LINE_MAX = 1000	# bytes of a line bare_app's ini readers take (ini_layer.c LINE_MAX_LEN)
+RECIPE_LOCK = threading.Lock()	# one change of a layer at a time (also game-install heal writable)
+
+
+class NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+NO_LOCK = NoLock()
 
 
 class Refused(Exception):
@@ -2142,7 +2171,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         rebinding, is not); Origin, when a browser sends one, this page's;
         a request that changes anything without Origin only from this
         page's script (X-Requested-With: bare-web) or as JSON: a form or
-        an image of another site can send neither"""
+        an image of another site can send neither. A body of chunks
+        (Transfer-Encoding) is not read here: refused, the connection closed
+        (what follows it would be read as the next request)"""
+        if self.headers.get_all("Transfer-Encoding"):
+            self.unread = True	# Connection: close
+            if self.headers.get("Content-Length") is None:
+                return 411, "Нужен Content-Length: тело частями (chunked) не принимается."
+            return 400, "Transfer-Encoding вместе с Content-Length: отказано."
         if not self.allowed():
             return 403, "Доступ только с компьютера на кабеле USB."
         port = self.server.server_address[1]
@@ -2935,7 +2971,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise Refused(409, "Игра идёт: сначала выйдите из неё.")
         except Refused as e:
             return self.refused(e)
-        rc, out, err = run([GAME_INSTALL, "heal", g["folder"], kind, arg], timeout=600)
+        # writable: game-install writes the layer, one change of it at a time
+        # with the workshop's (RECIPE_LOCK)
+        with RECIPE_LOCK if kind == "writable" else NO_LOCK:
+            rc, out, err = run([GAME_INSTALL, "heal", g["folder"], kind, arg], timeout=600)
         last = ([l for l in out.splitlines() if l.startswith(("done ", "fail "))] or ["fail error " + err.strip()])[-1]
         f = last.split(" ", 2) + ["", ""]
         if f[0] == "done":

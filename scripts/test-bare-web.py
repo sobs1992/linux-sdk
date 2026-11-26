@@ -898,6 +898,37 @@ class GateTest(unittest.TestCase):
         c.close()
         self.assertIn(b" 413 ", d.split(b"\r\n")[0])
 
+    def test_chunked_refused(self):
+        """a body of chunks: 411 (with Content-Length too: 400), Connection:
+        close, the connection closed, nothing of the body answered"""
+        inner = b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % PORT
+        chunk = b"%x\r\n%s\r\n0\r\n\r\n" % (len(inner), inner)
+        for method, path, extra, code in (("POST", "/api/report", "", b"411"),
+                                          ("PUT", "/api/upload/install/x.bin", "", b"411"),
+                                          ("GET", "/api/status", "", b"411"),
+                                          ("POST", "/api/report", "Content-Length: %d\r\n" % len(chunk), b"400")):
+            with self.subTest(method=method, extra=extra):
+                c, d = self.raw("%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Requested-With: bare-web\r\n"
+                                "Transfer-Encoding: chunked\r\n%s\r\n" % (method, path, PORT, extra), chunk)
+                head = d.split(b"\r\n\r\n")[0]
+                self.assertIn(b" %s " % code, head.split(b"\r\n")[0])
+                self.assertIn(b"\r\nConnection: close", head)
+                rest, closed = d.split(b"\r\n\r\n", 1)[1], False
+                c.settimeout(1.5)
+                try:
+                    while True:
+                        b = c.recv(65536)
+                        if not b:
+                            closed = True
+                            break
+                        rest += b
+                except socket.timeout:
+                    pass
+                c.close()
+                self.assertTrue(closed)
+                self.assertNotIn(b"HTTP/1.1 ", rest)
+        self.assertFalse(os.path.exists(os.path.join(GAMES, "install", "x.bin.part")))
+
     def test_logs_numbers(self):
         for n in ("0", "4", "01", "1.0", "1 ", "+1", "-1", "1x", "١", "", "12"):
             self.assertEqual(req("GET", "/api/logs/coldfear/" + urllib.parse.quote(n))[0], 404, n)
@@ -1184,7 +1215,9 @@ class FakeBareApp:
                 os.utime(gj)
         if cmd == "reload" and arg in self.games:
             base, layer, eff = self.games[arg]
-            if os.path.exists(layer):
+            # ini_layer.c base_fits(): a line of the base over 1000 bytes, the layer broken
+            fits = all(len(l.rstrip(b"\n")) <= 1000 for l in open(base, "rb"))
+            if os.path.exists(layer) and fits:
                 os.makedirs(os.path.dirname(eff), exist_ok=True)
                 m = bw.ini_merge(bw.ini_parse(open(base).read()), bw.ini_parse(open(layer).read()))
                 with open(eff, "w") as f:
@@ -1421,6 +1454,29 @@ class RecipeTest(unittest.TestCase):
             self.assertEqual(jreq("POST", "/api/game/pirates/launch")[0], 503)
         finally:
             BARE_APP.start()
+
+    def test_base_line_too_long(self):
+        """a line of the game's ini over 1000 bytes: bare_app does not use the
+        layer (ini_layer.c), the server says the game's ini is in effect"""
+        base = os.path.join(self.pirates, "wine.ini")
+        text = open(base).read()
+        for n, used in ((1001, False), (1000, True)):
+            with self.subTest(n=n):
+                with open(base, "w") as f:
+                    f.write(text + ";" + "x" * (n - 1) + "\n")
+                os.utime(base)
+                eff = os.path.join(ENV["BARE_WEB_RUN"], "ini", "pirates.ini")
+                if os.path.exists(eff):
+                    os.remove(eff)
+                s, r = jreq("PUT", "/api/recipe/pirates/layer", {"sections": {"": {"mode": "1024x768"}}})
+                self.assertEqual(s, 200, r)
+                s, r = jreq("GET", "/api/recipe/pirates")
+                if used:
+                    self.assertEqual((r["effective"][""]["mode"], r["layer_problem"]), ("1024x768", None))
+                else:
+                    self.assertEqual(r["effective_source"], "base")
+                    self.assertEqual(r["effective"][""]["mode"], r["base"][""]["mode"])
+                    self.assertIn("длиннее 1000 байт", r["layer_problem"])
 
     def test_adopt_controls(self):
         conf_before = open(ENV["BARE_WEB_CONF"]).read()
@@ -1794,6 +1850,24 @@ class HealTest(unittest.TestCase):
                                                       bw.ini_parse(open(layer).read(), strict=True)))[""]["writable"],
                          "Data new.ini")
 
+    def test_writable_one_layer_change_at_a_time(self):
+        """heal writable waits while the workshop changes a layer (RECIPE_LOCK
+        held), then writes; dll does not wait"""
+        layer = os.path.join(GAMES, "recipes", "healme", "wine.ini")
+        res = []
+        with bw.RECIPE_LOCK:
+            t = threading.Thread(target=lambda: res.append(self.heal("writable", "Save/slot1.sav")))
+            t.start()
+            t.join(1.0)
+            self.assertTrue(t.is_alive())
+            self.assertFalse(os.path.exists(layer))
+            s, r = self.heal("dll", "D3DX9_43.dll")
+            self.assertEqual(s, 200, r)
+        t.join(30)
+        self.assertEqual(res[0][0], 200, res)
+        self.assertEqual([l for l in open(layer).read().splitlines() if not l.startswith(";")],
+                         ["writable = Data Save"])
+
     def test_refused_while_running(self):
         self.games_json(running={"folder": "healme"})
         self.assertEqual(self.heal("dll", "xinput1_3.dll")[0], 409)
@@ -1883,12 +1957,16 @@ class CheckTest(unittest.TestCase):
                 self.assertEqual(p.stdout.readline().strip(), b"ready")
                 self.state(pid=p.pid)	# SIGUSR1 goes to the helper, never to this test
                 if mode == "deaf":
+                    # a picture of before is there: not the screen now
+                    with open(path, "wb") as f:
+                        f.write(b"P6\n2 2\n255\n" + bytes(12))
                     old, bw.SHOT_WAIT = bw.SHOT_WAIT, 0.5
                     try:
                         s, h, d = req("GET", "/api/shot.png")
                     finally:
                         bw.SHOT_WAIT = old
                     self.assertEqual(s, 504, d)
+                    self.assertFalse(os.path.exists(path))
                     continue
                 s, h, d = req("GET", "/api/shot.png")
                 self.assertEqual((s, dict(h)["Content-Type"]), (200, "image/png"), d)
