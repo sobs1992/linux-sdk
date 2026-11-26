@@ -111,8 +111,11 @@ class Test(unittest.TestCase):
         self.write_state()
         # card-rw of the test: each begin and end written down; $T/no-card-rw fails a begin
         self.card_rw = os.path.join(t, "card-rw")
+        # $T/term-in-begin: a begin that succeeds stops its caller (SIGTERM) before it answers
         put(self.card_rw, '#!/bin/sh\n[ "$1" = begin ] && [ -e "%s/no-card-rw" ] && exit 1\n'
-                          'echo "$1 $2" >> "%s/card-rw.log"\n' % (t, t))
+                          'echo "$1 $2" >> "%s/card-rw.log"\n'
+                          '[ "$1" = begin ] && [ -e "%s/term-in-begin" ] && { kill -TERM "$2"; sleep 0.3; }\n'
+                          'exit 0\n' % (t, t, t))
         os.chmod(self.card_rw, 0o755)
         self.env = dict(os.environ, BARE_BACKUP_DATA=self.data, BARE_BACKUP_GAMES=self.games,
                         BARE_BACKUP_RUN=self.run_dir, BARE_BACKUP_CONF=self.conf,
@@ -510,6 +513,26 @@ class Test(unittest.TestCase):
         n = len(self.rw_calls())
         self.bb("restore", path)
         self.assertEqual(len(self.rw_calls()), n)
+
+    def test_stopped_while_card_rw_begins(self):
+        """SIGTERM while card-rw begin runs (it made the card writable): the
+        stop waits for its answer, then card-rw end, exit 128 + 15"""
+        open(os.path.join(self.top, "term-in-begin"), "w").close()
+        r = self.bb("backup", "pirates", ok=False)
+        self.assertEqual(r.returncode, 143, r.stderr)
+        self.assertEqual([c for c, _ in self.rw_calls()], ["begin", "end"])
+        self.assertFalse(os.path.exists(os.path.join(self.games, "backups")) and
+                         any(n.endswith(".zip") for n in os.listdir(os.path.join(self.games, "backups"))))
+        os.unlink(os.path.join(self.top, "term-in-begin"))
+        # SIGHUP the same; a restore with a layer
+        put(os.path.join(self.games, "recipes", "pirates", "wine.ini"), "mode = 1024x768\n")
+        path = self.backup()
+        put(self.card_rw, open(self.card_rw).read().replace("kill -TERM", "kill -HUP"))
+        open(os.path.join(self.top, "term-in-begin"), "w").close()
+        n = len(self.rw_calls())
+        r = self.bb("restore", path, ok=False)
+        self.assertEqual(r.returncode, 129, r.stderr)
+        self.assertEqual([c for c, _ in self.rw_calls()[n:]], ["begin", "end"])
 
     # ---- the layers of a copy of all: all of them or none ----
 

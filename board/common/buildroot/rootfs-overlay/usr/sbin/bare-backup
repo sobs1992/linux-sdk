@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -228,13 +229,28 @@ def card_there():
     return os.path.isdir(GAMES) if TEST else card_opts() is not None
 
 
+STOPS = (signal.SIGTERM, signal.SIGHUP)	# main(): they end the process through its finally blocks
+
+
 class CardWriting:
     """with CardWriting(): the card writable inside (card-rw begin), its end after,
-    an exception inside too"""
+    an exception inside too, a stop (SIGTERM, SIGHUP) too: one that comes while
+    card-rw begin runs waits until its answer is known, then the end follows"""
     def __enter__(self):
         if not TEST and card_opts() is None:
             raise Fail("Карты игр нет в приставке.")
-        rc, _ = run([CARD_RW, "begin", str(os.getpid())], timeout=60)
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, STOPS)
+        try:
+            rc, _ = run([CARD_RW, "begin", str(os.getpid())], timeout=60)
+        except BaseException:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+            raise
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)	# a stop that waited comes here
+        except BaseException:
+            if not rc:
+                self.__exit__()
+            raise
         if rc == 3:
             raise Fail("Карты игр нет в приставке.")
         if rc:
@@ -988,6 +1004,9 @@ def main(argv):
     if len(argv) < 2 or argv[1] not in cmds:
         say(__doc__.strip().splitlines()[0])
         return 2
+    # stopped (SIGTERM, SIGHUP): the finally blocks still run (card-rw end)
+    for sig in STOPS:
+        signal.signal(sig, lambda n, f: sys.exit(128 + n))
     try:
         cmds[argv[1]](argv[2:])
     except Fail as e:
