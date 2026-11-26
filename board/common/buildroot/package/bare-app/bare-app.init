@@ -27,6 +27,8 @@ stop)
 		i=$((i + 1))
 	done
 	rm -f $PIDFILE
+	# the screenshot bare_app takes as it ends (view.c): 1.2 MB of /run
+	rm -f "$BARE_APP_SHOT"
 	;;
 restart|reload)
 	"$0" stop
