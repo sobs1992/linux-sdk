@@ -3,7 +3,8 @@
 its interface code for a screen whose top H rows are shown (the game itself
 still 800x600): the screen size the interface asks for says 800 x H, and
 the places that draw at the old bottom move up. The DLLs patched are
-written to OUTDIR."""
+written to OUTDIR; a place patched already stays (a second run gives the
+first one's files)."""
 import os, struct, sys
 
 def sections(b):
@@ -48,7 +49,8 @@ for dll in sorted({s[0] for s in SITES}):
     for d, va, imm, old, new in SITES:
         if d != dll: continue
         o = file_offset(b, va) + imm
-        assert struct.unpack_from('<I', b, o)[0] == old, (dll, hex(va))
+        v = struct.unpack_from('<I', b, o)[0]
+        assert v in (old, new), (dll, hex(va), v)	# new: patched already, left as it is
         struct.pack_into('<I', b, o, new)
     open(os.path.join(out, dll), 'wb').write(b)
     print(dll)

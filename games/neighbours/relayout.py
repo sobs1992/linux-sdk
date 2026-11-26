@@ -9,7 +9,10 @@ Elements placed in a dialog whose background picture is cut move up by the
 rows removed above them (inside a cut: to its start); in a scaled one their
 y is scaled. Only elements placed in the dialog itself move: offsets inside
 an element with an offset of its own are relative to it. Writes
-OUTDIR/data/gamedata.bnd and gfxdata.bnd, keeping order and compression."""
+OUTDIR/data/gamedata.bnd and gfxdata.bnd, keeping order and compression.
+Data this has already prepared (no EDITS' old text left, the pictures'
+heights agree, see prepared()) is written as it is: a second run gives the
+first one's files; data prepared in part is refused."""
 import io, os, re, runpy, sys, zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tga
@@ -88,7 +91,49 @@ def fix_xml(name, data):
         s = head + body
     return encode(s, enc)
 
+def prepared():
+    """True: the data prepared already, False: as the game has it; refused
+    if it is both. The dialogs say it (EDITS as the game has them: each old
+    text once when the ones before are done, later ones may edit an earlier
+    one's new text; prepared: none left); a picture where it can (as the
+    game has it: as high as its last cut's end at least, as high as it is
+    scaled to not; prepared: no higher than the screen's 600 rows less its
+    cuts, as high as it is scaled to)"""
+    says = {}	# what: True prepared, False as the game has it
+    for p, cuts in CUTS.items():
+        if p in gxn:
+            h = pic_height(p)
+            fresh, done = h >= max(y1 for _, y1 in cuts), h <= 600 - sum(y1 - y0 for y0, y1 in cuts)
+            if fresh != done:
+                says[p] = done
+    for p, rows in SCALES.items():
+        if p in gxn:
+            says[p] = pic_height(p) == rows
+    gdn = {n.lower(): n for n in gd.namelist()}
+    given, now = {}, {}
+    fresh, done = True, True
+    for x, old, new in EDITS:
+        n = gdn.get(x.lower())
+        if n is None:
+            continue
+        if n not in given:
+            given[n] = now[n] = decode(gd.read(n))[0]
+        fresh = fresh and now[n].count(old) == 1
+        now[n] = now[n].replace(old, new)
+        done = done and given[n].count(old) == 0
+    if given:
+        assert fresh != done, ('the dialogs prepared in part', fresh, done)
+        says['dialogs'] = done
+    assert len(set(says.values())) < 2, ('the data prepared in part', sorted(k for k, v in says.items() if v))
+    return set(says.values()) == {True}
+
 os.makedirs(out, exist_ok=True)
+if prepared():
+    import shutil
+    for b in ('gamedata.bnd', 'gfxdata.bnd'):
+        shutil.copyfile(os.path.join(gdir, 'data', b), os.path.join(out, b))
+    print('ok (prepared already: as it is)')
+    sys.exit(0)
 with zipfile.ZipFile(os.path.join(out, 'gamedata.bnd'), 'w') as zo:
     for i in gd.infolist():
         d = gd.read(i)
