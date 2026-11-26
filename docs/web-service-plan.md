@@ -361,6 +361,8 @@ dir, files, storage, available, has_layer, layer. FIFO `reload` заново с�
 перестраивает их (полный скан); номера записей под другими экранами не меняются.
 `import-settings FILE`: строки `game=`, `controls.<key>=`, `options.<key>=`; записи этих
 игр в ctx и bare_app.conf заменяются, остальное (и чужие ключи файла) не трогается.
+С ревью 2: bare_app сначала забирает файл (rename в `FILE.taken`; писатель может забрать его
+назад, удалив FILE), после применения удаляет `FILE.taken`, при неудаче переименовывает в `FILE.bad`.
 
 Проверено: test_core (матрица: без слоя, скаляр, reg 3→2, saves, пустой список, [keys]
 по ключу и регистру, `b =`, слой без игры, битый слой, изменение + reload, переустановка
@@ -425,7 +427,7 @@ API (папка FOLDER = `folder` из games.json; имя проверяется
 | GET /api/recipe/FOLDER | kind (wine, native, built-in), editable, base / layer (или null) / effective по секциям `{"": {...}, "keys": {...}}` (повторяемые ключи — списки), `effective_source` (bare_app — файл /run/bare_app/ini, если он не старше слоя; server — слияние здесь по правилам ini_layer.c; base — слоя нет), defaults, `player_controls` (controls.<key> как есть + пары), `player_options`, layer_state/layer_error из games.json |
 | PUT /api/recipe/FOLDER/layer | тело `{"sections": {...}}` или текст ini (не JSON); слой = только отличия от base: скаляр, отличающийся; список целиком, если отличается; `""` у ключа базы — строка `key =`; совпадающее с base не пишется; нет отличий — файла нет (каталог и пустой /games/recipes удаляются rmdir); проверка по схеме (400 с перечнем; неизвестный ключ — предупреждение, пишется как текст; «;»/«#» после пробела, управляющие символы, `kp+ctrl`, >4 клавиш — отказ); CardWriting (remount rw/ro); FIFO `reload FOLDER`; ответ после того, как bare_app переписал действующий файл и games.json (до 2 с) |
 | DELETE /api/recipe/FOLDER/layer | удалить только wine.ini/game.ini слоя (чужие файлы каталога остаются), reload |
-| POST /api/recipe/FOLDER/adopt-controls | пара `A=B` игрока → `[keys] A` = действующее `B` (с умолчаниями bare_app_wine), `[labels]`/`[labels.ru] A` = подпись B (нет — `A =`); `A=-` → `none`; оси, lsens/rsens, gyro и направления крестовины при dpad ≠ arrows остаются у игрока; затем import-settings с `game=<key>`, остатком controls и прежней options; ждёт, пока bare_app запишет bare_app.conf (до 4 с); файл импорта удаляется |
+| POST /api/recipe/FOLDER/adopt-controls | пара `A=B` игрока → `[keys] A` = действующее `B` (с умолчаниями bare_app_wine), `[labels]`/`[labels.ru] A` = подпись B (нет — `A =`); `A=-` → `none`; оси, lsens/rsens, gyro и направления крестовины при dpad ≠ arrows остаются у игрока; затем import-settings с `game=<key>`, остатком controls и прежней options; ждёт, пока bare_app запишет bare_app.conf (до 4 с); файл импорта удаляется (с ревью 2: ждёт до 15 с, что bare_app заберёт файл; не забрал/`.bad`/не закончил — слой возвращается, 503 «Приставка не применила настройки, ничего не изменено») |
 
 Матрица и инварианты (проверены тестами): только отличия; повторная PUT заменяет весь слой;
 пустое значение удаляет ключ базы, у отсутствующего ключа — ничего; список «saves =»;
@@ -562,7 +564,7 @@ Origin = `http://<Host>` или (без Origin) с `X-Requested-With: bare-web` 
 | 1 | CSRF/Host | `Handler.gate()`: Host — один из адресов `ip -o -4 addr` + `<net>.2` + 127.0.0.1 с портом сервера (без порта = 80), иначе 421; Origin, если есть, = `http://<Host>`, иначе 403; не GET/HEAD без Origin — только с `X-Requested-With: bare-web` (app.js ставит во всех fetch/XHR) или JSON, иначе 403; то же в `handle_expect_100`. Отчёт — `POST /api/report {game}` → `{where, name}`, копия — `POST /api/saves/backup {game: FOLDER\|all}` → `{where, name, size}`, скачивание GET-ом `/api/reports/...?download=1` и `/api/saves/copy/...`; прежние GET `/api/report`, `/api/saves/all`, `/api/saves/F/backup` — 404. `body_json` — только при application/json | SDK f096a7a |
 | 2 | общий счётчик rw | `/usr/sbin/card-rw` (см. «Риски»), bare-web/game-install/bare-report/bare-backup через него; game-install по SIGTERM/SIGHUP выходит через finally | SDK 851ee65, d66750e, 4da8bc9, f096a7a |
 | 3а | запуск Cold Fear | сделано на OGU1 (ниже) | — |
-| 3б | свежая установка с плиткой | сделано на OGU1 (ниже) | — |
+| 3б | свежая установка с плиткой | сделано на OGU1 (ниже), но шаг prepare тогда не прошёл (`skip prepare`, см. ниже); честная приёмка — в «Ревью 2» | — |
 | 3в | памятки prepare-card | абзац про http://192.168.7.2 (вторая приставка http://192.168.8.2) в «КАК УСТАНОВИТЬ ИГРУ.txt» и «ЧТО СЮДА КЛАСТЬ.txt»; памятка переписывается, если её текст не совпадает с текстом системы (раньше писалась только при отсутствии) | SDK 4da8bc9 |
 | 4 | хуки game-install | GAME_INSTALL_{GAMES,DATA,RECIPES,REDIST,LOCK,CARD_RW,GUIDE} все или ни одного (иначе `fail error`, код 2) | SDK 4da8bc9 |
 | 4 | хуки bare-web | все BARE_WEB_* мест и программ (+CARD_RW, IP) или ни одного; PORT, BIND, NET и THP/LIB (их ставит /usr/sbin/bare-web) не хуки; неизвестный BARE_WEB_* тоже отказ | SDK f096a7a, f4ed3fe |
@@ -598,7 +600,9 @@ data-games.tar (данные neighbours, NFH1, coldfear, /data/backups, журн
 - 3б + п.2: /games/neighbours перенесена в /games/install/neighbours под card-rw → через 4 с
   games.json без neighbours (home следит за папками раз в 2 с: game_list_stamp, при изменении
   пересканирует и пишет games.json); scan → «new»; загрузка 300 МБ в updates через сайт и через
-  4 с `install/run` → done; в /run/card-rw оба писателя ~8 с, карта rw до конца загрузки (50,7
+  4 с `install/run` → done (поправка ревью 2: в событиях был `skip prepare games/neighbours/prepare.sh` —
+  relayout.py:72 AssertionError на уже подготовленных файлах; файлы остались прежними, потому и md5
+  совпали; в отчёте ревью 1 это не было сказано); в /run/card-rw оба писателя ~8 с, карта rw до конца загрузки (50,7
   с), потом ro; md5 загруженного = исходному; games.json снова с neighbours, плитка
   «Neighbours from Hell» в «Все игры» без перезапуска bare_app (тот же pid); 26 файлов папки игры
   и данные (neighbours, NFH1, coldfear) по md5 те же;
@@ -770,6 +774,85 @@ need`; каждый вызов — begin/end card-rw, карта ro, писат�
 Не делалось: 7.4 (эвристика по импортам exe и goginput.ini).
 Замечено: после удаления игры со слоем в /run/bare_app/ini остаётся её действующий файл
 (bare_app не убирает его при пересканировании) — безвредно (tmpfs), удалён вручную.
+
+## Ревью 2: замечания и исправления (2026-11-26, builder, ветка `web`, не слито, не запушено)
+
+Инварианты: (1) после adopt-controls либо слой с [keys] записан И запись controls игрока очищена
+(bare_app применил импорт), либо слой как был, conf не тронут, ответ — ошибка; файл импорта
+убирается только после подтверждения или после того, как сервер забрал его назад (тогда bare_app
+его уже не применит); (2) prepare.sh Neighbours, запущенный второй раз на своём же результате,
+даёт те же файлы; данные, подготовленные частично, — отказ, а не повторная правка; (3) у каждого
+успешного `card-rw begin` ровно один `end`, в том числе при SIGTERM/SIGHUP, пришедшем во время
+самого begin; (4) слой игры меняет один писатель за раз (сайт и `heal writable` с сайта);
+(5) сервер считает слой действующим тогда и только тогда, когда его применит bare_app (строка
+базы > 1000 байт — нет); (6) тело запроса, которое сервер не читает, не становится следующим
+запросом (chunked → отказ и закрытие); (7) recipe-import ничего не пишет, если хоть одно имя
+архива невозможно в Windows; (8) снимок экрана никогда не прежний (старый PPM удаляется до SIGUSR1).
+
+| № | Замечание | Что сделано | Коммит |
+|---|---|---|---|
+| 1 | adopt-controls: 200 settings_done:false и двойное применение | bare_app (ctl_settings.c): import забирает файл rename → `FILE.taken`, после применения удаляет, при неудаче → `FILE.bad`. bare-web: до 15 с ждёт, что файл забран; не забран — удаляет его сам (забирает назад) → restore_layer → 503 «Приставка не применила настройки, ничего не изменено.»; `.bad` или «забран, но не закончен» — так же; restore_layer не вышел — текст об этом. app.js: «проверьте позже» убрано, ошибка показывается | bare_app 6202e4d, SDK 60b54fa |
+| 2а | prepare neighbours не идемпотентен | relayout.py `prepared()`: диалоги (EDITS как у игры — каждый старый текст ровно раз с учётом цепочек; подготовлено — ни одного) и картинки там, где высота однозначна (у игры ≥ конца последнего выреза, подготовлено ≤ 600 − вырезанное; SCALES = целевая высота) → всё подготовлено: bnd копируются как есть; смесь — отказ «prepared in part»; dllpatch.py: место с уже новым значением оставляется | SDK d6daf2a |
+| 2б | честная приёмка 3б | см. ниже | — |
+| м | bare-backup SIGTERM/SIGHUP | обработчик в main (выход через finally → card-rw end); в CardWriting.__enter__ сигналы заблокированы на время `card-rw begin`, после ответа снимаются, пришедший стоп → end и выход 143/129 | SDK 5f8172c |
+| м | heal writable и слой | POST /api/heal writable выполняется под RECIPE_LOCK сервера (dll — без замка) | SDK 9f09b63 |
+| м | экран ошибки после неудачного исправления | game_screen_healed(): текст «Приставка может исправить это сама: A…» срезается до прежнего (err_text_base), в журнале «heal failed: the offer gone from the text» | bare_app ef1b7e2 |
+| м | oga.sh shot | путь из BARE_APP_SHOT окружения процесса bare_app (иначе /tmp/bare_app.ppm), старый файл удаляется до SIGUSR1, тянется только появившийся | bare_app 6131f69 |
+| м | recipe-import имена Windows | `<>:"\|?*`, управляющие, точка/пробел в конце, CON/PRN/AUX/NUL/COM1-9/LPT1-9 (и с расширением) в любой части пути → отказ до записи | SDK 1fdd77b |
+| м | старый PPM | CheckTest.test_shot: «глухой» bare_app при лежащем старом PPM → 504 и PPM удалён | SDK 9f09b63 |
+| м | effective_source при строке > 1000 байт | `Recipe.base_too_long()` (как base_fits: байты до `\n`, `\r` считается) → effective = база, source `base`, layer_problem «строка N ini игры длиннее 1000 байт» | SDK 9f09b63 |
+| м | chunked | gate(): Transfer-Encoding без Content-Length → 411, с ним → 400; всегда Connection: close | SDK 9f09b63 |
+
+Тесты на ПК: test-bare-web.py 60 OK (новые: test_adopt_not_applied — late/never/bad/stuck,
+test_base_line_too_long 1001/1000, test_chunked_refused, test_writable_one_layer_change_at_a_time,
+старый PPM в test_shot); test-bare-backup.py 21 OK (test_stopped_while_card_rw_begins: TERM при
+begin и HUP при restore со слоем); test-card-rw.py 16 OK; test-recipe-import.py 7 OK;
+scripts/test-neighbours-prepare.py 6 OK (мини-данные: relayout дважды = один результат, цепочка
+EDITS, отказ при частичной подготовке; мини-PE dllpatch дважды, чужое значение — отказ; с
+NFH_SRC1/2 = копии lab/games/NeighborsFromHell{,2} во временном каталоге: prepare.sh дважды, md5
+равны); bare_app ctest 9/9 (game_layer: файл импорта удалён, файл без игр → `.bad`; game_log 10:
+предложение снято). Мутации, каждая ловится: убрать restore_layer в ветке неуспеха, не забирать
+файл назад, `.bad` как успех, «забран, не закончен» как успех, игнорировать результат ожидания;
+пропуск prepared(), assert prepared-in-part, dllpatch только old; unlink `.taken` в C; срез
+текста в C; маска сигналов, обработчик, end в __enter__; NO_LOCK для writable; проверка длинной
+строки и её вариант без rstrip; проверка chunked и unread; windows_ok; удаление PPM до SIGUSR1.
+
+Другие рецепты с prepare.sh, повторный запуск (по чтению кода, не проверялось запуском):
+переживают — cod2, coldfear (проверяют байты и принимают уже исправленные), shade (grep
+MenuMoveX), pop (размер «уже по-русски»), gun (mv под проверкой), hota (cp под проверкой, sed),
+bardstale, fallout, nfsu, nfsmw, corsairs (sed по ключам, проверка наличия ключа), bout
+(textsize/scenemem: «already patched»); не проверено — daemonica (daemonica_dialog.py берёт
+daemonica.wrs из SOURCE, без него — из папки игры, т. е. уже исправленный), serioussam
+(controls.py переписывает 00-Default.ctl), neighbours2 (общий с neighbours, проверен на ПК).
+
+OGU1 (копия до замены: /media/D/OdroidLab/backups/ogu/web-stage1-2026-11-25/review2-before/ —
+files.tar: bare_app, /usr/lib/bare-web, /usr/share/bare-web, bare-backup, bare-web, game-install,
+relayout.py, dllpatch.py, bare_app.conf; neighbours-card-md5.txt (26 файлов /games/neighbours),
+neighbours-data.tar + md5 (данные NFH1 в профиле Wine; /data/wine/games/neighbours нет), conf-md5.txt).
+Установлены: bare_app (ветка, 6131f69), bare_web.py, app.js, bare-backup, relayout.py, dllpatch.py;
+S90bare-app и S43web перезапущены (без перезагрузки).
+- import-settings настоящим bare_app: файл с той же записью игры → забран и удалён, conf тот же
+  (md5); файл без игр → `.bad`, conf тот же. adopt-controls целиком на приставке не делался
+  (вернуть bare_app.conf байт в байт после него нельзя — порядок строк меняется);
+- 2б: копия lab/games/NeighborsFromHell (настоящий путь /media/D/OdroidLab/games/NeighborsFromHell,
+  не ссылка, 123 МБ, оригинал GOG bin/+data/) tar по ssh в /games/install/NeighborsFromHell под
+  card-rw (29 с, md5 равны) → scan «installed» → install/run replace → шаги 1,3,4,5,6,8, done, в
+  журнале prepare `ok`, без skip → md5 26 файлов /games/neighbours = прежним (и cover.png) →
+  POST launch: running neighbours, 30 fps; снимок 854x480, яркость 127, σ 101 (кинотеатр «Как
+  достать соседа», 480 строк) → quit → running null; данные NFH1 по md5 те же;
+- повтор случая ревью 1: /games/neighbours перенесена в /games/install/neighbours → scan «new» →
+  install → prepare `ok (prepared already: as it is)`, done, md5 26 файлов те же;
+- после: /games/install — только памятка; автокопия saves-neighbours-…-auto.zip, сделанная после
+  quit, и /data/backups/.stamp-neighbours удалены; bare_app.conf возвращён (в нём сменился только
+  `recent` от запуска) остановкой bare_app, копией прежнего файла и запуском — md5 = до работ;
+  карта ro, писателей 0.
+
+Отклонения и открытые вопросы: в game-install тот же промежуток, что был в bare-backup (стоп во
+время `card-rw begin` → begin без end; card-rw потом снимает умершего писателя) — не менялся (вне
+списка); heal writable с экрана приставки (bare_app → game-install) с сайтом не согласован
+замком — RECIPE_LOCK внутри процесса bare-web; при «забран, не закончен» (bare_app завис посреди
+импорта) слой возвращается, но если bare_app потом допишет — перестановка игрока будет потеряна
+(не двойное применение); daemonica/serioussam повторный prepare не проверены.
 
 ## Риски
 
