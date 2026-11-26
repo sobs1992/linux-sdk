@@ -7,13 +7,20 @@ mode, unused in the mainline dts.
 
 Report it as SW_HEADPHONE_INSERT of an input device "headphones" of its
 own, so the event device of the buttons (gpio-keys) stays as it is.
-gpio-keys-polled at 20 ms with a 50 ms debounce: the meson pinctrl GPIO
-chip maps no interrupts (no to_irq), so the interrupt driven gpio-keys
-cannot use the line. No pinctrl state: the line reads right as it is.
+gpio-keys-polled at 20 ms: the meson pinctrl GPIO chip maps no
+interrupts (no to_irq), so the interrupt driven gpio-keys cannot use the
+line. The contact bounces 1/0/1 within 300 ms as a plug goes in (seen
+with a 50 ms debounce-interval), hence 300 ms: gpio-keys-polled reports a
+change at the poll that sees it and then skips reading the line for
+DIV_ROUND_UP(debounce-interval, poll-interval) = 15 polls, 300 ms; the
+next read, 320 ms after the change, reports the settled state (no event
+if it is the same). A glitch that a poll happens to see while the plug
+stays in still shows as a 0 and, 320 ms later, a 1. No pinctrl state:
+the line reads right as it is.
 ---
 --- a/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
 +++ b/arch/arm64/boot/dts/amlogic/meson-g12b-odroid-go-ultra.dts
-@@ -224,6 +224,26 @@
+@@ -224,6 +224,32 @@
  		};
  	};
  
@@ -33,7 +40,13 @@ cannot use the line. No pinctrl state: the line reads right as it is.
 +			linux,input-type = <EV_SW>;
 +			linux,code = <SW_HEADPHONE_INSERT>;
 +			gpios = <&gpio_ao GPIOAO_9 GPIO_ACTIVE_HIGH>;
-+			debounce-interval = <50>;
++			/*
++			 * The contact bounces 1/0/1 within 300 ms as a plug
++			 * goes in. gpio-keys-polled reports a change at once,
++			 * then reads the line again only after
++			 * DIV_ROUND_UP(300, 20) = 15 polls (300 ms).
++			 */
++			debounce-interval = <300>;
 +		};
 +	};
 +
