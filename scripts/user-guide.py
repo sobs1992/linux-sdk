@@ -11,13 +11,31 @@ card is opened on a computer.
 Only the Markdown the guide uses: # headings, paragraphs, - and 1. lists
 (continued by indented lines), | tables |, ```code blocks```, a picture
 alone on its line, **bold**, `code`, [links](NN-chapter.md) (to the
-chapter in this file) and to the web. No dependencies but Python 3.
+chapter in this file), [links](#heading) and [links](NN-chapter.md#heading)
+(to a heading) and to the web. No dependencies but Python 3.
+
+Heading anchors, the rule the chapters' links are written by (GitHub's):
+the heading's text without its Markdown (** and ` dropped, [label](url) ->
+label), in lower case, every character but letters, digits, _, - and the
+space removed, then every space -> "-":
+  "По Wi-Fi"                          -> #по-wi-fi
+  "Сайт приставки: когда он включён"  -> #сайт-приставки-когда-он-включён
+A heading whose anchor is already taken in its chapter gets -2, -3, ...
+("#установка", "#установка-2"). A link's #anchor is looked up in its own
+chapter ([..](#a)) or in the named one ([..](NN-chapter.md#a)); the HTML id
+is the anchor, the chapter's first # heading keeps the chapter's id
+(ch-NN-name), and an anchor some earlier chapter already uses as an id
+gets the next free -N suffix in the HTML (links are resolved, so they
+still land on their own chapter's heading).
+A link to a chapter or an anchor that does not exist stops the build with
+the chapter file and the link (exit status 1, nothing written).
 """
 import base64
 import html
 import os
 import re
 import sys
+import urllib.parse
 
 GUIDE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "user-guide")
 
@@ -52,8 +70,77 @@ def chapter_id(name):
     return "ch-" + os.path.splitext(name)[0]
 
 
-def inline(text):
-    """**bold**, `code`, [links](...) of one paragraph's text, escaped"""
+def slug(heading):
+    """the heading's anchor by the rule at the top"""
+    t = re.sub(r"\[([^\]]+)\]\([^)\s]+\)", r"\1", heading.strip())
+    t = t.replace("**", "").replace("`", "").lower()
+    return re.sub(r"[^\w\- ]", "", t).replace(" ", "-")
+
+
+def headings(text):
+    """(level, text) of the chapter's # headings, code blocks skipped"""
+    out, code = [], False
+    for l in text.splitlines():
+        if l.startswith("```"):
+            code = not code
+            continue
+        m = None if code else re.match(r"(#{1,3}) (.+)$", l)
+        if m:
+            out.append((len(m.group(1)), m.group(2)))
+    return out
+
+
+def anchors(chapters):
+    """{chapter: {anchor: HTML id}} and {chapter: [HTML id per heading]}
+    for {chapter name: its Markdown}, in file name order"""
+    used = set(chapter_id(n) for n in chapters)
+    amap, ids = {}, {}
+    for n in sorted(chapters):
+        amap[n], ids[n], first = {}, [], True
+        for level, text in headings(chapters[n]):
+            base = slug(text)
+            a, k = base, 1
+            while a in amap[n]:
+                k += 1
+                a = "%s-%d" % (base, k)
+            if first and level == 1:
+                hid, first = chapter_id(n), False
+            else:
+                hid, k = a, 1
+                while hid in used:
+                    k += 1
+                    hid = "%s-%d" % (a, k)
+                used.add(hid)
+            amap[n][a] = hid
+            ids[n].append(hid)
+    return amap, ids
+
+
+class Links:
+    """resolves a chapter's local links; broken ones are collected"""
+    def __init__(self, amap):
+        self.amap, self.errors = amap, []
+
+    def href(self, url, name):
+        local = re.fullmatch(r"([0-9]{2}-[a-z0-9-]+\.md)?(?:#(.*))?", url)
+        if not local or not url:
+            return url
+        target, frag = local.group(1) or name, local.group(2)
+        if target not in self.amap:
+            self.errors.append("%s: link (%s): no chapter %s" % (name, url, target))
+            return url
+        if frag is None:
+            return "#" + chapter_id(target)
+        hid = self.amap[target].get(urllib.parse.unquote(frag))
+        if hid is None:
+            self.errors.append("%s: link (%s): no heading #%s in %s" % (name, url, frag, target))
+            return url
+        return "#" + hid
+
+
+def inline(text, name, links):
+    """**bold**, `code`, [links](...) of one paragraph's text of chapter
+    name, escaped"""
     codes = []
 
     def keep(m):
@@ -65,8 +152,7 @@ def inline(text):
 
     def link(m):
         label, url = m.group(1), m.group(2)
-        local = re.fullmatch(r"([0-9]{2}-[a-z0-9-]+)\.md(#.*)?", url)
-        href = "#" + chapter_id(local.group(1) + ".md") if local else url
+        href = links.href(html.unescape(url), name)
         return '<a href="%s">%s</a>' % (html.escape(href), label)
     text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, text)
     return re.sub(r"\0(\d+)\0", lambda m: codes[int(m.group(1))], text)
@@ -80,22 +166,23 @@ def picture(src, alt, base):
             % (mime, data, html.escape(alt), html.escape(alt)))
 
 
-def table(rows):
+def table(rows, name, links):
     cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows]
     head, body = cells[0], cells[2:]
     out = ["<table>"]
     if any(head):
-        out.append("<tr>" + "".join("<th>%s</th>" % inline(c) for c in head) + "</tr>")
+        out.append("<tr>" + "".join("<th>%s</th>" % inline(c, name, links) for c in head) + "</tr>")
     for r in body:
-        out.append("<tr>" + "".join("<td>%s</td>" % inline(c) for c in r) + "</tr>")
+        out.append("<tr>" + "".join("<td>%s</td>" % inline(c, name, links) for c in r) + "</tr>")
     out.append("</table>")
     return "\n".join(out)
 
 
-def markdown(text, name, base):
-    """the chapter's HTML; its first heading gets the chapter's id"""
+def markdown(text, name, base, ids, links):
+    """the chapter's HTML; ids: the HTML id of each heading in order
+    (anchors())"""
     lines = text.splitlines()
-    out, i, first = [], 0, True
+    out, i, ids = [], 0, iter(ids)
     while i < len(lines):
         l = lines[i]
         if not l.strip():
@@ -111,9 +198,8 @@ def markdown(text, name, base):
         m = re.match(r"(#{1,3}) (.+)$", l)
         if m:
             level = len(m.group(1))
-            ident = ' id="%s"' % chapter_id(name) if first and level == 1 else ""
-            first = first and level != 1
-            out.append("<h%d%s>%s</h%d>" % (level, ident, inline(m.group(2)), level))
+            out.append('<h%d id="%s">%s</h%d>' % (level, html.escape(next(ids)),
+                                                 inline(m.group(2), name, links), level))
             i += 1
             continue
         m = re.fullmatch(r"!\[([^\]]*)\]\(([^)]+)\)", l.strip())
@@ -125,7 +211,7 @@ def markdown(text, name, base):
             j = i
             while j < len(lines) and lines[j].startswith("|"):
                 j += 1
-            out.append(table(lines[i:j]))
+            out.append(table(lines[i:j], name, links))
             i = j
             continue
         m = re.match(r"(-|\d+\.) ", l)
@@ -140,25 +226,29 @@ def markdown(text, name, base):
                     items[-1] += " " + lines[i].strip()
                 i += 1
             tag = "ol" if ordered else "ul"
-            out.append("<%s>%s</%s>" % (tag, "".join("<li>%s</li>" % inline(t) for t in items), tag))
+            out.append("<%s>%s</%s>" % (tag, "".join("<li>%s</li>" % inline(t, name, links) for t in items), tag))
             continue
         para = []
         while i < len(lines) and lines[i].strip() and not re.match(r"(#{1,3} |```|\||(-|\d+\.) |!\[)", lines[i]):
             para.append(lines[i].strip())
             i += 1
-        out.append("<p>%s</p>" % inline(" ".join(para)))
+        out.append("<p>%s</p>" % inline(" ".join(para), name, links))
     return "\n".join(out)
 
 
 def build(guide=GUIDE):
     chapters_dir = os.path.join(guide, "chapters")
     names = sorted(n for n in os.listdir(chapters_dir) if re.match(r"\d{2}-.+\.md$", n))
+    texts = {n: open(os.path.join(chapters_dir, n), encoding="utf-8").read() for n in names}
+    amap, ids = anchors(texts)
+    links = Links(amap)
     parts, toc = [], []
     for n in names:
-        text = open(os.path.join(chapters_dir, n), encoding="utf-8").read()
-        m = re.search(r"^# (.+)$", text, re.M)
-        toc.append('<li><a href="#%s">%s</a></li>' % (chapter_id(n), inline(m.group(1) if m else n)))
-        parts.append(markdown(text, n, chapters_dir))
+        m = re.search(r"^# (.+)$", texts[n], re.M)
+        toc.append('<li><a href="#%s">%s</a></li>' % (chapter_id(n), inline(m.group(1) if m else n, n, links)))
+        parts.append(markdown(texts[n], n, chapters_dir, ids[n], links))
+    if links.errors:
+        sys.exit("user-guide.py: broken links:\n  " + "\n  ".join(links.errors))
     title = open(os.path.join(guide, "title.html"), encoding="utf-8").read()
     return ("<!doctype html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
